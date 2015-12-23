@@ -11,7 +11,7 @@ is used as serialization format.
 Add this to your project dependencies:
 [![Clojars Project](http://clojars.org/io.replikativ/kabel/latest-version.svg)](http://clojars.org/io.replikativ/kabel)
 
-From [examples/pingpong.clj](pingpong.clj):
+From [./examples/pingpong.clj](pingpong.clj):
 
 ~~~ clojure
 (ns kabel.examples.pingpong
@@ -71,10 +71,10 @@ From [examples/pingpong.clj](pingpong.clj):
 
   )
 
-The client-side works the same in ClojureScript from the browser.
 
 ~~~
 
+The client-side works the same in ClojureScript from the browser.
 
 ## TODO
 - factor platform neutral logging

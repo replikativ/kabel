@@ -5,7 +5,7 @@
             [kabel.middleware.log :refer [logger]]
 
             [full.async :refer [go-try go-loop-try> <? <??]]
-            [clojure.core.async :refer [go-loop <!>! >!! timeout chan]]))
+            [clojure.core.async :refer [go-loop <! >! >!! timeout chan]]))
 
 ;; track errors (this happens through full.async recursively through
 ;; all participating subsystems)

@@ -15,8 +15,6 @@
            [com.cognitect.transit.impl WriteHandlers$MapWriteHandler]))
 
 
-(defn now [] (java.util.Date.))
-
 (def singleton-http-client (cli/create-client))
 
 (defn client-connect!
@@ -25,7 +23,9 @@
   protocol of url. read-handlers and write-handlers are atoms
   according to incognito."
   ([url err-ch]
-   (client-connect! url err-ch (atom {}) (atom {}) singleton-http-client))
+   (client-connect! url err-ch (atom {}) (atom {})))
+  ([url err-ch read-handlers write-handlers]
+   (client-connect! url err-ch read-handlers write-handlers singleton-http-client))
   ([url err-ch read-handlers write-handlers http-client]
    (let [host (.getHost (java.net.URL. (str/replace url #"^ws" "http")))
          in (chan)

@@ -14,7 +14,7 @@
 (defn- get-error-ch [peer]
   (get-in @peer [:volatile :error-ch]))
 
-(defn drain [[peer [in out]]]
+(defn- drain [[peer [in out]]]
   (go-loop-try> (get-error-ch peer)
                 [i (<? in)]
                 (when i
@@ -28,8 +28,7 @@
          [c-in c-out] (<? (client-connect! url
                                            (get-error-ch peer)
                                            read-handlers
-                                           write-handlers
-                                           kabel.platform/singleton-http-client))]
+                                           write-handlers))]
      (drain (middleware [peer [c-in c-out]])))))
 
 (defn client-peer

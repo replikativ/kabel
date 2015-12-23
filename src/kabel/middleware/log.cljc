@@ -1,0 +1,30 @@
+(ns kabel.middleware.log
+  "Logging middleware."
+  (:require [kabel.platform-log :refer [debug info warn error]]
+            [clojure.set :as set]
+            #?(:clj [clojure.core.async :as async
+                      :refer [<! >! chan go put! go-loop close!]]
+               :cljs [cljs.core.async :as async :refer [<! >! chan put! close!]]))
+  #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)])))
+
+
+(defn logger
+  "Appends messages of in and out to log-atom under [type :in/:out] to a vector."
+  [log-atom type [peer [in out]]]
+  (let [new-in (chan)
+        new-out (chan)]
+    (go-loop [i (<! in)]
+      (if i
+        (do
+          (swap! log-atom update-in [type :in] (fnil conj []) i)
+          (>! new-in i)
+          (recur (<! in)))
+        (close! new-in)))
+    (go-loop [o (<! new-out)]
+      (if o
+        (do
+          (swap! log-atom update-in [type :out] (fnil conj []) o)
+          (>! out o)
+          (recur (<! new-out)))
+        (close! new-out)))
+    [peer [new-in new-out]]))

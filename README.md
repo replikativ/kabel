@@ -76,6 +76,18 @@ From [pingpong.clj](./examples/pingpong.clj):
 
 The client-side works the same in ClojureScript from the browser.
 
+## Middlewares
+
+You can find general middlewares in the corresponding
+folder. In general they themselves form a "wire" and can filter,
+transform, inject and pass through messages. Useful middlewares still
+missing:
+
+- authentication, e.g. two-factor over e-mail
+- qos monitoring, latency and throughput measures
+- remote debugging, sending full.async exceptions back to the server
+- other usefull `ring` middlewares which should be ported?  - ...
+
 ## TODO
 - factor platform neutral logging
 - implement node.js websocket server

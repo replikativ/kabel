@@ -3,8 +3,33 @@
 A minimal, modern connection library modelling a bidirectional wire to
 pass clojure values between endpoints. Peers in Clojure and
 ClojureScript are symmetric and hence allow symmetric cross-platform
-implementations. At the moment web-sockets are supported and transit
-is used as serialization format.
+implementations. At the moment web-sockets are used and transit is the
+serialization format.
+
+## Rational
+
+Instead of implementing a `REST` interface websockets provide several
+benefits, even if you do single requests. Most importantly the
+distinction between server and client is unnecessary, because both can
+push messages to each other, effectively having *one input* and *one
+output* channel. Together with edn messages over the wire this
+/simplifies/ the semantics significantly. The tradeoff is that `REST` is
+standardized and offers better interoperablity for other clients.
+
+Since we work on a crossplatform p2p software for distributed
+datatypes with [replikativ](https://github.com/replikativ/replikativ),
+we could not to reuse any of the other ClojureScript websocket
+libraries. For us all IO happens over the input and output channel
+with `core.async`, so we can implement cross-platform functionality in
+a very terse and expressive fashion, e.g. in the [pull-hooks for
+replikativ](https://github.com/replikativ/replikativ/blob/master/src/replikativ/p2p/hooks.cljc). But
+you do not need to write platform neutral symmetric middlewares, so on
+the JVM you can of course do IO without `core.async`.
+
+We also extended and build on
+[full.async](https://github.com/fullcontact/full.monty/) to catch all
+exceptions in an Erlang style monitoring fashion and propagate them
+back through a parametrizable error channel.
 
 ## Usage
 

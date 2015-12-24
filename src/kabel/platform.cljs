@@ -3,6 +3,7 @@
             [cognitect.transit :as transit]
             [incognito.transit :refer [incognito-read-handler incognito-write-handler]]
             [goog.net.WebSocket]
+            [goog.Uri]
             [goog.events :as events]
             [cljs.core.async :as async :refer (take! put! close! chan)])
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]))

@@ -13,7 +13,7 @@ benefits, even if you do single requests. Most importantly the
 distinction between server and client is unnecessary, because both can
 push messages to each other, effectively having *one input* and *one
 output* channel. Together with edn messages over the wire this
-/simplifies/ the semantics significantly. The tradeoff is that `REST` is
+_simplifies_ the semantics significantly. The tradeoff is that `REST` is
 standardized and offers better interoperablity for other clients.
 
 Since we work on a crossplatform p2p software for distributed
@@ -34,6 +34,7 @@ back through a parametrizable error channel.
 ## Usage
 
 Add this to your project dependencies:
+
 [![Clojars Project](http://clojars.org/io.replikativ/kabel/latest-version.svg)](http://clojars.org/io.replikativ/kabel)
 
 From [pingpong.clj](./examples/pingpong.clj):

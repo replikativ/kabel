@@ -5,10 +5,13 @@
             #?(:clj [full.async :refer [<? <<? go-for go-try go-loop-try go-loop-try> alt?]])
             [kabel.platform :refer [client-connect!]
              :include-macros true]
+            [full.cljs.async :refer [throw-if-throwable]]
             #?(:clj [clojure.core.async :as async
                      :refer [>! timeout chan put! pub sub unsub close!]]
                :cljs [cljs.core.async :as async
-                      :refer [>! timeout chan put! pub sub unsub close!]])))
+                      :refer [>! timeout chan put! pub sub unsub close!]]))
+  #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)]
+                            [full.cljs.async :refer [<<? <? go-for go-try go-loop-try go-loop-try> alt?]])))
 
 
 (defn- get-error-ch [peer]

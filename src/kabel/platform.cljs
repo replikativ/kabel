@@ -17,7 +17,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
   protocol of url. read-opts is ignored on cljs for now, use the
   platform-wide reader setup."
   ([url err-ch]
-   (client-connect! url err-ch read-handlers write-handlers))
+   (client-connect! url err-ch (atom {}) (atom {})))
   ([url err-ch read-handlers write-handlers]
    (let [host (.getDomain (goog.Uri. url))
          channel (goog.net.WebSocket. false)

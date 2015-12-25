@@ -3,8 +3,9 @@
 A minimal, modern connection library modelling a bidirectional wire to
 pass clojure values between endpoints. Peers in Clojure and
 ClojureScript are symmetric and hence allow symmetric cross-platform
-implementations. At the moment web-sockets are used and transit is the
+implementations. kabel uses web-sockets and transit is the
 serialization format.
+
 
 ## Rationale
 
@@ -16,12 +17,15 @@ output* channel. Together with `edn` messages over the wire this
 _simplifies_ the semantics significantly. The tradeoff is that `REST` is
 standardized and offers better interoperablity for other clients.
 
-Since we work on a crossplatform `p2p` software for confluent distributed
-datatypes with [replikativ](https://github.com/replikativ/replikativ),
-we could not to reuse any of the other ClojureScript websocket
-libraries. For us _all_ IO happens over the input and output channel
-with `core.async`, so we can implement *cross-platform* functionality in
-a very terse and expressive fashion, e.g. in the [pull-hooks for
+Since we work on a crossplatform `p2p` software for confluent
+distributed datatypes with
+[replikativ](https://github.com/replikativ/replikativ), we could not
+to reuse any of the other ClojureScript client-side only websocket
+libraries, e.g. [sente](https://github.com/ptaoussanis/sente) or
+[chord](https://github.com/jarohen/chord). For us _all_ IO happens
+over the input and output channel with `core.async`, so we can
+implement *cross-platform* functionality in a very terse and
+expressive fashion, e.g. in the [pull-hooks for
 replikativ](https://github.com/replikativ/replikativ/blob/master/src/replikativ/p2p/hooks.cljc). But
 you do not need to write platform neutral symmetric middlewares, so on
 the JVM you can of course do IO without `core.async`.
@@ -102,6 +106,26 @@ From [pingpong.clj](./examples/pingpong.clj):
 
 The client-side works the same in ClojureScript from the browser.
 
+## Design
+
+![Example pub-sub architecture of replikativ](./peering.png)
+
+There is a pair of channels for each connection, but at the core the
+peer has `pub-sub` architecture. Besides using some middleware
+specific shared memory like a database you can more transparently pass
+messages to other clients and middlewares through this pub-sub core or
+subscribe to specific messages types on it. It uses the pub-sub
+semantics of `core.async`:
+
+~~~ clojure
+(let [[bus-in bus-out] (get-in @peer [:volatile :chans])
+      b-chan (chan)]
+  (async/sub bus-out :broadcast b-chan)
+  (async/put! bus-in {:type :broadcast :hello :everybody})
+  (<!! b-chan))
+~~~
+
+
 ## Middlewares
 
 You can find general middlewares in the corresponding
@@ -113,6 +137,13 @@ missing:
 - qos monitoring, latency and throughput measures
 - remote debugging, sending full.async exceptions back to the server
 - other usefull `ring` middlewares which should be ported?  - ...
+
+## Connectivity
+
+ore transport alternatives like long-polling with
+SSEs, WebRTC or normal sockets should not be hard to add.
+
+
 
 ## TODO
 - factor platform neutral logging

@@ -1,4 +1,4 @@
-(defproject io.replikativ/kabel "0.1.0"
+(defproject io.replikativ/kabel "0.1.2-SNAPSHOT"
   :description "A library for simple wire-like connectivity semantics."
   :url "https://github.com/replikativ/kabel"
   :license {:name "Eclipse Public License"
@@ -6,7 +6,8 @@
   :dependencies [[org.clojure/clojure "1.7.0"]
                  [org.clojure/clojurescript "1.7.107"]
                  [org.clojure/core.async "0.2.374"]
-                 [http-kit "2.1.19"]
+
+                 [http-kit "2.1.21-alpha2"]
                  [http.async.client "0.6.0"]
 
                  [com.cognitect/transit-cljs "0.8.232"] ;; TODO remove

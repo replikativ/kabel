@@ -1,10 +1,11 @@
 # kabel
 
-A minimal, modern connection library modelling a bidirectional wire to
-pass clojure values between endpoints. Peers in Clojure and
-ClojureScript are symmetric and hence allow symmetric cross-platform
-implementations. kabel uses web-sockets and transit is the
-serialization format.
+kabel (German for calbe/wire) is a minimal, modern connection library
+modelling a bidirectional wire to pass Clojure values between
+endpoints. Peers in Clojure and ClojureScript are symmetric and hence
+allow symmetric cross-platform implementations. Clojure peers can
+connect to Clojure and ClojureScript peers in the same way and vice
+versa. kabel uses web-sockets and transit is the serialization format.
 
 
 ## Rationale
@@ -18,7 +19,7 @@ _simplifies_ the semantics significantly. The tradeoff is that `REST` is
 standardized and offers better interoperablity for other clients.
 
 Since we work on a crossplatform `p2p` software for confluent
-distributed datatypes with
+replicated datatypes with
 [replikativ](https://github.com/replikativ/replikativ), we could not
 to reuse any of the other ClojureScript client-side only websocket
 libraries, e.g. [sente](https://github.com/ptaoussanis/sente) or
@@ -111,10 +112,10 @@ The client-side works the same in ClojureScript from the browser.
 ![Example pub-sub architecture of replikativ](./peering.png)
 
 There is a pair of channels for each connection, but at the core the
-peer has `pub-sub` architecture. Besides using some middleware
+peer has a `pub-sub` architecture. Besides using some middleware
 specific shared memory like a database you can more transparently pass
 messages to other clients and middlewares through this pub-sub core or
-subscribe to specific messages types on it. It uses the pub-sub
+subscribe to specific message types on it. It uses the pub-sub
 semantics of `core.async`:
 
 ~~~ clojure
@@ -133,14 +134,14 @@ folder. In general they themselves form a "wire" and can filter,
 transform, inject and pass through messages. Useful middlewares still
 missing:
 
-- authentication, e.g. two-factor over e-mail
-- qos monitoring, latency and throughput measures
+- Passwordless authentication (and authorisation) based on email verification or password and inter-peer trust network as p2p middleware.
+- QoS monitoring, latency and throughput measures
 - remote debugging, sending full.async exceptions back to the server
 - other usefull `ring` middlewares which should be ported?  - ...
 
 ## Connectivity
 
-ore transport alternatives like long-polling with
+More transport alternatives like long-polling with
 SSEs, WebRTC or normal sockets should not be hard to add.
 
 

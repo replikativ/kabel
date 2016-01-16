@@ -45,14 +45,22 @@ Only supports websocket at the moment, but is supposed to dispatch on
                             (error "Cannot read transit msg:" e)
                             (put! err-ch e)))))
        (events/listen goog.net.WebSocket.EventType.CLOSED
-                      (fn [evt] (close! in) (.close channel) (close! opener)))
+                      (fn [evt]
+                        (close! in)
+                        (put! err-ch evt)
+                        (.close channel)
+                        (close! opener)))
        (events/listen goog.net.WebSocket.EventType.OPENED
                       (fn [evt] (put! opener [in out]) (close! opener)))
        (events/listen goog.net.WebSocket.EventType.ERROR
                       (fn [evt]
                         (error "WebSocket error:" evt)
                         (put! err-ch evt) (close! opener)))
-       (.open url))
+       (try
+         (.open channel url) ;; throws on connection failure? doesn't catch?
+         (catch js/Object e
+           (put! err-ch e)
+           (close! opener))))
      ((fn sender []
         (take! out
                (fn [m]

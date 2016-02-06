@@ -17,7 +17,7 @@
 (defn- get-error-ch [peer]
   (get-in @peer [:volatile :error-ch]))
 
-(defn- drain [[peer [in out]]]
+(defn drain [[peer [in out]]]
   (go-loop-try> (get-error-ch peer)
                 [i (<? in)]
                 (when i

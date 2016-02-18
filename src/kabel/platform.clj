@@ -54,7 +54,7 @@
                                                       {:handlers {"incognito" (incognito-read-handler read-handlers)}})
                                       m (transit/read reader)]
                                   (debug "client received transit blob from:" url (:type m))
-                                  (async/put! in (with-meta m {:host host})))))
+                                  (async/put! in (assoc m :peer host)))))
                       :close (fn [ws code reason]
                                (info "closing" ws code reason)
                                (async/close! in)
@@ -122,7 +122,7 @@
                                                        m (transit/read reader)]
                                                    (debug "server received transit blob from:"
                                                           url (apply str (take 100 (str m))))
-                                                   (async/put! in (with-meta m {:host host}))))))))))]
+                                                   (async/put! in (assoc m :peer host))))))))))]
      {:new-conns conns
       :channel-hub channel-hub
       :url url

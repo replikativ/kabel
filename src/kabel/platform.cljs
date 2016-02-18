@@ -35,11 +35,11 @@ Only supports websocket at the moment, but is supposed to dispatch on
                                                                "incognito" (incognito-read-handler read-handlers)}})
                                 fr (js/FileReader.)]
                             (set! (.-onload fr) #(put! in
-                                                       (with-meta
-                                                         (transit/read
-                                                          reader
-                                                          (js/String. (.. % -target -result)))
-                                                         {:host host})))
+                                                       (assoc
+                                                        (transit/read
+                                                         reader
+                                                         (js/String. (.. % -target -result)))
+                                                        :peer host)))
                             (.readAsText fr (.-message evt)))
                           (catch js/Error e
                             (error "Cannot read transit msg:" e)

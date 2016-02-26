@@ -1,6 +1,6 @@
 # kabel
 
-kabel (German for calbe/wire) is a minimal, modern connection library
+kabel (German for cable/wire) is a minimal, modern connection library
 modelling a bidirectional wire to pass Clojure values between
 endpoints. Peers in Clojure and ClojureScript are symmetric and hence
 allow symmetric cross-platform implementations. Clojure peers can
@@ -150,9 +150,15 @@ SSEs, WebRTC or normal sockets should not be hard to add.
 - factor platform neutral logging
 - implement node.js websocket server
 
+## Changelog
+### 0.1.2
+    - properly close cljs client connection on initial error
+    - add :sender peer-id to outgoing messages
+    - add :connection url to incoming messages
+
 ## License
 
-Copyright © 2015 Konrad Kühne, Christian Weilbach
+Copyright © 2015-2016 Christian Weilbach, 2015 Konrad Kühne
 
 Distributed under the Eclipse Public License either version 1.0 or (at
 your option) any later version.

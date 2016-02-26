@@ -17,11 +17,10 @@
 Only supports websocket at the moment, but is supposed to dispatch on
   protocol of url. read-opts is ignored on cljs for now, use the
   platform-wide reader setup."
-  ([url err-ch]
-   (client-connect! url err-ch (atom {}) (atom {})))
-  ([url err-ch read-handlers write-handlers]
-   (let [host (.getDomain (goog.Uri. url))
-         channel (goog.net.WebSocket. false)
+  ([url err-ch peer-id]
+   (client-connect! url err-ch peer-id (atom {}) (atom {})))
+  ([url err-ch peer-id read-handlers write-handlers]
+   (let [channel (goog.net.WebSocket. false)
          in (chan)
          out (chan)
          opener (chan)]
@@ -39,7 +38,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                                                         (transit/read
                                                          reader
                                                          (js/String. (.. % -target -result)))
-                                                        :peer host)))
+                                                        :connection url)))
                             (.readAsText fr (.-message evt)))
                           (catch js/Error e
                             (error "Cannot read transit msg:" e)
@@ -78,7 +77,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                            writer (transit/writer
                                    :json
                                    {:handlers {"default" i-write-handler}})]
-                       (.send channel (js/Blob. #js [(transit/write writer m)])))
+                       (.send channel (js/Blob. #js [(transit/write writer (assoc m :sender peer-id))])))
                      (catch js/Error e
                        (error "Cannot send transit msg: " e)
                        (put! err-ch e)))

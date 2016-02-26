@@ -22,13 +22,12 @@
   Only supports websocket at the moment, but is supposed to dispatch on
   protocol of url. read-handlers and write-handlers are atoms
   according to incognito."
-  ([url err-ch]
-   (client-connect! url err-ch (atom {}) (atom {})))
-  ([url err-ch read-handlers write-handlers]
-   (client-connect! url err-ch read-handlers write-handlers singleton-http-client))
-  ([url err-ch read-handlers write-handlers http-client]
-   (let [host (.getHost (java.net.URL. (str/replace url #"^ws" "http")))
-         in (chan)
+  ([url err-ch peer-id]
+   (client-connect! url err-ch peer-id (atom {}) (atom {})))
+  ([url err-ch peer-id read-handlers write-handlers]
+   (client-connect! url err-ch peer-id read-handlers write-handlers singleton-http-client))
+  ([url err-ch peer-id read-handlers write-handlers http-client]
+   (let [in (chan)
          out (chan)
          opener (chan)]
      (try
@@ -41,7 +40,7 @@
                                               (with-open [baos (ByteArrayOutputStream.)]
                                                 (let [writer (transit/writer baos :json
                                                                              {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
-                                                  (transit/write writer m ))
+                                                  (transit/write writer (assoc m :sender peer-id) ))
                                                 (cli/send ws :byte (.toByteArray baos)))
                                               (recur (<? out))))
                               (async/put! opener [in out])
@@ -54,7 +53,7 @@
                                                       {:handlers {"incognito" (incognito-read-handler read-handlers)}})
                                       m (transit/read reader)]
                                   (debug "client received transit blob from:" url (:type m))
-                                  (async/put! in (assoc m :peer host)))))
+                                  (async/put! in (assoc m :connection url)))))
                       :close (fn [ws code reason]
                                (info "closing" ws code reason)
                                (async/close! in)
@@ -81,9 +80,9 @@
   Returns a map to run a peer with a platform specific server handler
   under :handler.  read-handlers and write-handlers are atoms
   according to incognito."
-  ([url err-ch]
-   (create-http-kit-handler! url err-ch (atom {}) (atom {})))
-  ([url err-ch read-handlers write-handlers]
+  ([url err-ch peer-id]
+   (create-http-kit-handler! url err-ch peer-id (atom {}) (atom {})))
+  ([url err-ch peer-id read-handlers write-handlers]
    (let [channel-hub (atom {})
          conns (chan)
          handler (fn [request]
@@ -102,7 +101,7 @@
                                              (let [writer (transit/writer baos :json
                                                                           {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
                                                (debug "server sending msg:" url (:type m))
-                                               (transit/write writer m)
+                                               (transit/write writer (assoc m :sender peer-id))
                                                (debug "server sent transit msg"))
                                              (send! channel ^bytes (.toByteArray baos))))
                                          (warn "dropping msg because of closed channel: " url (pr-str m)))
@@ -113,7 +112,7 @@
                                            (async/close! in)))
                        (on-receive channel (fn [data]
                                              (let [blob data
-                                                   host (:remote-addr request)]
+                                                   connection (:remote-addr request)]
                                                (debug "received byte message")
                                                (with-open [bais (ByteArrayInputStream. blob)]
                                                  (let [reader
@@ -122,7 +121,7 @@
                                                        m (transit/read reader)]
                                                    (debug "server received transit blob from:"
                                                           url (apply str (take 100 (str m))))
-                                                   (async/put! in (assoc m :peer host))))))))))]
+                                                   (async/put! in (assoc m :connection connection))))))))))]
      {:new-conns conns
       :channel-hub channel-hub
       :url url
@@ -133,7 +132,7 @@
 
 (defn start [peer]
   (when-let [handler (-> @peer :volatile :handler)]
-    (println "starting" (:name @peer))
+    (println "starting" (:id @peer))
     (swap! peer assoc-in [:volatile :server]
            (run-server handler {:port (->> (-> @peer :volatile :url)
                                            (re-seq #":(\d+)")

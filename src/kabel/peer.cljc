@@ -25,20 +25,22 @@
 
 (defn connect
   "Connect peer to url."
-  [peer url]
+  [peer url error-ch]
   (go-try
-   (let [{{:keys [middleware read-handlers write-handlers]} :volatile} @peer
+   (let [{{:keys [middleware read-handlers write-handlers]} :volatile
+          :keys [id]} @peer
          [c-in c-out] (<? (client-connect! url
-                                           (get-error-ch peer)
+                                           error-ch
+                                           id
                                            read-handlers
                                            write-handlers))]
      (drain (middleware [peer [c-in c-out]])))))
 
 (defn client-peer
   "Creates a client-side peer only."
-  ([name err-ch middleware]
-   (client-peer name err-ch middleware (atom {}) (atom {})))
-  ([name err-ch middleware read-handlers write-handlers]
+  ([id err-ch middleware]
+   (client-peer id err-ch middleware (atom {}) (atom {})))
+  ([id err-ch middleware read-handlers write-handlers]
    (let [log (atom {})
          bus-in (chan)
          bus-out (pub bus-in :type)]
@@ -48,14 +50,14 @@
                        :write-handlers write-handlers
                        :chans [bus-in bus-out]
                        :error-ch err-ch}
-            :name name}))))
+            :id id}))))
 
 
 (defn server-peer
   "Constructs a listening peer."
-  ([handler name err-ch middleware]
-   (server-peer handler name err-ch middleware (atom {}) (atom {})))
-  ([handler name err-ch middleware read-handlers write-handlers]
+  ([handler id err-ch middleware]
+   (server-peer handler id err-ch middleware (atom {}) (atom {})))
+  ([handler id err-ch middleware read-handlers write-handlers]
    (let [{:keys [new-conns url]} handler
          log (atom {})
          bus-in (chan)
@@ -67,7 +69,8 @@
                                        :log log
                                        :error-ch err-ch
                                        :chans [bus-in bus-out]})
-                     :name (:url handler)})]
+                     :addresses #{(:url handler)}
+                     :id id})]
      (go-loop-try> err-ch [[in out] (<? new-conns)]
                    (drain (middleware [peer [in out]]))
                    (recur (<? new-conns)))

@@ -15,8 +15,6 @@
            [com.cognitect.transit.impl WriteHandlers$MapWriteHandler]))
 
 
-(def singleton-http-client (cli/create-client))
-
 (defn client-connect!
   "Connects to url. Puts [in out] channels on return channel when ready.
   Only supports websocket at the moment, but is supposed to dispatch on
@@ -25,6 +23,7 @@
   ([url err-ch peer-id]
    (client-connect! url err-ch peer-id (atom {}) (atom {})))
   ([url err-ch peer-id read-handlers write-handlers]
+   (defonce singleton-http-client (cli/create-client))
    (client-connect! url err-ch peer-id read-handlers write-handlers singleton-http-client))
   ([url err-ch peer-id read-handlers write-handlers http-client]
    (let [in (chan)

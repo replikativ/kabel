@@ -21,7 +21,7 @@ standardized and offers better interoperablity for other clients.
 Since we work on a crossplatform `p2p` software for confluent
 replicated datatypes with
 [replikativ](https://github.com/replikativ/replikativ), we could not
-to reuse any of the other ClojureScript client-side only websocket
+reuse any of the other ClojureScript client-side only websocket
 libraries, e.g. [sente](https://github.com/ptaoussanis/sente) or
 [chord](https://github.com/jarohen/chord). For us _all_ IO happens
 over the input and output channel with `core.async`, so we can
@@ -69,7 +69,7 @@ From [pingpong.clj](./examples/pingpong.clj):
     (go-loop [p (<! in)]
       (when p
         (info "received ping, sending pong")
-        (>! out {:type :pong})
+        (>! out {:type :pong}) ;; messages need to be maps
         (>! new-in p) ;; pass along (or not...)
         (recur (<! in))))
     [peer [new-in out]]))
@@ -83,8 +83,6 @@ From [pingpong.clj](./examples/pingpong.clj):
 (start remote-peer)
 #_(stop remote-peer)
 
-
-
 (defn ping [[peer [in out]]]
   (go-loop []
     (<! (timeout 5000))
@@ -95,13 +93,6 @@ From [pingpong.clj](./examples/pingpong.clj):
 (def local-peer (client-peer "CLIENT" err-ch ping))
 
 (connect local-peer "ws://127.0.0.1:9090/")
-
-(comment
-  ;; inspect server side message exchange through logging middleware
-  @log-atom
-
-  )
-
 
 ~~~
 
@@ -129,12 +120,17 @@ semantics of `core.async`:
 
 ## Middlewares
 
-You can find general middlewares in the corresponding
-folder. In general they themselves form a "wire" and can filter,
-transform, inject and pass through messages. Useful middlewares still
-missing:
+You can find general middlewares in the corresponding folder. In
+general middlewares themselves form a "wire" and can filter,
+transform, inject and pass through messages.
 
-- Passwordless authentication (and authorisation) based on email verification or password and inter-peer trust network as p2p middleware.
+We provide the following middlewares separately: - [Passwordless
+authentication (and
+authorisation)](https://github.com/replikativ/kabel-auth) based on
+email verification or password and inter-peer trust network as p2p
+middleware.
+
+Useful middlewares still missing:
 - QoS monitoring, latency and throughput measures
 - remote debugging, sending full.async exceptions back to the server
 - other usefull `ring` middlewares which should be ported?  - ...
@@ -143,7 +139,6 @@ missing:
 
 More transport alternatives like long-polling with
 SSEs, WebRTC or normal sockets should not be hard to add.
-
 
 
 ## TODO

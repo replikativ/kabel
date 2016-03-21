@@ -146,6 +146,9 @@ SSEs, WebRTC or normal sockets should not be hard to add.
 - implement node.js websocket server
 
 ## Changelog
+### 0.1.4
+    - expose consistent host ip
+
 ### 0.1.3
     - do not initialize http-client on compile time
       fixes aot uberjar compilation

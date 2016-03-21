@@ -28,7 +28,8 @@
   ([url err-ch peer-id read-handlers write-handlers http-client]
    (let [in (chan)
          out (chan)
-         opener (chan)]
+         opener (chan)
+         host (.getHost (java.net.URL. (.replace url "ws" "http")))]
      (try
        (cli/websocket http-client url
                       :open (fn [ws]
@@ -52,7 +53,7 @@
                                                       {:handlers {"incognito" (incognito-read-handler read-handlers)}})
                                       m (transit/read reader)]
                                   (debug "client received transit blob from:" url (:type m))
-                                  (async/put! in (assoc m :connection url)))))
+                                  (async/put! in (assoc m :host host)))))
                       :close (fn [ws code reason]
                                (info "closing" ws code reason)
                                (async/close! in)
@@ -111,7 +112,7 @@
                                            (async/close! in)))
                        (on-receive channel (fn [data]
                                              (let [blob data
-                                                   connection (:remote-addr request)]
+                                                   host (:remote-addr request)]
                                                (debug "received byte message")
                                                (with-open [bais (ByteArrayInputStream. blob)]
                                                  (let [reader
@@ -120,7 +121,7 @@
                                                        m (transit/read reader)]
                                                    (debug "server received transit blob from:"
                                                           url (apply str (take 100 (str m))))
-                                                   (async/put! in (assoc m :connection connection))))))))))]
+                                                   (async/put! in (assoc m :host host))))))))))]
      {:new-conns conns
       :channel-hub channel-hub
       :url url

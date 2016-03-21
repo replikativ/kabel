@@ -23,7 +23,8 @@ Only supports websocket at the moment, but is supposed to dispatch on
    (let [channel (goog.net.WebSocket. false)
          in (chan)
          out (chan)
-         opener (chan)]
+         opener (chan)
+         host (.getDomain (goog.Uri. (.replace url "ws" "http")))]
      (info "CLIENT-CONNECT" url)
      (doto channel
        (events/listen goog.net.WebSocket.EventType.MESSAGE
@@ -38,7 +39,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                                                         (transit/read
                                                          reader
                                                          (js/String. (.. % -target -result)))
-                                                        :connection url)))
+                                                        :host host)))
                             (.readAsText fr (.-message evt)))
                           (catch js/Error e
                             (error "Cannot read transit msg:" e)

@@ -1,17 +1,15 @@
 (ns kabel.platform-log
   "Logging for Clojure."
-  (:require [taoensso.timbre :as timbre]))
+  (:import [org.slf4j LoggerFactory]))
 
+(defmacro debug [& args]
+  `(.debug (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))
 
-(defn debug [& args]
-  ;; wrapping macros ...
-  (timbre/debug args))
+(defmacro info [& args]
+  `(.info (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))
 
-(defn info [& args]
-  (timbre/info args))
+(defmacro warn [& args]
+  `(.warn (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))
 
-(defn warn [& args]
-  (timbre/warn args))
-
-(defn error [& args]
-  (timbre/error args))
+(defmacro error [& args]
+  `(.error (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))

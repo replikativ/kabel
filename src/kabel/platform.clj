@@ -7,7 +7,7 @@
             [incognito.transit :refer [incognito-read-handler incognito-write-handler]]
             [full.async :refer [<? <?? go-try go-loop-try>]]
             [clojure.core.async :as async
-             :refer [>! timeout chan alt!]]
+             :refer [>! timeout chan alt! put! close!]]
             [org.httpkit.server :refer :all]
             [http.async.client :as cli]
             [cognitect.transit :as transit])
@@ -44,34 +44,44 @@
                                                 (cli/send ws :byte (.toByteArray baos)))
                                               (recur (<? out))))
                               (async/put! opener [in out])
-                              (async/close! opener))
+                              (close! opener))
                       :byte (fn [ws ^bytes data]
-                              (debug "received byte message")
-                              (with-open [bais (ByteArrayInputStream. data)]
-                                (let [reader
-                                      (transit/reader bais :json
-                                                      {:handlers {"incognito" (incognito-read-handler read-handlers)}})
-                                      m (transit/read reader)]
-                                  (debug "client received transit blob from:" url (:type m))
-                                  (async/put! in (assoc m :host host)))))
+                              (try
+                                (debug "received byte message")
+                                (with-open [bais (ByteArrayInputStream. data)]
+                                  (let [reader
+                                        (transit/reader bais :json
+                                                        {:handlers {"incognito" (incognito-read-handler read-handlers)}})
+                                        m (transit/read reader)]
+                                    (debug "client received transit blob from:" url (:type m))
+                                    (async/put! in (assoc m :host host))))
+                                (catch Exception e
+                                  (put! err-ch (ex-info "Cannot receive data." {:url url
+                                                                                :data data
+                                                                                :error e}))
+                                  (close! in))))
                       :close (fn [ws code reason]
-                               (info "closing" ws code reason)
-                               (async/close! in)
-                               (async/close! out))
+                               (let [e (ex-info "Connection closed!" {:code code
+                                                                      :reason reason})]
+                                 (error "closing" url "with" code reason)
+                                 (close! in)
+                                 (put! err-ch e)
+                                 (try (put! opener e) (catch Exception e))
+                                 (close! opener)))
                       :error (fn [ws err] (error "ws-error" url err)
                                (async/put! opener (ex-info "ws-error"
                                                            {:type :websocket-connection-error
                                                             :url url
                                                             :error err}))
-                               (async/close! opener)))
+                               (close! opener)))
        (catch Exception e
          (error "client-connect error:" url e)
          (async/put! opener (ex-info "client-connect error"
                                      {:type :websocket-connection-error
                                       :url url
                                       :error e}))
-         (async/close! in)
-         (async/close! opener)))
+         (close! in)
+         (close! opener)))
      opener)))
 
 
@@ -107,21 +117,31 @@
                                          (warn "dropping msg because of closed channel: " url (pr-str m)))
                                        (recur (<? out))))
                        (on-close channel (fn [status]
-                                           (info "channel closed:" status)
+                                           (let [e (ex-info "Connection closed!" {:status status})
+                                                 host (:remote-addr request)]
+                                             (warn "channel closed:" host "status: " status)
+                                             (put! err-ch e))
                                            (swap! channel-hub dissoc channel)
-                                           (async/close! in)))
+                                           (close! in)))
                        (on-receive channel (fn [data]
                                              (let [blob data
                                                    host (:remote-addr request)]
                                                (debug "received byte message")
-                                               (with-open [bais (ByteArrayInputStream. blob)]
-                                                 (let [reader
-                                                       (transit/reader bais :json
-                                                                       {:handlers {"incognito" (incognito-read-handler read-handlers)}})
-                                                       m (transit/read reader)]
-                                                   (debug "server received transit blob from:"
-                                                          url (apply str (take 100 (str m))))
-                                                   (async/put! in (assoc m :host host))))))))))]
+                                               (try
+                                                 (with-open [bais (ByteArrayInputStream. blob)]
+                                                   (let [reader
+                                                         (transit/reader bais :json
+                                                                         {:handlers {"incognito" (incognito-read-handler read-handlers)}})
+                                                         m (transit/read reader)]
+                                                     (debug "server received transit blob from:"
+                                                            url (apply str (take 100 (str m))))
+                                                     (async/put! in (assoc m :host host))))
+
+                                                 (catch Exception e
+                                                   (put! err-ch (ex-info "Cannot receive data." {:data data
+                                                                                                 :host host
+                                                                                                 :error e}))
+                                                   (close! in)))))))))]
      {:new-conns conns
       :channel-hub channel-hub
       :url url
@@ -149,7 +169,7 @@
   (when-let [hub (get-in @peer [:volatile :channel-hub])]
     (reset! hub {}))
   (when-let [in (-> @peer :volatile :chans first)]
-    (async/close! in)))
+    (close! in)))
 
 
 (comment

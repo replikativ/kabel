@@ -146,6 +146,9 @@ SSEs, WebRTC or normal sockets should not be hard to add.
 - implement node.js websocket server
 
 ## Changelog
+### 0.1.5
+    - use lightweight slf4j loggin
+
 ### 0.1.4
     - expose consistent host ip
 

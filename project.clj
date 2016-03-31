@@ -1,4 +1,4 @@
-(defproject io.replikativ/kabel "0.1.6"
+(defproject io.replikativ/kabel "0.1.7-SNAPSHOT"
   :description "A library for simple wire-like connectivity semantics."
   :url "https://github.com/replikativ/kabel"
   :license {:name "Eclipse Public License"
@@ -14,11 +14,11 @@
                                                         ;; once cljs
                                                         ;; works again
                                                         ;; without it
-                 [io.replikativ/incognito "0.2.0"]
                  [io.replikativ/hasch "0.3.0"]
 
 
-                 [es.topiq/full.async "0.2.8-beta1"]
+                 #_[es.topiq/full.async "0.2.8-beta1"]
+                 [io.replikativ/full.async "0.9.1-SNAPSHOT"]
                  [kordano/full.cljs.async "0.1.3-alpha"]
 
                  [org.slf4j/slf4j-api "1.7.12"]])

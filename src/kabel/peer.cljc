@@ -2,7 +2,8 @@
   "Peer 2 peer connectivity."
   (:require [kabel.platform-log :refer [debug info warn error]]
             [clojure.set :as set]
-            #?(:clj [full.async :refer [<? <<? go-for go-try go-loop-try go-loop-try> alt?]])
+            #?(:clj [full.async :refer [<? <<? go-try go-loop-try alt?]])
+            #?(:clj [full.lab :refer [go-loop-super]])
             [kabel.platform :refer [client-connect!]
              :include-macros true]
             #?(:cljs [full.cljs.async :refer [throw-if-throwable]])
@@ -11,17 +12,13 @@
                :cljs [cljs.core.async :as async
                       :refer [>! timeout chan put! pub sub unsub close!]]))
   #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)]
-                            [full.cljs.async :refer [<<? <? go-for go-try go-loop-try go-loop-try> alt?]])))
+                            [full.cljs.async :refer [<<? <? go-try go-loop-try alt?]])))
 
-
-(defn- get-error-ch [peer]
-  (get-in @peer [:volatile :error-ch]))
 
 (defn drain [[peer [in out]]]
-  (go-loop-try> (get-error-ch peer)
-                [i (<? in)]
-                (when i
-                  (recur (<? in)))))
+  (go-loop-super [i (<? in)]
+                 (when i
+                   (recur (<? in)))))
 
 (defn connect
   "Connect peer to url."
@@ -71,7 +68,7 @@
                                        :chans [bus-in bus-out]})
                      :addresses #{(:url handler)}
                      :id id})]
-     (go-loop-try> err-ch [[in out] (<? new-conns)]
-                   (drain (middleware [peer [in out]]))
-                   (recur (<? new-conns)))
+     (go-loop-super [[in out] (<? new-conns)]
+                    (drain (middleware [peer [in out]]))
+                    (recur (<? new-conns)))
      peer)))

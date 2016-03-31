@@ -4,9 +4,9 @@
             [clojure.set :as set]
             #?(:clj [clojure.core.async :as async
                      :refer [<! >! >!! <!! timeout chan alt! go put!
-                             filter< map< go-loop pub sub unsub close!]]
+                             go-loop pub sub unsub close!]]
                :cljs [cljs.core.async :as async
-                     :refer [<! >! timeout chan put! filter< map< pub sub unsub close!]]))
+                     :refer [<! >! timeout chan put! pub sub unsub close!]]))
   #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)])))
 
 

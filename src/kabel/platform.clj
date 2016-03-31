@@ -5,7 +5,8 @@
             [clojure.string :as str]
             [kabel.platform-log :refer [debug info warn error]]
             [incognito.transit :refer [incognito-read-handler incognito-write-handler]]
-            [full.async :refer [<? <?? go-try go-loop-try>]]
+            [full.async :refer [<? <?? go-try]]
+            [full.lab :refer [go-loop-super]]
             [clojure.core.async :as async
              :refer [>! timeout chan alt! put! close!]]
             [org.httpkit.server :refer :all]
@@ -34,7 +35,7 @@
        (cli/websocket http-client url
                       :open (fn [ws]
                               (info "ws-opened" ws)
-                              (go-loop-try> err-ch [m (<? out)]
+                              (go-loop-super [m (<? out)]
                                             (when m
                                               (debug "client sending msg to:" url (:type m))
                                               (with-open [baos (ByteArrayOutputStream.)]
@@ -102,20 +103,19 @@
                      (async/put! conns [in out])
                      (with-channel request channel
                        (swap! channel-hub assoc channel request)
-                       (go-loop-try> err-ch
-                                     [m (<? out)]
-                                     (when m
-                                       (if (@channel-hub channel)
-                                         (do
-                                           (with-open [baos (ByteArrayOutputStream.)]
-                                             (let [writer (transit/writer baos :json
-                                                                          {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
-                                               (debug "server sending msg:" url (:type m))
-                                               (transit/write writer (assoc m :sender peer-id))
-                                               (debug "server sent transit msg"))
-                                             (send! channel ^bytes (.toByteArray baos))))
-                                         (warn "dropping msg because of closed channel: " url (pr-str m)))
-                                       (recur (<? out))))
+                       (go-loop-super [m (<? out)]
+                                      (when m
+                                        (if (@channel-hub channel)
+                                          (do
+                                            (with-open [baos (ByteArrayOutputStream.)]
+                                              (let [writer (transit/writer baos :json
+                                                                           {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
+                                                (debug "server sending msg:" url (:type m))
+                                                (transit/write writer (assoc m :sender peer-id))
+                                                (debug "server sent transit msg"))
+                                              (send! channel ^bytes (.toByteArray baos))))
+                                          (warn "dropping msg because of closed channel: " url (pr-str m)))
+                                        (recur (<? out))))
                        (on-close channel (fn [status]
                                            (let [e (ex-info "Connection closed!" {:status status})
                                                  host (:remote-addr request)]

@@ -15,10 +15,6 @@
                                                         ;; works again
                                                         ;; without it
                  [io.replikativ/hasch "0.3.0"]
-
-
-                 #_[es.topiq/full.async "0.2.8-beta1"]
                  [io.replikativ/full.async "0.9.1-SNAPSHOT"]
-                 [kordano/full.cljs.async "0.1.3-alpha"]
 
                  [org.slf4j/slf4j-api "1.7.12"]])

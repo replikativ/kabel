@@ -6,13 +6,16 @@
             #?(:clj [full.lab :refer [go-loop-super]])
             [kabel.platform :refer [client-connect!]
              :include-macros true]
-            #?(:cljs [full.cljs.async :refer [throw-if-throwable]])
+            #?(:cljs [full.async :refer [throw-if-exception
+                                         *super* -track-exception -free-exception
+                                         -register-go -unregister-go]])
             #?(:clj [clojure.core.async :as async
                      :refer [>! timeout chan put! pub sub unsub close!]]
                :cljs [cljs.core.async :as async
                       :refer [>! timeout chan put! pub sub unsub close!]]))
   #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)]
-                            [full.cljs.async :refer [<<? <? go-try go-loop-try alt?]])))
+                            [full.async :refer [<<? <? go-try go-loop-try alt?]]
+                            [full.lab :refer [go-loop-super]])))
 
 
 (defn drain [[peer [in out]]]

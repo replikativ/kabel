@@ -9,6 +9,11 @@
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]))
 
 
+(defn on-node? []
+  (and (exists? js/process)
+       (exists? js/process.versions)
+       (exists? js/process.versions.node)
+       true))
 
 
 
@@ -20,6 +25,9 @@ Only supports websocket at the moment, but is supposed to dispatch on
   ([url err-ch peer-id]
    (client-connect! url err-ch peer-id (atom {}) (atom {})))
   ([url err-ch peer-id read-handlers write-handlers]
+   (when (on-node?)
+     (.log js/console "Setting global W3C WebSocket API to 'websocket' package.")
+     (set! js/WebSocket (.-w3cwebsocket (js/require "websocket"))))
    (let [channel (goog.net.WebSocket. false)
          in (chan)
          out (chan)
@@ -32,15 +40,20 @@ Only supports websocket at the moment, but is supposed to dispatch on
                         (try
                           (let [reader (transit/reader :json {:handlers ;; remove if uuid problem is gone
                                                               {"u" (fn [v] (cljs.core/uuid v))
-                                                               "incognito" (incognito-read-handler read-handlers)}})
-                                fr (js/FileReader.)]
-                            (set! (.-onload fr) #(put! in
-                                                       (assoc
-                                                        (transit/read
-                                                         reader
-                                                         (js/String. (.. % -target -result)))
-                                                        :host host)))
-                            (.readAsText fr (.-message evt)))
+                                                               "incognito" (incognito-read-handler read-handlers)}})]
+                            (if-not (on-node?)
+                              ;; Browser
+                              (let [fr (js/FileReader.)]
+                                (set! (.-onload fr) #(let [res (js/String. (.. % -target -result))]
+                                                       (debug "Received message: " res)
+                                                       (put! in (assoc (transit/read reader res) :host host))))
+
+                                (.readAsText fr (.-message evt)))
+                              ;; nodejs
+                              (let [s (js/String.fromCharCode.apply
+                                       nil
+                                       (js/Uint8Array. (.. evt -message)))]
+                                (put! in (assoc (transit/read reader s) :host host)))))
                           (catch js/Error e
                             (error "Cannot read transit msg:" e)
                             (put! err-ch e)))))
@@ -77,8 +90,12 @@ Only supports websocket at the moment, but is supposed to dispatch on
                      (let [i-write-handler (incognito-write-handler write-handlers)
                            writer (transit/writer
                                    :json
-                                   {:handlers {"default" i-write-handler}})]
-                       (.send channel (js/Blob. #js [(transit/write writer (assoc m :sender peer-id))])))
+                                   {:handlers {"default" i-write-handler}})
+                           to-send (transit/write writer (assoc m :sender peer-id))]
+                       (if-not (on-node?)
+                         (.send channel (js/Blob. #js [to-send])) ;; Browser
+                         (.send channel (js/Buffer. to-send)) ;; NodeJS
+                         ))
                      (catch js/Error e
                        (error "Cannot send transit msg: " e)
                        (put! err-ch e)))

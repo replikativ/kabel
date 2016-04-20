@@ -2,6 +2,9 @@
   "Logging for Clojure."
   (:import [org.slf4j LoggerFactory]))
 
+(defmacro trace [& args]
+  `(.trace (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))
+
 (defmacro debug [& args]
   `(.debug (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))
 

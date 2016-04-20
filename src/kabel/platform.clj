@@ -5,7 +5,7 @@
             [clojure.string :as str]
             [kabel.platform-log :refer [debug info warn error]]
             [incognito.transit :refer [incognito-read-handler incognito-write-handler]]
-            [full.async :refer [<? <?? go-try]]
+            [full.async :refer [<? <?? go-try -error *super*]]
             [full.lab :refer [go-loop-super]]
             [clojure.core.async :as async
              :refer [>! timeout chan alt! put! close!]]
@@ -57,16 +57,17 @@
                                     (debug "client received transit blob from:" url (:type m))
                                     (async/put! in (assoc m :host host))))
                                 (catch Exception e
-                                  (put! err-ch (ex-info "Cannot receive data." {:url url
-                                                                                :data data
-                                                                                :error e}))
+                                  (put! (-error *super*)
+                                        (ex-info "Cannot receive data." {:url url
+                                                                         :data data
+                                                                         :error e}))
                                   (close! in))))
                       :close (fn [ws code reason]
                                (let [e (ex-info "Connection closed!" {:code code
                                                                       :reason reason})]
                                  (error "closing" url "with" code reason)
                                  (close! in)
-                                 (put! err-ch e)
+                                 (put! (-error *super*) e)
                                  (try (put! opener e) (catch Exception e))
                                  (close! opener)))
                       :error (fn [ws err] (error "ws-error" url err)
@@ -120,7 +121,7 @@
                                            (let [e (ex-info "Connection closed!" {:status status})
                                                  host (:remote-addr request)]
                                              (warn "channel closed:" host "status: " status)
-                                             (put! err-ch e))
+                                             (put! (-error *super*) e))
                                            (swap! channel-hub dissoc channel)
                                            (close! in)))
                        (on-receive channel (fn [data]
@@ -138,9 +139,10 @@
                                                      (async/put! in (assoc m :host host))))
 
                                                  (catch Exception e
-                                                   (put! err-ch (ex-info "Cannot receive data." {:data data
-                                                                                                 :host host
-                                                                                                 :error e}))
+                                                   (put! (-error *super*)
+                                                         (ex-info "Cannot receive data." {:data data
+                                                                                          :host host
+                                                                                          :error e}))
                                                    (close! in)))))))))]
      {:new-conns conns
       :channel-hub channel-hub

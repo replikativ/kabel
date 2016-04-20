@@ -5,7 +5,8 @@
             [goog.net.WebSocket]
             [goog.Uri]
             [goog.events :as events]
-            [cljs.core.async :as async :refer (take! put! close! chan)])
+            [cljs.core.async :as async :refer (take! put! close! chan)]
+            [full.async :refer [-error *super*]])
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]))
 
 
@@ -50,18 +51,18 @@ Only supports websocket at the moment, but is supposed to dispatch on
 
                                 (.readAsText fr (.-message evt)))
                               ;; nodejs
-                              (let [s (js/String.fromCharCode.apply
-                                       nil
-                                       (js/Uint8Array. (.. evt -message)))]
+                              (let [s  (js/String.fromCharCode.apply
+                                        nil
+                                        (js/Uint8Array. (.. evt -message)))]
                                 (put! in (assoc (transit/read reader s) :host host)))))
                           (catch js/Error e
                             (error "Cannot read transit msg:" e)
-                            (put! err-ch e)))))
+                            (put! (-error *super*) e)))))
        (events/listen goog.net.WebSocket.EventType.CLOSED
                       (fn [evt]
                         (let [e (ex-info "Connection closed!" {:event evt})]
                           (close! in)
-                          (put! err-ch e)
+                          (put! (-error *super*) e)
                           (try (put! opener e) (catch js/Object e))
                           (.close channel)
                           (close! opener))))
@@ -72,13 +73,13 @@ Only supports websocket at the moment, but is supposed to dispatch on
                         (let [e (ex-info "Connection error!" {:event evt})]
                           (error "WebSocket error:" evt)
                           (try (put! opener e) (catch js/Object e))
-                          (put! err-ch e)
+                          (put! (-error *super*) e)
                           (close! opener))))
        (try
          (.open channel url) ;; throws on connection failure? doesn't catch?
          (catch js/Object e
            (let [e (ex-info  "Connection failed!" {:event e})]
-             (put! err-ch e)
+             (put! (-error *super*) e)
              (put! opener e)
              (close! opener)))))
      ((fn sender []
@@ -98,7 +99,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                          ))
                      (catch js/Error e
                        (error "Cannot send transit msg: " e)
-                       (put! err-ch e)))
+                       (put! (-error *super*) e)))
 
                    (sender))))))
      opener)))

@@ -38,9 +38,9 @@
 
 (defn client-peer
   "Creates a client-side peer only."
-  ([id err-ch middleware]
-   (client-peer id err-ch middleware (atom {}) (atom {})))
-  ([id err-ch middleware read-handlers write-handlers]
+  ([id middleware]
+   (client-peer id middleware (atom {}) (atom {})))
+  ([id middleware read-handlers write-handlers]
    (let [log (atom {})
          bus-in (chan)
          bus-out (pub bus-in :type)]
@@ -48,16 +48,15 @@
                        :middleware middleware
                        :read-handlers read-handlers
                        :write-handlers write-handlers
-                       :chans [bus-in bus-out]
-                       :error-ch err-ch}
+                       :chans [bus-in bus-out]}
             :id id}))))
 
 
 (defn server-peer
   "Constructs a listening peer."
-  ([handler id err-ch middleware]
-   (server-peer handler id err-ch middleware (atom {}) (atom {})))
-  ([handler id err-ch middleware read-handlers write-handlers]
+  ([handler id middleware]
+   (server-peer handler id middleware (atom {}) (atom {})))
+  ([handler id middleware read-handlers write-handlers]
    (let [{:keys [new-conns url]} handler
          log (atom {})
          bus-in (chan)
@@ -67,7 +66,6 @@
                                        :read-handlers read-handlers
                                        :write-handlers write-handlers
                                        :log log
-                                       :error-ch err-ch
                                        :chans [bus-in bus-out]})
                      :addresses #{(:url handler)}
                      :id id})]

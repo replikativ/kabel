@@ -34,7 +34,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
          out (chan)
          opener (chan)
          host (.getDomain (goog.Uri. (.replace url "ws" "http")))]
-     (info "CLIENT-CONNECT" url)
+     (info "connecting to" url)
      (doto channel
        (events/listen goog.net.WebSocket.EventType.MESSAGE
                       (fn [evt]
@@ -46,7 +46,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                               ;; Browser
                               (let [fr (js/FileReader.)]
                                 (set! (.-onload fr) #(let [res (js/String. (.. % -target -result))]
-                                                       (debug "Received message: " res)
+                                                       #_(debug "Received message: " res)
                                                        (put! in (assoc (transit/read reader res) :host host))))
 
                                 (.readAsText fr (.-message evt)))
@@ -57,11 +57,13 @@ Only supports websocket at the moment, but is supposed to dispatch on
                                 (put! in (assoc (transit/read reader s) :host host)))))
                           (catch js/Error e
                             (error "Cannot read transit msg:" e)
+                            (put! err-ch e)
                             (put! (-error *super*) e)))))
        (events/listen goog.net.WebSocket.EventType.CLOSED
                       (fn [evt]
                         (let [e (ex-info "Connection closed!" {:event evt})]
                           (close! in)
+                          (put! err-ch e)
                           (put! (-error *super*) e)
                           (try (put! opener e) (catch js/Object e))
                           (.close channel)
@@ -73,6 +75,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                         (let [e (ex-info "Connection error!" {:event evt})]
                           (error "WebSocket error:" evt)
                           (try (put! opener e) (catch js/Object e))
+                          (put! err-ch e)
                           (put! (-error *super*) e)
                           (close! opener))))
        (try
@@ -80,6 +83,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
          (catch js/Object e
            (let [e (ex-info  "Connection failed!" {:event e})]
              (put! (-error *super*) e)
+             (put! err-ch e)
              (put! opener e)
              (close! opener)))))
      ((fn sender []
@@ -99,7 +103,8 @@ Only supports websocket at the moment, but is supposed to dispatch on
                          ))
                      (catch js/Error e
                        (error "Cannot send transit msg: " e)
-                       (put! (-error *super*) e)))
+                       (put! (-error *super*) e)
+                       (put! err-ch e)))
 
                    (sender))))))
      opener)))

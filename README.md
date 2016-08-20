@@ -46,7 +46,7 @@ From [pingpong.clj](./examples/pingpong.clj):
 
 ~~~ clojure
 (ns kabel.examples.pingpong
-  (:require [kabel.platform :refer [create-http-kit-handler! start stop]]
+  (:require [kabel.http-kit :refer [create-http-kit-handler! start stop]]
             [kabel.peer :refer [client-peer server-peer connect]]
             [kabel.platform-log :refer [info warn error]]
             [kabel.middleware.log :refer [logger]]
@@ -149,6 +149,8 @@ SSEs, WebRTC or normal sockets should not be hard to add.
 
 ### 0.1.7
     - support node on client-side
+    - add an aleph http client (server still missing)
+    - add a generic callback middleware
 
 ### 0.1.5
     - use lightweight slf4j logging

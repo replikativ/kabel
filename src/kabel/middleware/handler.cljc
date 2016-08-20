@@ -1,5 +1,5 @@
-(ns kabel.middleware.log
-  "DEPRECATED Logging middleware."
+(ns kabel.middleware.handler
+  "Generic callback handler middleware."
   (:require [kabel.platform-log :refer [debug info warn error]]
             [clojure.set :as set]
             #?(:clj [clojure.core.async :as async
@@ -8,25 +8,23 @@
   #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)])))
 
 
-(defn logger
-  "Appends messages of in and out to log-atom under [type :in/:out] to a vector.
-
-  DEPRECATED: Use the generic function handler instead."
-  [log-atom type [peer [in out]]]
+(defn handler
+  "Applies given callback functions to messages on [in out] channels and passes through the return value of the callback."
+  [cb-in cb-out [peer [in out]]]
   (let [new-in (chan)
         new-out (chan)]
     (go-loop [i (<! in)]
       (if i
         (do
-          (swap! log-atom update-in [type :in] (fnil conj []) i)
+          (when-let [i (cb-in i)])
           (>! new-in i)
           (recur (<! in)))
         (close! new-in)))
     (go-loop [o (<! new-out)]
       (if o
         (do
-          (swap! log-atom update-in [type :out] (fnil conj []) o)
-          (>! out o)
+          (when-let [o (cb-out o)]
+            (>! out o))
           (recur (<! new-out)))
         (close! new-out)))
     [peer [new-in new-out]]))

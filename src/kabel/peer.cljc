@@ -4,8 +4,8 @@
             [clojure.set :as set]
             #?(:clj [full.async :refer [<? <<? go-try go-loop-try alt?]])
             #?(:clj [full.lab :refer [go-loop-super]])
-            [kabel.platform :refer [client-connect!]
-             :include-macros true]
+            #?(:clj [kabel.http-kit :refer [client-connect!]]
+               :cljs [kabel.platform :refer [client-connect!]])
             #?(:cljs [full.async :refer [throw-if-exception
                                          *super* -track-exception -free-exception
                                          -register-go -unregister-go]])

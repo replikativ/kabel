@@ -8,11 +8,9 @@
             [full.async :refer [<? <?? go-try -error *super*]]
             [full.lab :refer [go-loop-super with-super]]
             [clojure.core.async :as async
-             :refer [>! timeout chan alt! put! close!]]
+             :refer [<! >! timeout chan alt! put! close! buffer]]
             [org.httpkit.server :refer :all]
             [http.async.client :as cli]
-            [manifold.stream :as s]
-            [aleph.http :as http]
             [cognitect.transit :as transit])
   (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
            [com.cognitect.transit.impl WriteHandlers$MapWriteHandler]))
@@ -29,29 +27,40 @@
    (defonce singleton-http-client (cli/create-client))
    (client-connect! url err-ch peer-id read-handlers write-handlers singleton-http-client))
   ([url err-ch peer-id read-handlers write-handlers http-client]
-   (let [in (chan)
+   (let [in-buffer (buffer 1024) ;; standard size
+         in (chan)
          out (chan)
          opener (chan)
+         websockets (atom #{})
          host (.getHost (java.net.URL. (.replace url "ws" "http")))
          super *super*]
      (try
        (cli/websocket http-client url
                       :open (fn [ws]
-                              (info "ws-opened" ws)
-                              (go-loop-super [m (<? out)]
-                                             (when m
-                                               (debug "client sending msg to:" url (:type m))
-                                               (with-open [baos (ByteArrayOutputStream.)]
-                                                 (let [writer (transit/writer baos :json
-                                                                              {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
-                                                   (transit/write writer (assoc m :sender peer-id) ))
-                                                 (cli/send ws :byte (.toByteArray baos)))
-                                               (recur (<? out))))
-                              (async/put! opener [in out])
-                              (close! opener))
+                              (with-super super
+                                (info "ws-opened" ws)
+                                (go-loop-super [m (<! out)] ;; ensure draining out on disconnect
+                                               (when m
+                                                 (if (@websockets ws)
+                                                   (do
+                                                     (debug "client sending msg to:" url (:type m))
+                                                     (with-open [baos (ByteArrayOutputStream.)]
+                                                       (let [writer (transit/writer baos :json
+                                                                                    {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
+                                                         (transit/write writer (assoc m :sender peer-id) ))
+                                                       (cli/send ws :byte (.toByteArray baos))))
+                                                   (warn "dropping msg because of closed channel: " url (pr-str m)))
+                                                 (recur (<! out))))
+                                (swap! websockets conj ws)
+                                (async/put! opener [in out])
+                                (close! opener)))
                       :byte (fn [ws ^bytes data]
                               (with-super super
                                 (try
+                                  (when (> (count in-buffer) 100)
+                                    (error "incoming buffer for " url
+                                           " too full:" (count in-buffer))
+                                    (.close ws))
                                   (debug "received byte message")
                                   (with-open [bais (ByteArrayInputStream. data)]
                                     (let [reader
@@ -61,17 +70,20 @@
                                       (debug "client received transit blob from:" url (:type m))
                                       (async/put! in (assoc m :host host))))
                                   (catch Exception e
-                                    (put! (-error *super*)
-                                          (ex-info "Cannot receive data." {:url url
-                                                                           :data data
-                                                                           :error e}))
-                                    (close! in)))))
+                                    (let [e (ex-info "Cannot receive data." {:url url
+                                                                             :data data
+                                                                             :error e})]
+                                      (error "cannot receive message:" e)
+                                      (put! (-error *super*) e)
+                                      (.close ws))))))
                       :close (fn [ws code reason]
                                (with-super super
                                  (let [e (ex-info "Connection closed!" {:code code
                                                                         :reason reason})]
-                                   (error "closing" url "with" code reason)
+                                   (warn "closing" url "with" code reason)
                                    (close! in)
+                                   (go-try (while (<! in))) ;; flush
+                                   (swap! websockets disj ws)
                                    (put! (-error *super*) e)
                                    (try (put! opener e) (catch Exception e))
                                    (close! opener))))
@@ -83,8 +95,7 @@
                                                    :error err})]
                                    (put! (-error *super*) e)
                                    (error "ws-error" url err)
-                                   (async/put! opener e)
-                                   (close! opener)))))
+                                   (.close ws)))))
        (catch Exception e
          (error "client-connect error:" url e)
          (async/put! opener (ex-info "client-connect error"
@@ -108,13 +119,14 @@
          conns (chan)
          super *super*
          handler (fn [request]
-                   (let [in (chan)
+                   (let [in-buffer (buffer 1024) ;; standard size
+                         in (chan)
                          out (chan)]
                      (async/put! conns [in out])
                      (with-channel request channel
                        (swap! channel-hub assoc channel request)
                        (with-super super
-                         (go-loop-super [m (<? out)]
+                         (go-loop-super [m (<! out)]
                                         (when m
                                           (if (@channel-hub channel)
                                             (do
@@ -126,7 +138,7 @@
                                                   (debug "server sent transit msg"))
                                                 (send! channel ^bytes (.toByteArray baos))))
                                             (warn "dropping msg because of closed channel: " url (pr-str m)))
-                                          (recur (<? out)))))
+                                          (recur (<! out)))))
                        (on-close channel (fn [status]
                                            (with-super super
                                              (let [e (ex-info "Connection closed!" {:status status})
@@ -134,12 +146,18 @@
                                                (warn "channel closed:" host "status: " status)
                                                (put! (-error *super*) e))
                                              (swap! channel-hub dissoc channel)
+                                             (go-try (while (<! in))) ;; flush
                                              (close! in))))
                        (on-receive channel (fn [data]
                                              (with-super super
                                                (let [blob data
                                                      host (:remote-addr request)]
                                                  (debug "received byte message")
+                                                 (when (> (count in-buffer) 100)
+                                                   ;; TODO better throw
+                                                   (error "incoming buffer for " host
+                                                          " too full:" (count in-buffer))
+                                                   (close channel))
                                                  (try
                                                    (with-open [bais (ByteArrayInputStream. blob)]
                                                      (let [reader
@@ -155,12 +173,11 @@
                                                            (ex-info "Cannot receive data." {:data data
                                                                                             :host host
                                                                                             :error e}))
-                                                     (close! in))))))))))]
+                                                     (close channel))))))))))]
      {:new-conns conns
       :channel-hub channel-hub
       :url url
       :handler handler})))
-
 
 
 

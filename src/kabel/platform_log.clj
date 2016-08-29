@@ -16,7 +16,7 @@
   (if (cljs-env? &env) then else))
 
 
-
+;; TODO do not pr-str values eagerly? It seems the logger expects already a String castable Object
 (defmacro trace [& args]
   (if-cljs
    `(.trace js/console ~(str *ns*) (apply pr-str ~args))

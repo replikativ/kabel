@@ -170,7 +170,7 @@
                                                                            {:handlers {"incognito" (incognito-read-handler read-handlers)}})
                                                            m (transit/read reader)]
                                                        (debug "server received transit blob from:"
-                                                              url (apply str (take 100 (str m))))
+                                                              url #_(apply str (take 100 (str m))))
                                                        (async/put! in (assoc m :host host))))
 
                                                    (catch Exception e

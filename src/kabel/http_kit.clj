@@ -58,10 +58,13 @@
                               (with-super super
                                 (try
                                   (when (> (count in-buffer) 100)
-                                    (error "incoming buffer for " url
-                                           " too full:" (count in-buffer))
-                                    (.close ws))
-                                  (debug "received byte message")
+                                    (.close ws)
+                                    (throw (ex-info
+                                            (str "incoming buffer for " url
+                                                 " too full:" (count in-buffer))
+                                            {:url url
+                                             :count (count in-buffer)})))
+                                  (debug "received byte message, buffer count:" (count in-buffer))
                                   (with-open [bais (ByteArrayInputStream. data)]
                                     (let [reader
                                           (transit/reader bais :json
@@ -154,10 +157,12 @@
                                                      host (:remote-addr request)]
                                                  (debug "received byte message")
                                                  (when (> (count in-buffer) 100)
-                                                   ;; TODO better throw
-                                                   (error "incoming buffer for " host
-                                                          " too full:" (count in-buffer))
-                                                   (close channel))
+                                                   (close channel)
+                                                   (throw (ex-info
+                                                           (str "incoming buffer for " (:remote-addr request)
+                                                                " too full:" (count in-buffer))
+                                                           {:url url
+                                                            :count (count in-buffer)}))) 
                                                  (try
                                                    (with-open [bais (ByteArrayInputStream. blob)]
                                                      (let [reader
@@ -190,7 +195,8 @@
                                            first
                                            second
                                            read-string)
-                                :max-body (* 512 1024 1024)}))
+                                :max-body (* 512 1024 1024)
+                                :max-ws (* 512 1024 1024)}))
     true))
 
 

@@ -34,7 +34,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
          out (chan)
          opener (chan)
          host (.getDomain (goog.Uri. (.replace url "ws" "http")))]
-     (info "connecting to" url)
+     (info {:event :connecting-to :url :url url})
      (doto channel
        (events/listen goog.net.WebSocket.EventType.MESSAGE
                       (fn [evt]
@@ -56,7 +56,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                                         (js/Uint8Array. (.. evt -message)))]
                                 (put! in (assoc (transit/read reader s) :host host)))))
                           (catch js/Error e
-                            (error "Cannot read transit msg:" e)
+                            (error {:event :cannot-read-transit-message :error e})
                             (put! err-ch e)
                             (put! (-error *super*) e)))))
        (events/listen goog.net.WebSocket.EventType.CLOSED
@@ -73,7 +73,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
        (events/listen goog.net.WebSocket.EventType.ERROR
                       (fn [evt]
                         (let [e (ex-info "Connection error!" {:event evt})]
-                          (error "WebSocket error:" evt)
+                          (error {:event :websocket-error :error evt})
                           (try (put! opener e) (catch js/Object e))
                           (put! err-ch e)
                           (put! (-error *super*) e)
@@ -102,7 +102,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                          (.send channel (js/Buffer. to-send)) ;; NodeJS
                          ))
                      (catch js/Error e
-                       (error "Cannot send transit msg: " e)
+                       (error {:event :cannot-send-transit-message :error e})
                        (put! (-error *super*) e)
                        (put! err-ch e)))
 

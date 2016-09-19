@@ -38,18 +38,20 @@
        (cli/websocket http-client url
                       :open (fn [ws]
                               (with-super super
-                                (info "ws-opened" ws)
+                                (info {:event :websocket-opened :websocket ws :url url})
                                 (go-loop-super [m (<! out)] ;; ensure draining out on disconnect
                                                (when m
                                                  (if (@websockets ws)
                                                    (do
-                                                     (debug "client sending msg to:" url (:type m))
+                                                     (debug {:event :client-sending-message
+                                                             :url url :type (:type m)})
                                                      (with-open [baos (ByteArrayOutputStream.)]
                                                        (let [writer (transit/writer baos :json
                                                                                     {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
                                                          (transit/write writer (assoc m :sender peer-id) ))
                                                        (cli/send ws :byte (.toByteArray baos))))
-                                                   (warn "dropping msg because of closed channel: " url (pr-str m)))
+                                                   (warn {:event :dropping-msg-because-of-closed-channel
+                                                          :url url :message m}))
                                                  (recur (<! out))))
                                 (swap! websockets conj ws)
                                 (async/put! opener [in out])
@@ -64,26 +66,29 @@
                                                  " too full:" (count in-buffer))
                                             {:url url
                                              :count (count in-buffer)})))
-                                  (debug "received byte message, buffer count:" (count in-buffer))
+                                  (debug {:event :received-byte-message
+                                          :in-buffer-count (count in-buffer)})
                                   (with-open [bais (ByteArrayInputStream. data)]
                                     (let [reader
                                           (transit/reader bais :json
                                                           {:handlers {"incognito" (incognito-read-handler read-handlers)}})
                                           m (transit/read reader)]
-                                      (debug "client received transit blob from:" url (:type m))
+                                      (debug {:event :received-transit-blob :url url :type (:type m)})
                                       (async/put! in (assoc m :host host))))
                                   (catch Exception e
                                     (let [e (ex-info "Cannot receive data." {:url url
                                                                              :data data
                                                                              :error e})]
-                                      (error "cannot receive message:" e)
+                                      (error {:event :cannot-receive-message
+                                              :error e})
                                       (put! (-error *super*) e)
                                       (.close ws))))))
                       :close (fn [ws code reason]
                                (with-super super
                                  (let [e (ex-info "Connection closed!" {:code code
                                                                         :reason reason})]
-                                   (warn "closing" url "with" code reason)
+                                   (warn {:event :closing-connection :url url :code code
+                                          :reason reason})
                                    (close! in)
                                    (go-try (while (<! in))) ;; flush
                                    (swap! websockets disj ws)
@@ -92,15 +97,15 @@
                                    (close! opener))))
                       :error (fn [ws err]
                                (with-super super
-                                 (let [e (ex-info "ws-error"
+                                 (let [e (ex-info "Websocket error."
                                                   {:type :websocket-connection-error
                                                    :url url
                                                    :error err})]
                                    (put! (-error *super*) e)
-                                   (error "ws-error" url err)
+                                   (error {:event :websocket-error :url url :error err})
                                    (.close ws)))))
        (catch Exception e
-         (error "client-connect error:" url e)
+         (error {:event :client-connect-error :url url :error e})
          (async/put! opener (ex-info "client-connect error"
                                      {:type :websocket-connection-error
                                       :url url
@@ -136,17 +141,21 @@
                                               (with-open [baos (ByteArrayOutputStream.)]
                                                 (let [writer (transit/writer baos :json
                                                                              {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
-                                                  (debug "server sending msg:" url (:type m))
+                                                  (debug {:event :server-sending-message
+                                                          :url url :type (:type m)})
                                                   (transit/write writer (assoc m :sender peer-id))
-                                                  (debug "server sent transit msg"))
+                                                  (debug {:event :server-sent-transit-message
+                                                          :url url}))
                                                 (send! channel ^bytes (.toByteArray baos))))
-                                            (warn "dropping msg because of closed channel: " url (pr-str m)))
+                                            (warn {:event :dropping-msg-because-of-closed-channel
+                                                   :url url :message m}))
                                           (recur (<! out)))))
                        (on-close channel (fn [status]
                                            (with-super super
                                              (let [e (ex-info "Connection closed!" {:status status})
                                                    host (:remote-addr request)]
-                                               (warn "channel closed:" host "status: " status)
+                                               (warn {:event :channel-closed
+                                                      :host host :status status})
                                                (put! (-error *super*) e))
                                              (swap! channel-hub dissoc channel)
                                              (go-try (while (<! in))) ;; flush
@@ -155,7 +164,7 @@
                                              (with-super super
                                                (let [blob data
                                                      host (:remote-addr request)]
-                                                 (debug "received byte message")
+                                                 (debug {:event :received-byte-message})
                                                  (when (> (count in-buffer) 100)
                                                    (close channel)
                                                    (throw (ex-info
@@ -169,8 +178,8 @@
                                                            (transit/reader bais :json
                                                                            {:handlers {"incognito" (incognito-read-handler read-handlers)}})
                                                            m (transit/read reader)]
-                                                       (debug "server received transit blob from:"
-                                                              url #_(apply str (take 100 (str m))))
+                                                       (debug {:event :server-received-transit-blob
+                                                               :url url})
                                                        (async/put! in (assoc m :host host))))
 
                                                    (catch Exception e
@@ -187,28 +196,36 @@
 
 
 (defn start [peer]
-  (when-let [handler (-> @peer :volatile :handler)]
-    (println "starting" (:id @peer))
-    (swap! peer assoc-in [:volatile :server]
-           (run-server handler {:port (->> (-> @peer :volatile :url)
-                                           (re-seq #":(\d+)")
-                                           first
-                                           second
-                                           read-string)
-                                :max-body (* 512 1024 1024)
-                                :max-ws (* 512 1024 1024)}))
-    true))
+  (if (:started? @peer)
+    false
+    (let [handler (-> @peer :volatile :handler)]
+      (info {:event :starting-peer :id (:id @peer)})
+      (swap! peer assoc-in [:volatile :server]
+             (run-server handler {:port (->> (-> @peer :volatile :url)
+                                             (re-seq #":(\d+)")
+                                             first
+                                             second
+                                             read-string)
+                                  :max-body (* 512 1024 1024)
+                                  :max-ws (* 512 1024 1024)}))
+      (swap! peer assoc :started? true)
+      true)))
 
 
 (defn stop [peer]
-  (when-let [stop-fn (get-in @peer [:volatile :server])]
-    (stop-fn :timeout 100))
-  (<?? (timeout 200))
-  (when-let [hub (get-in @peer [:volatile :channel-hub])]
-    (reset! hub {}))
-  (when-let [in (-> @peer :volatile :chans first)]
-    (close! in))
-  true)
+  (if-not (:started? @peer)
+    false
+    (do
+      (info {:event :stopping-peer :id (:id @peer)})
+      (when-let [stop-fn (get-in @peer [:volatile :server])]
+        (stop-fn :timeout 100))
+      (<?? (timeout 200))
+      (when-let [hub (get-in @peer [:volatile :channel-hub])]
+        (reset! hub {}))
+      (when-let [in (-> @peer :volatile :chans first)]
+        (close! in))
+      (swap! peer assoc :started? false)
+      true)))
 
 
 (comment

@@ -21,7 +21,7 @@
               (recur (<! in))
 
               (timeout 5000)
-              (do (warn type "Input channel blocked for msg: " i)
+              (do (warn {:event :input-channel-blocked :message i})
                   (recur i)))
         (close! new-in)))
     (go-loop [o (<! new-out)]
@@ -30,7 +30,7 @@
               (recur (<! new-out))
 
               (timeout 5000)
-              (do (warn type "Output channel blocked for msg: " o)
+              (do (warn {:event :output-channel-blocked :message o})
                   (recur o)))
         (close! new-out)))
     [peer [new-in new-out]]))

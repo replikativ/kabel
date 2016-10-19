@@ -42,57 +42,44 @@ Add this to your project dependencies:
 
 [![Clojars Project](http://clojars.org/io.replikativ/kabel/latest-version.svg)](http://clojars.org/io.replikativ/kabel)
 
-From [pingpong.clj](./examples/pingpong.clj):
+From the tests (note that messages are always maps):
 
 ~~~ clojure
-(ns kabel.examples.pingpong
-  (:require [kabel.http-kit :refer [create-http-kit-handler! start stop]]
-            [kabel.peer :refer [client-peer server-peer connect]]
-            [kabel.platform-log :refer [info warn error]]
-            [kabel.middleware.log :refer [logger]]
+(ns kabel.core-test
+  (:require [clojure.test :refer :all]
+            [kabel.client :as cli]
+            [kabel.http-kit :as http-kit]
+            [kabel.peer :as peer]
+            [superv.async :refer [<?? go-try S go-loop-try <? >? put?]]
+            [clojure.core.async :refer [timeout]]
+            [hasch.core :refer [uuid]]))
 
-            [full.async :refer [go-try go-loop-try> <? <??]]
-            [clojure.core.async :refer [go-loop <! >! >!! timeout chan]]))
-
-;; track errors (this happens through full.async recursively through
-;; all participating subsystems)
-(def err-ch (chan))
-(go-loop [e (<! err-ch)]
-          (when e
-            (warn "ERROR:" e)
-            (recur (<! err-ch))))
-
-(def handler (create-http-kit-handler! "ws://127.0.0.1:9090/" err-ch))
 
 (defn pong-middleware [[peer [in out]]]
-  (let [new-in (chan)]
-    (go-loop [p (<! in)]
-      (when p
-        (info "received ping, sending pong")
-        (>! out {:type :pong}) ;; messages need to be maps
-        (>! new-in p) ;; pass along (or not...)
-        (recur (<! in))))
-    [peer [new-in out]]))
-
-(def log-atom (atom {}))
-
-(def remote-peer (server-peer handler "REMOTE" err-ch
-                              (comp pong-middleware
-                                    (partial logger log-atom :server))))
-
-(start remote-peer)
-#_(stop remote-peer)
-
-(defn ping [[peer [in out]]]
-  (go-loop []
-    (<! (timeout 5000))
-    (>! out {:type :ping})
-    (recur))
+  (go-loop-try S [i (<? S in)]
+               (when i
+                 (>? S out i)
+                 (recur (<? S in))))
   [peer [in out]])
 
-(def local-peer (client-peer "CLIENT" err-ch ping))
-
-(connect local-peer "ws://127.0.0.1:9090/")
+(deftest roundtrip-test
+  (testing "Testing a roundtrip between a server and a client."
+    (let [sid #uuid "fd0278e4-081c-4925-abb9-ff4210be271b"
+          cid #uuid "898dcf36-e07a-4338-92fd-f818d573444a"
+          url "ws://localhost:47291"
+          handler (http-kit/create-http-kit-handler! S url sid)
+          speer (peer/server-peer S handler sid pong-middleware)
+          cpeer (peer/client-peer S cid (fn [[peer [in out]]]
+                                          (put? S out {:type :ping}) 
+                                          (is (= (<?? S in)
+                                                 {:type :ping
+                                                  :sender sid
+                                                  :host "localhost"}))
+                                          [peer [in out]]))]
+      (<?? S (peer/start speer))
+      (<?? S (peer/connect cpeer url))
+      (<?? S (timeout 1000))
+      (<?? S (peer/stop speer)))))
 
 ~~~
 
@@ -132,7 +119,9 @@ middleware.
 
 Useful middlewares still missing:
 - QoS monitoring, latency and throughput measures
-- remote debugging, sending full.async exceptions back to the server
+- remote debugging,
+  sending [superv.async](https://github.com/replikativ/superv.async) exceptions
+  back to the server
 - other usefull `ring` middlewares which should be ported?  - ...
 
 ## Connectivity
@@ -146,6 +135,13 @@ SSEs, WebRTC or normal sockets should not be hard to add.
 - implement node.js websocket server
 
 ## Changelog
+
+### 0.1.9
+    - factor start stop
+    - support superv.async
+
+### 0.1.8
+    - small bugfixes
 
 ### 0.1.7
     - support node on client-side

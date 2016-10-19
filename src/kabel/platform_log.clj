@@ -16,7 +16,6 @@
   (if (cljs-env? &env) then else))
 
 
-;; TODO do not pr-str values eagerly? It seems the logger expects already a String castable Object
 (defmacro trace [& args]
   (if-cljs
    `(.trace js/console ~(str *ns*) (apply pr-str ~args))
@@ -27,12 +26,15 @@
    `(when (.-debug js/console)
       (.debug js/console ~(str *ns*) (apply pr-str ~args))
       (.log js/console ~(str *ns*) (apply pr-str ~args)))
-   `(.debug (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
+   ;; do not pr-str values eagerly (at least on the JVM)
+   `(when (.isDebugEnabled (LoggerFactory/getLogger ~(str *ns*)))
+      (.debug (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
 
 (defmacro info [& args]
   (if-cljs
    `(.info js/console ~(str *ns*) (apply pr-str ~args))
-   `(.info (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
+   `(when (.isInfoEnabled (LoggerFactory/getLogger ~(str *ns*)))
+      (.info (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
 
 (defmacro warn [& args]
   (if-cljs

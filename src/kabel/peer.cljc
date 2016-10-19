@@ -2,45 +2,45 @@
   "Peer 2 peer connectivity."
   (:require [kabel.platform-log :refer [debug info warn error]]
             [clojure.set :as set]
-            #?(:clj [full.async :refer [<? <<? go-try go-loop-try alt?]])
-            #?(:clj [full.lab :refer [go-loop-super]])
-            #?(:clj [kabel.http-kit :refer [client-connect!]]
-               :cljs [kabel.platform :refer [client-connect!]])
-            #?(:cljs [full.async :refer [throw-if-exception
-                                         *super* -track-exception -free-exception
-                                         -register-go -unregister-go]])
+            #?(:clj [superv.async :refer [<? <<? go-try go-loop-try alt?]])
+            #?(:clj [superv.lab :refer [go-loop-super]])
+            [kabel.client :refer [client-connect!]]
+            #?(:cljs [superv.async :refer [throw-if-exception
+                                           -track-exception -free-exception
+                                           -register-go -unregister-go]])
             #?(:clj [clojure.core.async :as async
                      :refer [>! timeout chan put! pub sub unsub close!]]
                :cljs [cljs.core.async :as async
                       :refer [>! timeout chan put! pub sub unsub close!]]))
   #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)]
-                            [full.async :refer [<<? <? go-try go-loop-try alt?]]
-                            [full.lab :refer [go-loop-super]])))
+                            [superv.async :refer [<<? <? go-try go-loop-try alt?]]
+                            [superv.lab :refer [go-loop-super]])))
 
 
 (defn drain [[peer [in out]]]
-  (go-loop-super [i (<? in)]
-                 (when i
-                   (recur (<? in)))))
+  (let [{{S :supervisor} :volatile} @peer]
+    (go-loop-super S [i (<? S in)]
+                   (when i
+                     (recur (<? S in))))))
 
 (defn connect
   "Connect peer to url."
-  [peer url error-ch]
-  (go-try
-   (let [{{:keys [middleware read-handlers write-handlers]} :volatile
-          :keys [id]} @peer
-         [c-in c-out] (<? (client-connect! url
-                                           error-ch
-                                           id
-                                           read-handlers
-                                           write-handlers))]
-     (drain (middleware [peer [c-in c-out]])))))
+  [peer url]
+  (let [{{S :supervisor} :volatile} @peer]
+    (go-try S
+     (let [{{:keys [middleware read-handlers write-handlers]} :volatile
+            :keys [id]} @peer
+           [c-in c-out] (<? S (client-connect! S url
+                                             id
+                                             read-handlers
+                                             write-handlers))]
+       (drain (middleware [peer [c-in c-out]]))))))
 
 (defn client-peer
   "Creates a client-side peer only."
-  ([id middleware]
-   (client-peer id middleware (atom {}) (atom {})))
-  ([id middleware read-handlers write-handlers]
+  ([S id middleware]
+   (client-peer S id middleware (atom {}) (atom {})))
+  ([S id middleware read-handlers write-handlers]
    (let [log (atom {})
          bus-in (chan)
          bus-out (pub bus-in :type)]
@@ -48,15 +48,16 @@
                        :middleware middleware
                        :read-handlers read-handlers
                        :write-handlers write-handlers
+                       :supervisor S
                        :chans [bus-in bus-out]}
             :id id}))))
 
 
 (defn server-peer
   "Constructs a listening peer."
-  ([handler id middleware]
-   (server-peer handler id middleware (atom {}) (atom {})))
-  ([handler id middleware read-handlers write-handlers]
+  ([S handler id middleware]
+   (server-peer S handler id middleware (atom {}) (atom {})))
+  ([S handler id middleware read-handlers write-handlers]
    (let [{:keys [new-conns url]} handler
          log (atom {})
          bus-in (chan)
@@ -66,10 +67,43 @@
                                        :read-handlers read-handlers
                                        :write-handlers write-handlers
                                        :log log
+                                       :supervisor S
                                        :chans [bus-in bus-out]})
                      :addresses #{(:url handler)}
                      :id id})]
-     (go-loop-super [[in out] (<? new-conns)]
+     (go-loop-super S [[in out] (<? S new-conns)]
                     (drain (middleware [peer [in out]]))
-                    (recur (<? new-conns)))
+                    (recur (<? S new-conns)))
      peer)))
+
+
+
+(defn start [peer]
+  (let [{{S :supervisor} :volatile} @peer]
+    (go-try S
+            (if (:started? @peer)
+              false
+              (let [stop-fn (-> @peer :volatile :handler :stop-fn)]
+                (info {:event :starting-peer :id (:id @peer)})
+                (swap! peer update-in [:volatile] (get-in @peer [:volatile :start-fn]))
+                (swap! peer assoc :started? true)
+                true)))))
+
+
+(defn stop [peer]
+  (let [{{S :supervisor} :volatile} @peer]
+    (go-try S
+            (if-not (:started? @peer)
+              false
+              (do
+                (info {:event :stopping-peer :id (:id @peer)})
+                (when-let [stop-fn (get-in @peer [:volatile :stop-fn])]
+                  (stop-fn :timeout 1000))
+                (<? S (timeout 200))
+                (when-let [hub (get-in @peer [:volatile :channel-hub])]
+                  (reset! hub {}))
+                (when-let [in (-> @peer :volatile :chans first)]
+                  (close! in))
+                (swap! peer assoc :started? false)
+                true)))))
+

@@ -1,4 +1,4 @@
-(ns kabel.platform
+(ns kabel.client
   (:require [kabel.platform-log :refer [debug info warn error]]
             [cognitect.transit :as transit]
             [incognito.transit :refer [incognito-read-handler incognito-write-handler]]
@@ -6,7 +6,7 @@
             [goog.Uri]
             [goog.events :as events]
             [cljs.core.async :as async :refer (take! put! close! chan)]
-            [full.async :refer [-error *super*]])
+            [superv.async :refer [-error]])
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]))
 
 
@@ -23,9 +23,9 @@
 Only supports websocket at the moment, but is supposed to dispatch on
   protocol of url. read-opts is ignored on cljs for now, use the
   platform-wide reader setup."
-  ([url err-ch peer-id]
-   (client-connect! url err-ch peer-id (atom {}) (atom {})))
-  ([url err-ch peer-id read-handlers write-handlers]
+  ([S url peer-id]
+   (client-connect! S url peer-id (atom {}) (atom {})))
+  ([S url peer-id read-handlers write-handlers]
    (when (on-node?)
      (.log js/console "Setting global W3C WebSocket API to 'websocket' package.")
      (set! js/WebSocket (.-w3cwebsocket (js/require "websocket"))))
@@ -34,7 +34,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
          out (chan)
          opener (chan)
          host (.getDomain (goog.Uri. (.replace url "ws" "http")))]
-     (info {:event :connecting-to :url :url url})
+     (info {:event :connecting-to :url url})
      (doto channel
        (events/listen goog.net.WebSocket.EventType.MESSAGE
                       (fn [evt]
@@ -57,14 +57,12 @@ Only supports websocket at the moment, but is supposed to dispatch on
                                 (put! in (assoc (transit/read reader s) :host host)))))
                           (catch js/Error e
                             (error {:event :cannot-read-transit-message :error e})
-                            (put! err-ch e)
-                            (put! (-error *super*) e)))))
+                            (put! (-error S) e)))))
        (events/listen goog.net.WebSocket.EventType.CLOSED
                       (fn [evt]
                         (let [e (ex-info "Connection closed!" {:event evt})]
                           (close! in)
-                          (put! err-ch e)
-                          (put! (-error *super*) e)
+                          (put! (-error S) e)
                           (try (put! opener e) (catch js/Object e))
                           (.close channel)
                           (close! opener))))
@@ -75,15 +73,13 @@ Only supports websocket at the moment, but is supposed to dispatch on
                         (let [e (ex-info "Connection error!" {:event evt})]
                           (error {:event :websocket-error :error evt})
                           (try (put! opener e) (catch js/Object e))
-                          (put! err-ch e)
-                          (put! (-error *super*) e)
+                          (put! (-error S) e)
                           (close! opener))))
        (try
          (.open channel url) ;; throws on connection failure? doesn't catch?
          (catch js/Object e
            (let [e (ex-info  "Connection failed!" {:event e})]
-             (put! (-error *super*) e)
-             (put! err-ch e)
+             (put! (-error S) e)
              (put! opener e)
              (close! opener)))))
      ((fn sender []
@@ -103,8 +99,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                          ))
                      (catch js/Error e
                        (error {:event :cannot-send-transit-message :error e})
-                       (put! (-error *super*) e)
-                       (put! err-ch e)))
+                       (put! (-error S) e)))
 
                    (sender))))))
      opener)))

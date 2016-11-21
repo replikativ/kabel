@@ -61,6 +61,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
        (events/listen goog.net.WebSocket.EventType.CLOSED
                       (fn [evt]
                         (let [e (ex-info "Connection closed!" {:event evt})]
+                          (info {:event :connection-closed :closed-event evt})
                           (close! in)
                           (put! (-error S) e)
                           (try (put! opener e) (catch js/Object e))
@@ -72,36 +73,38 @@ Only supports websocket at the moment, but is supposed to dispatch on
                       (fn [evt]
                         (let [e (ex-info "Connection error!" {:event evt})]
                           (error {:event :websocket-error :error evt})
+                          (put! (-error S) e) ;; TODO needs happen first for replikativ.connect
                           (try (put! opener e) (catch js/Object e))
-                          (put! (-error S) e)
                           (close! opener))))
        (try
          (.open channel url) ;; throws on connection failure? doesn't catch?
          (catch js/Object e
-           (let [e (ex-info  "Connection failed!" {:event e})]
+           (let [e (ex-info  "Connection failed!" {:event :connection-failed
+                                                   :error e})]
              (put! (-error S) e)
              (put! opener e)
              (close! opener)))))
      ((fn sender []
         (take! out
                (fn [m]
-                 ;; TODO close if nil
-                 (when m
-                   (try
-                     (let [i-write-handler (incognito-write-handler write-handlers)
-                           writer (transit/writer
-                                   :json
-                                   {:handlers {"default" i-write-handler}})
-                           to-send (transit/write writer (assoc m :sender peer-id))]
-                       (if-not (on-node?)
-                         (.send channel (js/Blob. #js [to-send])) ;; Browser
-                         (.send channel (js/Buffer. to-send)) ;; NodeJS
-                         ))
-                     (catch js/Error e
-                       (error {:event :cannot-send-transit-message :error e})
-                       (put! (-error S) e)))
+                 (if m
+                   (do
+                     (try
+                       (let [i-write-handler (incognito-write-handler write-handlers)
+                             writer (transit/writer
+                                     :json
+                                     {:handlers {"default" i-write-handler}})
+                             to-send (transit/write writer (assoc m :sender peer-id))]
+                         (if-not (on-node?)
+                           (.send channel (js/Blob. #js [to-send])) ;; Browser
+                           (.send channel (js/Buffer. to-send)) ;; NodeJS
+                           ))
+                       (catch js/Error e
+                         (error {:event :cannot-send-transit-message :error e})
+                         (put! (-error S) e)))
 
-                   (sender))))))
+                     (sender))
+                   (.close channel))))))
      opener)))
 
 

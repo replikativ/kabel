@@ -8,12 +8,12 @@
             [hasch.core :refer [uuid]]))
 
 
-(defn pong-middleware [[peer [in out]]]
+(defn pong-middleware [[S peer [in out]]]
   (go-loop-try S [i (<? S in)]
                (when i
                  (>? S out i)
                  (recur (<? S in))))
-  [peer [in out]])
+  [S peer [in out]])
 
 (deftest roundtrip-test
   (testing "Testing a roundtrip between a server and a client."
@@ -22,14 +22,14 @@
           url "ws://localhost:47291"
           handler (http-kit/create-http-kit-handler! S url sid)
           speer (peer/server-peer S handler sid pong-middleware)
-          cpeer (peer/client-peer S cid (fn [[peer [in out]]]
+          cpeer (peer/client-peer S cid (fn [[S peer [in out]]]
                                           (put? S out {:type :ping}) 
                                           (is (= (<?? S in)
                                                  {:type :ping
                                                   :sender sid
                                                   :host "localhost"}))
-                                          [peer [in out]]))]
+                                          [S peer [in out]]))]
       (<?? S (peer/start speer))
-      (<?? S (peer/connect cpeer url))
+      (<?? S (peer/connect S cpeer url))
       (<?? S (timeout 1000))
       (<?? S (peer/stop speer)))))

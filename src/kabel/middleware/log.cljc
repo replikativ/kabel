@@ -12,7 +12,7 @@
   "Appends messages of in and out to log-atom under [type :in/:out] to a vector.
 
   DEPRECATED: Use the generic function handler instead."
-  [log-atom type [peer [in out]]]
+  [log-atom type [S peer [in out]]]
   (let [new-in (chan)
         new-out (chan)]
     (go-loop [i (<! in)]
@@ -29,4 +29,4 @@
           (>! out o)
           (recur (<! new-out)))
         (close! new-out)))
-    [peer [new-in new-out]]))
+    [S peer [new-in new-out]]))

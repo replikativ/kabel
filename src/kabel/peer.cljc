@@ -17,24 +17,22 @@
                             [superv.lab :refer [go-loop-super]])))
 
 
-(defn drain [[peer [in out]]]
-  (let [{{S :supervisor} :volatile} @peer]
-    (go-loop-super S [i (<? S in)]
-                   (when i
-                     (recur (<? S in))))))
+(defn drain [[S peer [in out]]]
+  (go-loop-super S [i (<? S in)]
+                 (when i
+                   (recur (<? S in)))))
 
 (defn connect
   "Connect peer to url."
-  [peer url]
-  (let [{{S :supervisor} :volatile} @peer]
-    (go-try S
-     (let [{{:keys [middleware read-handlers write-handlers]} :volatile
-            :keys [id]} @peer
-           [c-in c-out] (<? S (client-connect! S url
-                                             id
-                                             read-handlers
-                                             write-handlers))]
-       (drain (middleware [peer [c-in c-out]]))))))
+  [S peer url]
+  (go-try S
+          (let [{{:keys [middleware read-handlers write-handlers]} :volatile
+                 :keys [id]} @peer
+                [c-in c-out] (<? S (client-connect! S url
+                                                    id
+                                                    read-handlers
+                                                    write-handlers))]
+            (drain (middleware [S peer [c-in c-out]])))))
 
 (defn client-peer
   "Creates a client-side peer only."
@@ -72,7 +70,7 @@
                      :addresses #{(:url handler)}
                      :id id})]
      (go-loop-super S [[in out] (<? S new-conns)]
-                    (drain (middleware [peer [in out]]))
+                    (drain (middleware [S peer [in out]]))
                     (recur (<? S new-conns)))
      peer)))
 

@@ -11,7 +11,7 @@
 
 
 
-(defn block-detector [type [peer [in out]]]
+(defn block-detector [type [S peer [in out]]]
   "Warns when either in or out is blocked for longer than 5 seconds and retries."
   (let [new-in (chan)
         new-out (chan)]
@@ -33,4 +33,4 @@
               (do (warn {:event :output-channel-blocked :message o})
                   (recur o)))
         (close! new-out)))
-    [peer [new-in new-out]]))
+    [S peer [new-in new-out]]))

@@ -10,7 +10,7 @@
 
 (defn handler
   "Applies given callback functions to messages on [in out] channels and passes through the return value of the callback."
-  [cb-in cb-out [peer [in out]]]
+  [cb-in cb-out [S peer [in out]]]
   (let [new-in (chan)
         new-out (chan)]
     (go-loop [i (<! in)]
@@ -27,4 +27,4 @@
             (>! out o))
           (recur (<! new-out)))
         (close! new-out)))
-    [peer [new-in new-out]]))
+    [S peer [new-in new-out]]))

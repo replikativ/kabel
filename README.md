@@ -1,4 +1,4 @@
-# kabel
+# kabel [![CircleCI](https://circleci.com/gh/replikativ/kabel.svg?style=svg)](https://circleci.com/gh/replikativ/kabel)
 
 kabel (German for cable/wire) is a minimal, modern connection library
 modelling a bidirectional wire to pass Clojure values between
@@ -31,10 +31,12 @@ replikativ](https://github.com/replikativ/replikativ/blob/master/src/replikativ/
 you do not need to write platform neutral symmetric middlewares, so on
 the JVM you can of course do IO without `core.async`.
 
-We also extended and build on
-[full.async](https://github.com/fullcontact/full.monty/) to catch all
-exceptions in an Erlang style monitoring fashion and propagate them
-back through a parametrizable error channel.
+We also extended and build
+on [superv.async](https://github.com/replikativ/superv.async/) to catch all
+exceptions in an Erlang style monitoring fashion and propagate them back through
+a parametrizable error channel. We are thinking about ways to refactor kabel, so
+that it can be decoupled from this error handling without losing the error
+handling guarantees.
 
 ## Usage
 

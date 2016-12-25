@@ -6,6 +6,7 @@
   :dependencies [[org.clojure/clojure "1.9.0-alpha14"]
                  [org.clojure/clojurescript "1.9.229"]
                  [io.replikativ/superv.async "0.2.2"]
+                 [io.replikativ/incognito "0.2.0"]
 
                  [http-kit "2.2.0"]
                  [http.async.client "1.2.0"]

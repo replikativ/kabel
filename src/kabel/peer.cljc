@@ -2,8 +2,8 @@
   "Peer 2 peer connectivity."
   (:require [kabel.platform-log :refer [debug info warn error]]
             [clojure.set :as set]
-            #?(:clj [superv.async :refer [<? <<? go-try go-loop-try alt?]])
-            #?(:clj [superv.lab :refer [go-loop-super]])
+            #?(:clj [superv.async :refer [<? <<? go-try go-loop-try alt?
+                                          go-loop-super]])
             [kabel.client :refer [client-connect!]]
             #?(:cljs [superv.async :refer [throw-if-exception
                                            -track-exception -free-exception
@@ -13,8 +13,8 @@
                :cljs [cljs.core.async :as async
                       :refer [>! timeout chan put! pub sub unsub close!]]))
   #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)]
-                            [superv.async :refer [<<? <? go-try go-loop-try alt?]]
-                            [superv.lab :refer [go-loop-super]])))
+                            [superv.async :refer [<<? <? go-try go-loop-try alt?
+                                                  go-loop-super]])))
 
 
 (defn drain [[S peer [in out]]]

@@ -5,8 +5,7 @@
             [clojure.string :as str]
             [kabel.platform-log :refer [debug info warn error]]
             [incognito.transit :refer [incognito-read-handler incognito-write-handler]]
-            [superv.async :refer [<? <?? go-try -error]]
-            [superv.lab :refer [go-loop-super]]
+            [superv.async :refer [<? <?? go-try -error go-loop-super]]
             [clojure.core.async :as async
              :refer [>! timeout chan alt! put! close!]]
             [manifold.stream :as s]

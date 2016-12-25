@@ -1,11 +1,11 @@
-(defproject io.replikativ/kabel "0.1.9-SNAPSHOT"
+(defproject io.replikativ/kabel "0.1.9"
   :description "A library for simple wire-like connectivity semantics."
   :url "https://github.com/replikativ/kabel"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.9.0-alpha14"]
                  [org.clojure/clojurescript "1.9.229"]
-                 [io.replikativ/superv.async "0.2.2-SNAPSHOT"]
+                 [io.replikativ/superv.async "0.2.2"]
 
                  [http-kit "2.2.0"]
                  [http.async.client "1.2.0"]
@@ -15,6 +15,6 @@
                                                         ;; once cljs
                                                         ;; works again
                                                         ;; without it
-                 [io.replikativ/hasch "0.3.1"]
+                 [io.replikativ/hasch "0.3.2"]
 
                  [org.slf4j/slf4j-api "1.7.12"]])

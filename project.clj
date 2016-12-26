@@ -1,4 +1,4 @@
-(defproject io.replikativ/kabel "0.1.10"
+(defproject io.replikativ/kabel "0.1.11"
   :description "A library for simple wire-like connectivity semantics."
   :url "https://github.com/replikativ/kabel"
   :license {:name "Eclipse Public License"

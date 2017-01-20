@@ -1,17 +1,11 @@
 (ns kabel.http-kit
   "http-kit specific IO operations."
-  (:require [clojure.set :as set]
-            [clojure.edn :as edn]
-            [clojure.string :as str]
-            [kabel.platform-log :refer [debug info warn error]]
-            [incognito.transit :refer [incognito-read-handler incognito-write-handler]]
+  (:require [kabel.platform-log :refer [debug info warn error]]
             [superv.async :refer [<? <?? go-try -error go-loop-super]]
             [clojure.core.async :as async
              :refer [<! >! timeout chan alt! put! close! buffer]]
             [org.httpkit.server :refer :all]
-            [cognitect.transit :as transit])
-  (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
-           [com.cognitect.transit.impl WriteHandlers$MapWriteHandler]))
+            [cognitect.transit :as transit]))
 
 
 
@@ -37,32 +31,23 @@
                        (go-loop-super S [m (<? S out)]
                                       (when m
                                         (if (@channel-hub channel)
-                                          (do
-                                            (with-open [baos (ByteArrayOutputStream.)]
-                                              (let [writer (transit/writer baos :json
-                                                                           {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
-                                                (debug {:event :server-sending-message
-                                                        :url url :type (:type m)})
-                                                (transit/write writer (assoc m :sender peer-id))
-                                                (debug {:event :server-sent-transit-message
-                                                        :url url}))
-                                              (send! channel ^bytes (.toByteArray baos))))
+                                          (do (debug  {:event :sending-msg})
+                                              #_(prn "hk snd" m)
+                                              (send! channel m))
                                           (warn {:event :dropping-msg-because-of-closed-channel
                                                  :url url :message m}))
                                         (recur (<? S out))))
                        (on-close channel (fn [status]
                                            (let [e (ex-info "Connection closed!" {:status status})
                                                  host (:remote-addr request)]
-                                             (warn {:event :channel-closed
-                                                    :host host :status status})
-                                             (put! (-error S) e))
+                                             (debug {:event :channel-closed
+                                                     :host host :status status})
+                                             #_(put! (-error S) e))
                                            (swap! channel-hub dissoc channel)
                                            (go-try S (while (<! in))) ;; flush
                                            (close! in)))
                        (on-receive channel (fn [data]
-                                             (let [blob data
-                                                   host (:remote-addr request)]
-
+                                             (let [host (:remote-addr request)]
                                                (try
                                                  (debug {:event :received-byte-message})
                                                  (when (> (count in-buffer) 100)
@@ -72,15 +57,8 @@
                                                                 " too full:" (count in-buffer))
                                                            {:url url
                                                             :count (count in-buffer)}))) 
-                                                 (with-open [bais (ByteArrayInputStream. blob)]
-                                                   (let [reader
-                                                         (transit/reader bais :json
-                                                                         {:handlers {"incognito" (incognito-read-handler read-handlers)}})
-                                                         m (transit/read reader)]
-                                                     (debug {:event :server-received-transit-blob
-                                                             :url url})
-                                                     (async/put! in (assoc m :host host))))
-
+                                                 #_(prn "hk rec" data)
+                                                 (async/put! in data)
                                                  (catch Exception e
                                                    (put! (-error S)
                                                          (ex-info "Cannot receive data." {:data data

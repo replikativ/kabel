@@ -4,16 +4,19 @@
             [kabel.http-kit :as http-kit]
             [kabel.peer :as peer]
             [superv.async :refer [<?? go-try S go-loop-try <? >? put?]]
-            [clojure.core.async :refer [timeout]]
+            [clojure.core.async :refer [timeout go go-loop <! >! <!! put! chan]]
+            [kabel.middleware.transit :refer [transit]]
             [hasch.core :refer [uuid]]))
 
 
 (defn pong-middleware [[S peer [in out]]]
-  (go-loop-try S [i (<? S in)]
-               (when i
-                 (>? S out i)
-                 (recur (<? S in))))
-  [S peer [in out]])
+  (let [new-in (chan)
+        new-out (chan)]
+    (go-loop [i (<! in)]
+      (when i
+        (>! out i)
+        (recur (<! in))))
+    [S peer [new-in new-out]]))
 
 (deftest roundtrip-test
   (testing "Testing a roundtrip between a server and a client."
@@ -23,12 +26,14 @@
           handler (http-kit/create-http-kit-handler! S url sid)
           speer (peer/server-peer S handler sid pong-middleware)
           cpeer (peer/client-peer S cid (fn [[S peer [in out]]]
-                                          (put? S out {:type :ping}) 
-                                          (is (= (<?? S in)
-                                                 {:type :ping
-                                                  :sender sid
-                                                  :host "localhost"}))
-                                          [S peer [in out]]))]
+                                          (let [new-in (chan)
+                                                new-out (chan)]
+                                            (go-try S
+                                              (put? S out "ping")
+                                              (is (= "ping" (<? S in)))
+                                              (put? S out "ping2")
+                                              (is (= "ping2" (<? S in))))
+                                            [S peer [new-in new-out]])))]
       (<?? S (peer/start speer))
       (<?? S (peer/connect S cpeer url))
       (<?? S (timeout 1000))

@@ -1,16 +1,10 @@
 (ns kabel.client
   "http.async.client specific client IO operations."
-  (:require [clojure.set :as set]
-            [clojure.string :as str]
-            [kabel.platform-log :refer [debug info warn error]]
-            [incognito.transit :refer [incognito-read-handler incognito-write-handler]]
+  (:require [kabel.platform-log :refer [debug info warn error]]
             [superv.async :refer [<? <?? go-try -error go-loop-super]]
             [clojure.core.async :as async
              :refer [<! >! timeout chan alt! put! close! buffer]]
-            [http.async.client :as cli]
-            [cognitect.transit :as transit])
-  (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
-           [com.cognitect.transit.impl WriteHandlers$MapWriteHandler]))
+            [http.async.client :as cli]))
 
 
 (defn client-connect!
@@ -40,12 +34,9 @@
                                                (if (@websockets ws)
                                                  (do
                                                    (debug {:event :client-sending-message
-                                                           :url url :type (:type m)})
-                                                   (with-open [baos (ByteArrayOutputStream.)]
-                                                     (let [writer (transit/writer baos :json
-                                                                                  {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
-                                                       (transit/write writer (assoc m :sender peer-id) ))
-                                                     (cli/send ws :byte (.toByteArray baos))))
+                                                           :url url})
+                                                   (cli/send ws (if (string? m) :text :byte) m)
+                                                   #_(prn "cli send" m))
                                                  (warn {:event :dropping-msg-because-of-closed-channel
                                                         :url url :message m}))
                                                (recur (<? S out))))
@@ -63,14 +54,34 @@
                                           {:url url
                                            :count (count in-buffer)})))
                                 (debug {:event :received-byte-message
+                                        :url url
                                         :in-buffer-count (count in-buffer)})
-                                (with-open [bais (ByteArrayInputStream. data)]
-                                  (let [reader
-                                        (transit/reader bais :json
-                                                        {:handlers {"incognito" (incognito-read-handler read-handlers)}})
-                                        m (transit/read reader)]
-                                    (debug {:event :received-transit-blob :url url :type (:type m)})
-                                    (async/put! in (assoc m :host host))))
+                                ;; TODO add host
+                                #_(prn "cli bytes")
+                                (async/put! in data)
+                                (catch Exception e
+                                  (let [e (ex-info "Cannot receive data." {:url url
+                                                                           :data data
+                                                                           :error e})]
+                                    (error {:event :cannot-receive-message
+                                            :error e})
+                                    (put! (-error S) e)
+                                    (.close ws)))))
+                      :text (fn [ws ^String data]
+                              (try ;; todo merge with byte
+                                (when (> (count in-buffer) 100)
+                                  (.close ws)
+                                  (throw (ex-info
+                                          (str "incoming buffer for " url
+                                               " too full:" (count in-buffer))
+                                          {:url url
+                                           :count (count in-buffer)})))
+                                (debug {:event :received-byte-message
+                                        :url url
+                                        :in-buffer-count (count in-buffer)})
+                                ;; TODO add host
+                                (async/put! in data)
+                                #_(prn "cli text" data )
                                 (catch Exception e
                                   (let [e (ex-info "Cannot receive data." {:url url
                                                                            :data data
@@ -82,12 +93,12 @@
                       :close (fn [ws code reason]
                                (let [e (ex-info "Connection closed!" {:code code
                                                                       :reason reason})]
-                                 (warn {:event :closing-connection :url url :code code
-                                        :reason reason})
+                                 (debug {:event :closing-connection :url url :code code
+                                         :reason reason})
                                  (close! in)
                                  (go-try S (while (<! in))) ;; flush
                                  (swap! websockets disj ws)
-                                 (put! (-error S) e)
+                                 #_(put! (-error S) e)
                                  (try (put! opener e) (catch Exception e))
                                  (close! opener)))
                       :error (fn [ws err]
@@ -107,3 +118,5 @@
          (close! in)
          (close! opener)))
      opener)))
+
+

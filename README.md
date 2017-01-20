@@ -124,7 +124,7 @@ Useful middlewares still missing:
 - remote debugging,
   sending [superv.async](https://github.com/replikativ/superv.async) exceptions
   back to the server
-- other usefull `ring` middlewares which should be ported?  - ...
+- other usefull `ring` middlewares which should can be wrapped?
 
 ## Connectivity
 
@@ -133,6 +133,7 @@ SSEs, WebRTC or normal sockets should not be hard to add.
 
 
 ## TODO
+- android compatible websocket client (e.g. tyrus)
 - factor platform neutral logging
 - implement node.js websocket server
 

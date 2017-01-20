@@ -2,6 +2,7 @@
   "Generic callback handler middleware."
   (:require [kabel.platform-log :refer [debug info warn error]]
             [clojure.set :as set]
+            [superv.async :refer [<? >?]]
             #?(:clj [clojure.core.async :as async
                       :refer [<! >! chan go put! go-loop close!]]
                :cljs [cljs.core.async :as async :refer [<! >! chan put! close!]]))
@@ -9,22 +10,24 @@
 
 
 (defn handler
-  "Applies given callback functions to messages on [in out] channels and passes through the return value of the callback."
+  "Applies given callback functions to messages on [in out] channels and passes
+  through the return value of the callback. The callbacks have to return a
+  go-channel."
   [cb-in cb-out [S peer [in out]]]
   (let [new-in (chan)
         new-out (chan)]
-    (go-loop [i (<! in)]
+    (go-loop [i (<? S in)]
       (if i
         (do
-          (when-let [i (cb-in i)])
-          (>! new-in i)
-          (recur (<! in)))
+          (when-let [i (<? S (cb-in i))]
+            (>? S new-in i))
+          (recur (<? S in)))
         (close! new-in)))
     (go-loop [o (<! new-out)]
       (if o
         (do
-          (when-let [o (cb-out o)]
-            (>! out o))
-          (recur (<! new-out)))
+          (when-let [o (<? S (cb-out o))]
+            (>? S out o))
+          (recur (<? S new-out)))
         (close! new-out)))
     [S peer [new-in new-out]]))

@@ -1,11 +1,13 @@
 # kabel [![CircleCI](https://circleci.com/gh/replikativ/kabel.svg?style=svg)](https://circleci.com/gh/replikativ/kabel)
 
-kabel (German for cable/wire) is a minimal, modern connection library
-modelling a bidirectional wire to pass Clojure values between
-endpoints. Peers in Clojure and ClojureScript are symmetric and hence
-allow symmetric cross-platform implementations. Clojure peers can
-connect to Clojure and ClojureScript peers in the same way and vice
-versa. kabel uses web-sockets and transit is the serialization format.
+kabel (German for cable/wire) is a minimal, modern connection library modelling
+a bidirectional wire to pass Clojure values between peers. Peers in Clojure and
+ClojureScript are symmetric and hence allow symmetric cross-platform
+implementations. Clojure peers can connect to Clojure and ClojureScript peers in
+the same way and vice versa. kabel can use any bidirectional messaging channel,
+currently it supports web-sockets. It also ships
+a [transit](https://github.com/cognitect/transit-format) middleware for
+efficient serialization.
 
 
 ## Rationale
@@ -53,16 +55,19 @@ From the tests (note that messages are always maps):
             [kabel.http-kit :as http-kit]
             [kabel.peer :as peer]
             [superv.async :refer [<?? go-try S go-loop-try <? >? put?]]
-            [clojure.core.async :refer [timeout]]
+            [clojure.core.async :refer [timeout go go-loop <! >! <!! put! chan]]
+            [kabel.middleware.transit :refer [transit]]
             [hasch.core :refer [uuid]]))
 
 
-(defn pong-middleware [[peer [in out]]]
-  (go-loop-try S [i (<? S in)]
-               (when i
-                 (>? S out i)
-                 (recur (<? S in))))
-  [peer [in out]])
+(defn pong-middleware [[S peer [in out]]]
+  (let [new-in (chan)
+        new-out (chan)]
+    (go-loop [i (<! in)]
+      (when i
+        (>! out i)
+        (recur (<! in))))
+    [S peer [new-in new-out]]))
 
 (deftest roundtrip-test
   (testing "Testing a roundtrip between a server and a client."
@@ -71,18 +76,19 @@ From the tests (note that messages are always maps):
           url "ws://localhost:47291"
           handler (http-kit/create-http-kit-handler! S url sid)
           speer (peer/server-peer S handler sid pong-middleware)
-          cpeer (peer/client-peer S cid (fn [[peer [in out]]]
-                                          (put? S out {:type :ping}) 
-                                          (is (= (<?? S in)
-                                                 {:type :ping
-                                                  :sender sid
-                                                  :host "localhost"}))
-                                          [peer [in out]]))]
+          cpeer (peer/client-peer S cid (fn [[S peer [in out]]]
+                                          (let [new-in (chan)
+                                                new-out (chan)]
+                                            (go-try S
+                                              (put? S out "ping")
+                                              (is (= "ping" (<? S in)))
+                                              (put? S out "ping2")
+                                              (is (= "ping2" (<? S in))))
+                                            [S peer [new-in new-out]])))]
       (<?? S (peer/start speer))
-      (<?? S (peer/connect cpeer url))
+      (<?? S (peer/connect S cpeer url))
       (<?? S (timeout 1000))
       (<?? S (peer/stop speer)))))
-
 ~~~
 
 The client-side works the same in ClojureScript from the browser.

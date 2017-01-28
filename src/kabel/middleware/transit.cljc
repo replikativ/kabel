@@ -1,11 +1,12 @@
 (ns kabel.middleware.transit
   (:require
    [kabel.middleware.handler :refer [handler]]
-   [superv.async :refer [<? go-try]]
-   [cognitect.transit :as transit]
+   #?(:cljs [kabel.util :refer [on-node?]])
+   #?(:clj [superv.async :refer [go-try]])
+   [cognitect.transit :as t]
    [incognito.transit :refer [incognito-read-handler incognito-write-handler]])
-  #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream]
-                   [com.cognitect.transit.impl WriteHandlers$MapWriteHandler])))
+  #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream])
+     :cljs (:require-macros [superv.async :refer [go-try]])))
 
 
 (defn transit
@@ -14,27 +15,44 @@
    (transit :json (atom {}) (atom {}) [S peer [in out]]))
   ([backend read-handlers write-handlers [S peer [in out]]]
    (handler #(go-try S
-                     #?(:clj (with-open [bais (ByteArrayInputStream. %)]
-                               (let [reader
-                                     (transit/reader bais backend
-                                                     {:handlers {
-                                                                 "incognito" (incognito-read-handler read-handlers)}})]
-                                 (transit/read reader)))
-                        :cljs (let [reader
-                                    (transit/reader % backend
-                                                    {"u" (fn [v] (cljs.core/uuid v))
-                                                     :handlers {"incognito" (incognito-read-handler read-handlers)}})]
-                                (transit/read reader))))
-             #(go-try S
-                      #?(:clj (with-open [baos (ByteArrayOutputStream.)]
-                                (let [writer (transit/writer baos backend
-                                                             {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
-                                  (transit/write writer %))
-                                (.toByteArray baos))
-                         :cljs (let [writer (transit/writer backend
-                                                            {:handlers {java.util.Map (incognito-write-handler write-handlers)}})]
-                                 (transit/write writer %))))
-             [S peer [in out]])))
+                     (let [{:keys [kabel/serialization kabel/payload]} %]
+                       (if (or (= serialization :transit-json)
+                               (= serialization :transit-msgpack))
+                         (let [ir (incognito-read-handler read-handlers)
+                               v #?(:clj (with-open [bais (ByteArrayInputStream. payload)]
+                                           (let [reader
+                                                 (t/reader bais backend
+                                                           {:handlers {"incognito" ir}})]
+                                             (t/read reader)))
+                                    :cljs (let [reader
+                                                (t/reader backend
+                                                          {:handlers {"u" (fn [v] (cljs.core/uuid v))
+                                                                      "incognito" ir}})]
+                                            (t/read reader (-> (js/TextDecoder. "utf-8")
+                                                               (.decode payload)))))]
+                           (if (map? v)
+                             (merge v (dissoc % :kabel/serialization :kabel/payload))
+                             v))
+                         %)))
+            #(go-try S
+                     (if (:kabel/serialization %) ;; already serialized
+                       %
+                       {:kabel/serialization
+                        (keyword (str "transit-" (name backend)))
+                        :kabel/payload
+                        #?(:clj (with-open [baos (ByteArrayOutputStream.)]
+                                  (let [iw (incognito-write-handler write-handlers)
+                                        writer (t/writer baos backend {:handlers {java.util.Map iw}})]
+                                    (t/write writer %))
+                                  (.toByteArray baos))
+                           :cljs (let [iw (incognito-write-handler write-handlers)
+                                       writer (t/writer backend {:handlers {"default" iw}})
+                                       encoder (js/TextEncoder. "utf-8")]
+                                   (->> (t/write writer %)
+                                        (.encode encoder))))}))
+            [S peer [in out]])))
+
+
 
 (comment
   (require '[superv.async :refer [S <??]])
@@ -47,7 +65,7 @@
     )
 
 
-(let [reader (transit/reader :json {:handlers ;; remove if uuid problem is gone
+  (let [reader (transit/reader :json {:handlers ;; remove if uuid problem is gone
                                                               {"u" (fn [v] (cljs.core/uuid v))
                                                                "incognito" (incognito-read-handler read-handlers)}})]
                             (if-not (on-node?)

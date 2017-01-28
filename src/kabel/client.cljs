@@ -1,5 +1,6 @@
 (ns kabel.client
   (:require [kabel.binary :refer [to-binary from-binary]]
+            [kabel.util :refer [on-node?]]
             [goog.net.WebSocket]
             [goog.Uri]
             [goog.events :as events]
@@ -7,13 +8,6 @@
             [superv.async :refer [-error]])
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]
                    [kabel.platform-log :refer [debug info warn error]]))
-
-
-(defn on-node? []
-  (and (exists? js/process)
-       (exists? js/process.versions)
-       (exists? js/process.versions.node)
-       true))
 
 
 
@@ -38,8 +32,8 @@ Only supports websocket at the moment, but is supposed to dispatch on
        (events/listen goog.net.WebSocket.EventType.MESSAGE
                       (fn [evt]
                         (try
-                          (from-binary (.. % -target -result)
-                                       #(put! in (if (associative? %)
+                          (from-binary (.. evt -target -result)
+                                       #(put! in (if (map? %)
                                                    (assoc % :kabel/host host)
                                                    %)))
                           (catch js/Error e

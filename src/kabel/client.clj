@@ -1,12 +1,18 @@
 (ns kabel.client
-  "http.async.client specific client IO operations."
+  "tyrus client specific client IO operations."
   (:require [kabel.platform-log :refer [debug info warn error]]
             [kabel.binary :refer [to-binary from-binary]]
-            [superv.async :refer [<? <?? go-try -error go-loop-super]]
+            [superv.async :refer [<? <?? go-try -error go-loop-super S >?]]
             [clojure.core.async :as async
-             :refer [<! >! timeout chan alt! put! close! buffer]]
-            [http.async.client :as cli]))
+             :refer [<! >! timeout chan alt! put! close! buffer]])
+  (:import [javax.websocket Endpoint ClientEndpointConfig WebSocketContainer
+            ClientEndpointConfig$Builder MessageHandler$Whole]
+           [org.glassfish.tyrus.client ClientManager]
+           [java.nio ByteBuffer]))
 
+;; Build by https://tyrus.java.net/documentation/1.13.1/index/getting-started.html
+
+(def cec (.build (ClientEndpointConfig$Builder/create)))
 
 (defn client-connect!
   "Connects to url. Puts [in out] channels on return channel when ready.
@@ -16,7 +22,7 @@
   ([S url peer-id]
    (client-connect! S url peer-id (atom {}) (atom {})))
   ([S url peer-id read-handlers write-handlers]
-   (defonce singleton-http-client (cli/create-client))
+   (defonce singleton-http-client (ClientManager/createClient))
    (client-connect! S url peer-id read-handlers write-handlers singleton-http-client))
   ([S url peer-id read-handlers write-handlers http-client]
    (let [in-buffer (buffer 1024) ;; standard size
@@ -26,7 +32,108 @@
          websockets (atom #{})
          host (.getHost (java.net.URL. (.replace url "ws" "http")))]
      (try
-       (cli/websocket http-client url
+       (.connectToServer
+        http-client
+        (proxy [Endpoint] []
+          (onOpen [session config]
+            (info {:event :websocket-opened :websocket session :url url})
+            (go-loop-super S [m (<? S out)] ;; ensure draining out on disconnect
+              (when m
+                (if (@websockets session)
+                  (do
+                    (debug {:event :client-sending-message
+                            :url url})
+                    @(.sendBinary (.getAsyncRemote session)
+                                  (ByteBuffer/wrap (to-binary m)))
+                    #_(prn "cli send" m))
+                  (warn {:event :dropping-msg-because-of-closed-channel
+                         :url url :message m}))
+                (recur (<? S out))))
+            (swap! websockets conj session)
+            (async/put! opener [in out])
+            (close! opener)
+
+            (try
+              (.addMessageHandler session
+                                  (proxy [MessageHandler$Whole] []
+                                    (onMessage [message]
+                                      (let [data (.array message)]
+                                        (try
+                                          (when (> (count in-buffer) 100)
+                                            (.close session)
+                                            (throw (ex-info
+                                                    (str "incoming buffer for " url
+                                                         " too full:" (count in-buffer))
+                                                    {:url url
+                                                     :count (count in-buffer)})))
+                                          (debug {:event :received-byte-message
+                                                  :url url
+                                                  :in-buffer-count (count in-buffer)})
+                                          (let [m (from-binary data)]
+                                            (async/put! in (if (map? m)
+                                                             (assoc m :kabel/host host)
+                                                             m)))
+                                          (catch Exception e
+                                            (let [e (ex-info "Cannot receive data." {:url url
+                                                                                     :data data
+                                                                                     :error e})]
+                                              (error {:event :cannot-receive-message
+                                                      :error e})
+                                              (put! (-error S) e)
+                                              (.close session))))))))
+              (catch java.io.IOException e
+                (prn e))))
+          (onClose [reason session]
+            (let [e (ex-info "Connection closed!" {:reason reason})]
+              (debug {:event :closing-connection :url url
+                      :reason reason})
+              (close! in)
+              (go-try S (while (<! in))) ;; flush
+              (swap! websockets disj session)
+              (put! (-error S) e)
+              (try (put! opener e) (catch Exception e))
+              (close! opener)))
+          (onError [session err]
+            (let [e (ex-info "Websocket error."
+                             {:type :websocket-connection-error
+                              :url url
+                              :error err})]
+              (put! (-error S) e)
+              (error {:event :websocket-error :url url :error err})
+              (.close session))))
+        cec
+        (java.net.URI. url))
+       (catch Exception e
+         (error {:event :client-connect-error :url url :error e})
+         (async/put! opener (ex-info "client-connect error"
+                                     {:type :websocket-connection-error
+                                      :url url
+                                      :error e}))
+         (close! in)
+         (close! opener)))
+     opener)))
+
+(comment
+  (def client (ClientManager/createClient))
+
+  (.connectToServer
+   client
+   (proxy [Endpoint] []
+     (onOpen [session config]
+       (prn "opened")
+       (try
+         (clojure.pprint/pprint (clojure.reflect/reflect session))
+         (.addMessageHandler session
+                             (proxy [MessageHandler$Whole] []
+                               (onMessage [message]
+                                 (prn "Client received:" (from-binary (.array message))))))
+         (.sendBinary (.getAsyncRemote session) (ByteBuffer/wrap (to-binary "Foo bar")))
+         (catch java.io.IOException e
+           (prn e)))))
+   cec
+   (java.net.URI. "ws://localhost:47291"))
+
+(cli/websocket http-client url
                       :open (fn [ws]
                               (info {:event :websocket-opened :websocket ws :url url})
                               (go-loop-super S
@@ -43,8 +150,7 @@
                                                (recur (<? S out))))
                               (swap! websockets conj ws)
                               (async/put! opener [in out])
-                              (close! opener)
-                              )
+                              (close! opener))
                       :byte (fn [ws ^bytes data]
                               (try
                                 (when (> (count in-buffer) 100)
@@ -60,7 +166,7 @@
                                 ;; TODO add host
                                 #_(prn "cli bytes")
                                 (let [m (from-binary data)]
-                                  (async/put! in (if (associative? m)
+                                  (async/put! in (if (map? m)
                                                    (assoc m :kabel/host host)
                                                    m)))
                                 (catch Exception e
@@ -95,14 +201,32 @@
                                  (put! (-error S) e)
                                  (error {:event :websocket-error :url url :error err})
                                  (.close ws))))
-       (catch Exception e
-         (error {:event :client-connect-error :url url :error e})
-         (async/put! opener (ex-info "client-connect error"
-                                     {:type :websocket-connection-error
-                                      :url url
-                                      :error e}))
-         (close! in)
-         (close! opener)))
-     opener)))
+
+
+(defn pong-middleware [[S peer [in out]]]
+  (let [new-in (chan)
+        new-out (chan)]
+    (go-loop-super S [i (<? S in)]
+      (when i
+        (prn "SERVER mirror" i)
+        (>? S out i)
+        (recur (<? S in))))
+    [S peer [new-in new-out]]))
+
+
+(require '[kabel.http-kit :as http-kit]
+         '[kabel.peer :as peer])
+
+(let [sid #uuid "fd0278e4-081c-4925-abb9-ff4210be271b"
+      url "ws://localhost:47291"
+      handler (http-kit/create-http-kit-handler! S url sid)]
+  (def speer (peer/server-peer S handler sid pong-middleware)))
+
+
+(<?? S (peer/start speer))
+(<?? S (peer/stop speer))
+
+
+  )
 
 

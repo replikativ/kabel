@@ -130,7 +130,7 @@ Useful middlewares still missing:
 - remote debugging,
   sending [superv.async](https://github.com/replikativ/superv.async) exceptions
   back to the server
-- other usefull `ring` middlewares which should can be wrapped?
+- other usefull `ring` middlewares which can be wrapped?
 
 ## Connectivity
 

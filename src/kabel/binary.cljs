@@ -1,13 +1,8 @@
 (ns kabel.binary
   "This namespace provides a minimal binary encoding for all connection types."
   (:require [cljs.reader :refer [read-string]]
-            [hasch.platform :refer [utf8]]))
-
-(defn on-node? []
-  (and (exists? js/process)
-       (exists? js/process.versions)
-       (exists? js/process.versions.node)
-       true))
+            [hasch.platform :refer [utf8]]
+            [kabel.util :refer [on-node?]]))
 
 (def encoding-table {:binary          0
                      :string          1
@@ -33,41 +28,25 @@
 
 
 (defn from-binary [binary cb]
-  (if-not (on-node?)
-    ;; Browser
-    (let [l (.-size binary)
-          fr (js/FileReader.)]
-      (set! (.-onload fr)
-            #(let [b (.. % -target -result)
-
-                   encoding (-> (.slice b 0 4)
-                                (js/Uint8Array.)
-                                (aget 3)
-                                decoding-table)
-                   payload (js/Uint8Array. (.slice b 4 l))]
-               (cb
-                (if (= encoding :pr-str)
-                  (-> (js/TextDecoder. "utf-8")
-                      (.decode payload)
-                      read-string)
-                  {:kabel/serialization encoding
-                   :kabel/payload payload}))))
-      (.readAsArrayBuffer fr binary))
-    ;; nodejs TODO needs to be retested
-    (let [l (.-length binary)
-          encoding (-> (.slice binary 0 4)
-                       (js/Uint8Array.)
-                       (aget 3)
-                       decoding-table)
-          payload (js/Uint8Array. (.slice binary 4 l))]
-      (cb
-       (if (= encoding :pr-str)
-         ;; TODO use also TextDecoder or non-stack blowing routine
-         (js/String.fromCharCode.apply
-          nil
-          (js/Uint8Array. binary))
-         {:kabel/serialization encoding
-          :kabel/payload payload})))))
+  (let [l (if (on-node?)
+            (.-length binary) ;; Buffer
+            (.-size binary)) ;; Blob
+        fr (js/FileReader.)]
+    (set! (.-onload fr)
+          #(let [b (.. % -target -result)
+                 encoding (-> (.slice b 0 4)
+                              (js/Uint8Array.)
+                              (aget 3)
+                              decoding-table)
+                 payload (js/Uint8Array. (.slice b 4 l))]
+             (cb
+              (if (= encoding :pr-str)
+                (-> (js/TextDecoder. "utf-8")
+                    (.decode payload)
+                    read-string)
+                {:kabel/serialization encoding
+                 :kabel/payload payload}))))
+    (.readAsArrayBuffer fr binary)))
 
 
 

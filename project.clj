@@ -1,4 +1,4 @@
-(defproject io.replikativ/kabel "0.1.12-SNAPSHOT"
+(defproject io.replikativ/kabel "0.2.0-SNAPSHOT"
   :description "A library for simple wire-like connectivity semantics."
   :url "https://github.com/replikativ/kabel"
   :license {:name "Eclipse Public License"
@@ -15,10 +15,11 @@
 
                  [org.slf4j/slf4j-api "1.7.22"] ;; TODO factor logging
 
-                 [http-kit "2.2.0" :scope "provided"] 
+                 [http-kit "2.2.0" :scope "provided"]
                  [http.async.client "1.2.0" :scope "provided"]
                  [org.glassfish.tyrus/tyrus-core "1.13"]
-                 [aleph "0.4.2-alpha8" :scope "provided"]]
+                 [org.glassfish.tyrus/tyrus-client "1.13"]
+                 [org.glassfish.tyrus/tyrus-container-grizzly-client "1.13"]]
 
   :plugins [[lein-cljsbuild "1.1.4"]]
 
@@ -41,5 +42,14 @@
               :output-to "resources/public/js/client.js"
               :output-dir "resources/public/js/out"
               :optimizations :none
-              :pretty-print true}}]}
+              :pretty-print true}}
+            {:id "test"
+             :source-paths ["src" "test"]
+             :compiler
+             {:output-to "resources/private/js/unit-test.js"
+              :output-dir "resources/private/js/out"
+              :optimizations :whitespace
+              :pretty-print true}}]
+   :test-commands {"unit-tests" ["phantomjs" "resources/private/js/test.js"
+                                 "resources/private/html/unit-test.html"]}}
   )

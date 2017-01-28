@@ -1,8 +1,7 @@
 (ns kabel.binary
   "This namespace provides a minimal binary encoding for all connection types."
   (:require [clojure.edn :as edn])
-  (:import [java.nio ByteBuffer]
-           [java.io ByteArrayOutputStream DataOutputStream
+  (:import [java.io ByteArrayOutputStream DataOutputStream
             ByteArrayInputStream DataInputStream]))
 
 
@@ -25,8 +24,7 @@
     (.writeInt dos (int (encoding-table serialization)))
     (.flush dos)
     (.write baos payload)
-    (.toByteArray baos))
-  )
+    (.toByteArray baos)))
 
 (defn from-binary [binary]
   (let [bais (ByteArrayInputStream. binary)

@@ -1,13 +1,12 @@
 (ns kabel.client
-  (:require [kabel.platform-log :refer [debug info warn error]]
-            [cognitect.transit :as transit]
-            [incognito.transit :refer [incognito-read-handler incognito-write-handler]]
+  (:require [kabel.binary :refer [to-binary from-binary]]
             [goog.net.WebSocket]
             [goog.Uri]
             [goog.events :as events]
             [cljs.core.async :as async :refer (take! put! close! chan)]
             [superv.async :refer [-error]])
-  (:require-macros [cljs.core.async.macros :refer [go go-loop]]))
+  (:require-macros [cljs.core.async.macros :refer [go go-loop]]
+                   [kabel.platform-log :refer [debug info warn error]]))
 
 
 (defn on-node? []
@@ -39,22 +38,10 @@ Only supports websocket at the moment, but is supposed to dispatch on
        (events/listen goog.net.WebSocket.EventType.MESSAGE
                       (fn [evt]
                         (try
-                          (let [reader (transit/reader :json {:handlers ;; remove if uuid problem is gone
-                                                              {"u" (fn [v] (cljs.core/uuid v))
-                                                               "incognito" (incognito-read-handler read-handlers)}})]
-                            (if-not (on-node?)
-                              ;; Browser
-                              (let [fr (js/FileReader.)]
-                                (set! (.-onload fr) #(let [res (js/String. (.. % -target -result))]
-                                                       #_(debug "Received message: " res)
-                                                       (put! in (assoc (transit/read reader res) :host host))))
-
-                                (.readAsText fr (.-message evt)))
-                              ;; nodejs
-                              (let [s  (js/String.fromCharCode.apply
-                                        nil
-                                        (js/Uint8Array. (.. evt -message)))]
-                                (put! in (assoc (transit/read reader s) :host host)))))
+                          (from-binary (.. % -target -result)
+                                       #(put! in (if (associative? %)
+                                                   (assoc % :kabel/host host)
+                                                   %)))
                           (catch js/Error e
                             (error {:event :cannot-read-transit-message :error e})
                             (put! (-error S) e)))))
@@ -90,15 +77,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                  (if m
                    (do
                      (try
-                       (let [i-write-handler (incognito-write-handler write-handlers)
-                             writer (transit/writer
-                                     :json
-                                     {:handlers {"default" i-write-handler}})
-                             to-send (transit/write writer (assoc m :sender peer-id))]
-                         (if-not (on-node?)
-                           (.send channel (js/Blob. #js [to-send])) ;; Browser
-                           (.send channel (js/Buffer. to-send)) ;; NodeJS
-                           ))
+                       (.send channel (to-binary m))
                        (catch js/Error e
                          (error {:event :cannot-send-transit-message :error e})
                          (put! (-error S) e)))

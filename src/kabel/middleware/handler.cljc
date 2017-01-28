@@ -1,7 +1,6 @@
 (ns kabel.middleware.handler
   "Generic callback handler middleware."
-  (:require [kabel.platform-log :refer [debug info warn error]]
-            [clojure.set :as set]
+  (:require [clojure.set :as set]
             [superv.async :refer [<? >?]]
             #?(:clj [clojure.core.async :as async
                       :refer [<! >! chan go put! go-loop close!]]

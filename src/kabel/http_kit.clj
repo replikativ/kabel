@@ -1,14 +1,12 @@
 (ns kabel.http-kit
   "http-kit specific IO operations."
   (:require [kabel.platform-log :refer [debug info warn error]]
+            [kabel.binary :refer [from-binary to-binary]]
             [superv.async :refer [<? <?? go-try -error go-loop-super]]
             [clojure.core.async :as async
              :refer [<! >! timeout chan alt! put! close! buffer]]
             [org.httpkit.server :refer :all]
             [cognitect.transit :as transit]))
-
-
-
 
 
 (defn create-http-kit-handler!
@@ -32,8 +30,7 @@
                                       (when m
                                         (if (@channel-hub channel)
                                           (do (debug  {:event :sending-msg})
-                                              #_(prn "hk snd" m)
-                                              (send! channel m))
+                                              (send! channel (to-binary m)))
                                           (warn {:event :dropping-msg-because-of-closed-channel
                                                  :url url :message m}))
                                         (recur (<? S out))))
@@ -58,7 +55,10 @@
                                                            {:url url
                                                             :count (count in-buffer)}))) 
                                                  #_(prn "hk rec" data)
-                                                 (async/put! in data)
+                                                 (let [m (from-binary data)]
+                                                   (async/put! in (if (associative? m)
+                                                                    (assoc m :kabel/host host)
+                                                                    m)))
                                                  (catch Exception e
                                                    (put! (-error S)
                                                          (ex-info "Cannot receive data." {:data data

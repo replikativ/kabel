@@ -1,7 +1,6 @@
 (ns kabel.middleware.log
   "DEPRECATED Logging middleware."
-  (:require [kabel.platform-log :refer [debug info warn error]]
-            [clojure.set :as set]
+  (:require [clojure.set :as set]
             #?(:clj [clojure.core.async :as async
                       :refer [<! >! chan go put! go-loop close!]]
                :cljs [cljs.core.async :as async :refer [<! >! chan put! close!]]))

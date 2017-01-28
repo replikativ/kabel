@@ -1,6 +1,7 @@
 (ns kabel.client
   "http.async.client specific client IO operations."
   (:require [kabel.platform-log :refer [debug info warn error]]
+            [kabel.binary :refer [to-binary from-binary]]
             [superv.async :refer [<? <?? go-try -error go-loop-super]]
             [clojure.core.async :as async
              :refer [<! >! timeout chan alt! put! close! buffer]]
@@ -35,7 +36,7 @@
                                                  (do
                                                    (debug {:event :client-sending-message
                                                            :url url})
-                                                   (cli/send ws (if (string? m) :text :byte) m)
+                                                   (cli/send ws :byte (to-binary m))
                                                    #_(prn "cli send" m))
                                                  (warn {:event :dropping-msg-because-of-closed-channel
                                                         :url url :message m}))
@@ -58,7 +59,10 @@
                                         :in-buffer-count (count in-buffer)})
                                 ;; TODO add host
                                 #_(prn "cli bytes")
-                                (async/put! in data)
+                                (let [m (from-binary data)]
+                                  (async/put! in (if (associative? m)
+                                                   (assoc m :kabel/host host)
+                                                   m)))
                                 (catch Exception e
                                   (let [e (ex-info "Cannot receive data." {:url url
                                                                            :data data
@@ -68,28 +72,10 @@
                                     (put! (-error S) e)
                                     (.close ws)))))
                       :text (fn [ws ^String data]
-                              (try ;; todo merge with byte
-                                (when (> (count in-buffer) 100)
-                                  (.close ws)
-                                  (throw (ex-info
-                                          (str "incoming buffer for " url
-                                               " too full:" (count in-buffer))
-                                          {:url url
-                                           :count (count in-buffer)})))
-                                (debug {:event :received-byte-message
-                                        :url url
-                                        :in-buffer-count (count in-buffer)})
-                                ;; TODO add host
-                                (async/put! in data)
-                                #_(prn "cli text" data )
-                                (catch Exception e
-                                  (let [e (ex-info "Cannot receive data." {:url url
-                                                                           :data data
-                                                                           :error e})]
-                                    (error {:event :cannot-receive-message
-                                            :error e})
-                                    (put! (-error S) e)
-                                    (.close ws)))))
+                              (error {:event :string-not-supported
+                                      :data data})
+                              (put! (-error S) (ex-info "String data not supported."
+                                                        {:data data})))
                       :close (fn [ws code reason]
                                (let [e (ex-info "Connection closed!" {:code code
                                                                       :reason reason})]

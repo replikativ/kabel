@@ -15,7 +15,31 @@
 
                  [org.slf4j/slf4j-api "1.7.22"] ;; TODO factor logging
 
-                 [http-kit "2.2.0"] ;; TODO factor those as scope provided
-                 [http.async.client "1.2.0"]
+                 [http-kit "2.2.0" :scope "provided"] 
+                 [http.async.client "1.2.0" :scope "provided"]
                  [org.glassfish.tyrus/tyrus-core "1.13"]
-                 #_[aleph "0.4.2-alpha8"]])
+                 [aleph "0.4.2-alpha8" :scope "provided"]]
+
+  :plugins [[lein-cljsbuild "1.1.4"]]
+
+  :profiles {:dev {:dependencies [[figwheel-sidecar "0.5.8"]
+                                  [com.cemerick/piggieback "0.2.1"]]
+                   :figwheel {:nrepl-port 7888
+                              :nrepl-middleware ["cider.nrepl/cider-middleware"
+                                                 "cemerick.piggieback/wrap-cljs-repl"]}
+                   :plugins [[lein-figwheel "0.5.8"]]
+                   :repl-options {; for nREPL dev you really need to limit output
+                                  :init (set! *print-length* 50)
+                                  :nrepl-middleware [cemerick.piggieback/wrap-cljs-repl]}}}
+  :cljsbuild
+  {:builds [{:id "cljs_repl"
+             :source-paths ["src"]
+             :figwheel true
+             :compiler
+             {:main kabel.client
+              :asset-path "js/out"
+              :output-to "resources/public/js/client.js"
+              :output-dir "resources/public/js/out"
+              :optimizations :none
+              :pretty-print true}}]}
+  )

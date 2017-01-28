@@ -1,6 +1,6 @@
 (ns kabel.peer
   "Peer 2 peer connectivity."
-  (:require [kabel.platform-log :refer [debug info warn error]]
+  (:require #?(:clj [kabel.platform-log :refer [debug info warn error]])
             [clojure.set :as set]
             #?(:clj [superv.async :refer [<? <<? go-try go-loop-try alt?
                                           go-loop-super]])
@@ -13,6 +13,7 @@
                :cljs [cljs.core.async :as async
                       :refer [>! timeout chan put! pub sub unsub close!]]))
   #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)]
+                            [kabel.platform-log :refer [debug info warn error]]
                             [superv.async :refer [<<? <? go-try go-loop-try alt?
                                                   go-loop-super]])))
 

@@ -1,11 +1,11 @@
-(defproject io.replikativ/kabel "0.2.0-SNAPSHOT"
+(defproject io.replikativ/kabel "0.2.0"
   :description "A library for simple wire-like connectivity semantics."
   :url "https://github.com/replikativ/kabel"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.9.0-alpha14" :scope "provided"]
                  [org.clojure/clojurescript "1.9.229" :scope "provided"]
-                 [io.replikativ/superv.async "0.2.4"]
+                 [io.replikativ/superv.async "0.2.5"]
 
                  [com.cognitect/transit-clj "0.8.285"]
                  [com.cognitect/transit-cljs "0.8.239"]

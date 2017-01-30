@@ -1,12 +1,14 @@
 (ns kabel.middleware.transit
   (:require
    [kabel.middleware.handler :refer [handler]]
+   #?(:clj [kabel.platform-log :refer [debug]])
    #?(:cljs [kabel.util :refer [on-node?]])
    #?(:clj [superv.async :refer [go-try]])
    [cognitect.transit :as t]
    [incognito.transit :refer [incognito-read-handler incognito-write-handler]])
   #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream])
-     :cljs (:require-macros [superv.async :refer [go-try]])))
+     :cljs (:require-macros [superv.async :refer [go-try]]
+                            [kabel.platform-log :refer [debug]])))
 
 
 (defn transit
@@ -29,27 +31,34 @@
                                                           {:handlers {"u" (fn [v] (cljs.core/uuid v))
                                                                       "incognito" ir}})]
                                             (t/read reader (-> (js/TextDecoder. "utf-8")
-                                                               (.decode payload)))))]
-                           (if (map? v)
-                             (merge v (dissoc % :kabel/serialization :kabel/payload))
-                             v))
+                                                               (.decode payload)))))
+                               merged (if (map? v)
+                                        (merge v (dissoc % :kabel/serialization
+                                                         :kabel/payload))
+                                        v)]
+                           #_(debug {:event :transit-deserialized
+                                   :value merged})
+                           merged)
                          %)))
             #(go-try S
                      (if (:kabel/serialization %) ;; already serialized
                        %
-                       {:kabel/serialization
-                        (keyword (str "transit-" (name backend)))
-                        :kabel/payload
-                        #?(:clj (with-open [baos (ByteArrayOutputStream.)]
-                                  (let [iw (incognito-write-handler write-handlers)
-                                        writer (t/writer baos backend {:handlers {java.util.Map iw}})]
-                                    (t/write writer %))
-                                  (.toByteArray baos))
-                           :cljs (let [iw (incognito-write-handler write-handlers)
-                                       writer (t/writer backend {:handlers {"default" iw}})
-                                       encoder (js/TextEncoder. "utf-8")]
-                                   (->> (t/write writer %)
-                                        (.encode encoder))))}))
+                       (do
+                         #_(debug {:event :transit-serialize
+                                 :value %})
+                         {:kabel/serialization
+                          (keyword (str "transit-" (name backend)))
+                          :kabel/payload
+                          #?(:clj (with-open [baos (ByteArrayOutputStream.)]
+                                    (let [iw (incognito-write-handler write-handlers)
+                                          writer (t/writer baos backend {:handlers {java.util.Map iw}})]
+                                      (t/write writer %))
+                                    (.toByteArray baos))
+                             :cljs (let [iw (incognito-write-handler write-handlers)
+                                         writer (t/writer backend {:handlers {"default" iw}})
+                                         encoder (js/TextEncoder. "utf-8")]
+                                     (->> (t/write writer %)
+                                          (.encode encoder))))})))
             [S peer [in out]])))
 
 

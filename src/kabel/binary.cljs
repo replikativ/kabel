@@ -18,10 +18,11 @@
                   (utf8 (pr-str m)) ;; fallback if no serialization middleware is present
                   payload)
         serialization (if-not serialization :pr-str serialization)
-        wrapped (-> (array 0 0 0 (encoding-table serialization))
-                    (.concat payload)
-                    (js/Uint8Array.))]
-    (.log js/console "foo" wrapped)
+        header (array 0 0 0 (encoding-table serialization))
+        ;; manual concat
+        wrapped (js/Uint8Array. (+ 4 (.-length payload))) 
+        _ (.set wrapped (js/Uint8Array. header) 0)
+        _ (.set wrapped (js/Uint8Array. payload) 4)]
     (if-not (on-node?)
       (js/Blob. #js [wrapped])
       (js/Buffer. wrapped))))
@@ -40,12 +41,16 @@
                               decoding-table)
                  payload (js/Uint8Array. (.slice b 4 l))]
              (cb
-              (if (= encoding :pr-str)
-                (-> (js/TextDecoder. "utf-8")
-                    (.decode payload)
-                    read-string)
-                {:kabel/serialization encoding
-                 :kabel/payload payload}))))
+              (try
+                (if (= encoding :pr-str)
+                  (-> (js/TextDecoder. "utf-8")
+                      (.decode payload)
+                      read-string)
+                  {:kabel/serialization encoding
+                   :kabel/payload payload})
+                (catch js/Error e
+                  (ex-info "Cannot parse binary."
+                           {:error e}))))))
     (.readAsArrayBuffer fr binary)))
 
 

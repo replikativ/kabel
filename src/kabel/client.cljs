@@ -32,12 +32,12 @@ Only supports websocket at the moment, but is supposed to dispatch on
        (events/listen goog.net.WebSocket.EventType.MESSAGE
                       (fn [evt]
                         (try
-                          (from-binary (.. evt -target -result)
+                          (from-binary (.. evt -message)
                                        #(put! in (if (map? %)
                                                    (assoc % :kabel/host host)
                                                    %)))
                           (catch js/Error e
-                            (error {:event :cannot-read-transit-message :error e})
+                            (error {:event :cannot-read-message :error e})
                             (put! (-error S) e)))))
        (events/listen goog.net.WebSocket.EventType.CLOSED
                       (fn [evt]

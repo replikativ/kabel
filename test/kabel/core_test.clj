@@ -24,16 +24,18 @@
           cid #uuid "898dcf36-e07a-4338-92fd-f818d573444a"
           url "ws://localhost:47291"
           handler (http-kit/create-http-kit-handler! S url sid)
-          speer (peer/server-peer S handler sid pong-middleware)
-          cpeer (peer/client-peer S cid (fn [[S peer [in out]]]
-                                          (let [new-in (chan)
-                                                new-out (chan)]
-                                            (go-try S
+          speer (peer/server-peer S handler sid pong-middleware identity)
+          cpeer (peer/client-peer S cid
+                                  (fn [[S peer [in out]]]
+                                    (let [new-in (chan)
+                                          new-out (chan)]
+                                      (go-try S
                                               (put? S out "ping")
                                               (is (= "ping" (<? S in)))
                                               (put? S out "ping2")
                                               (is (= "ping2" (<? S in))))
-                                            [S peer [new-in new-out]])))]
+                                      [S peer [new-in new-out]]))
+                                  identity)]
       (<?? S (peer/start speer))
       (<?? S (peer/connect S cpeer url))
       (<?? S (timeout 1000))
@@ -46,7 +48,7 @@
           cid #uuid "898dcf36-e07a-4338-92fd-f818d573444a"
           url "ws://localhost:47291"
           handler (http-kit/create-http-kit-handler! S url sid)
-          speer (peer/server-peer S handler sid pong-middleware)
+          speer (peer/server-peer S handler sid pong-middleware identity)
           cpeer (peer/client-peer S cid (fn [[S peer [in out]]]
                                           (let [new-in (chan)
                                                 new-out (chan)]
@@ -55,7 +57,8 @@
                                                 (>? S out i))
                                               (doseq [i (range 1000)]
                                                 (is (= i (<? S in)))))
-                                            [S peer [new-in new-out]])))]
+                                            [S peer [new-in new-out]]))
+                                  identity)]
       (<?? S (peer/start speer))
       (<?? S (peer/connect S cpeer url))
       (<?? S (timeout 1000))

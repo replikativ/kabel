@@ -5,6 +5,7 @@
             #?(:clj [superv.async :refer [<? <<? go-try go-loop-try alt?
                                           go-loop-super]])
             [kabel.client :refer [client-connect!]]
+            [kabel.middleware.transit :refer [transit]]
             #?(:cljs [superv.async :refer [throw-if-exception
                                            -track-exception -free-exception
                                            -register-go -unregister-go]])
@@ -27,24 +28,31 @@
   "Connect peer to url."
   [S peer url]
   (go-try S
-          (let [{{:keys [middleware read-handlers write-handlers]} :volatile
+          (let [{{:keys [middleware serialization-middleware
+                         read-handlers write-handlers]} :volatile
                  :keys [id]} @peer
                 [c-in c-out] (<? S (client-connect! S url
                                                     id
                                                     read-handlers
                                                     write-handlers))]
-            (drain (middleware [S peer [c-in c-out]])))))
+            (-> [S peer [c-in c-out]]
+                serialization-middleware
+                middleware
+                drain))))
 
 (defn client-peer
   "Creates a client-side peer only."
   ([S id middleware]
-   (client-peer S id middleware (atom {}) (atom {})))
-  ([S id middleware read-handlers write-handlers]
+   (client-peer S id middleware transit))
+  ([S id middleware serialization-middleware]
+   (client-peer S id middleware serialization-middleware (atom {}) (atom {})))
+  ([S id middleware serialization-middleware read-handlers write-handlers]
    (let [log (atom {})
          bus-in (chan)
          bus-out (pub bus-in :type)]
      (atom {:volatile {:log log
                        :middleware middleware
+                       :serialization-middleware serialization-middleware
                        :read-handlers read-handlers
                        :write-handlers write-handlers
                        :supervisor S
@@ -55,14 +63,17 @@
 (defn server-peer
   "Constructs a listening peer."
   ([S handler id middleware]
-   (server-peer S handler id middleware (atom {}) (atom {})))
-  ([S handler id middleware read-handlers write-handlers]
+   (server-peer S handler id middleware transit))
+  ([S handler id middleware serialization-middleware]
+   (server-peer S handler id middleware serialization-middleware (atom {}) (atom {})))
+  ([S handler id middleware serialization-middleware read-handlers write-handlers]
    (let [{:keys [new-conns url]} handler
          log (atom {})
          bus-in (chan)
          bus-out (pub bus-in :type)
          peer (atom {:volatile (merge handler
                                       {:middleware middleware
+                                       :serialization-middleware serialization-middleware
                                        :read-handlers read-handlers
                                        :write-handlers write-handlers
                                        :log log
@@ -70,8 +81,9 @@
                                        :chans [bus-in bus-out]})
                      :addresses #{(:url handler)}
                      :id id})]
-     (go-loop-super S [[in out] (<? S new-conns)]
-                    (drain (middleware [S peer [in out]]))
+     (go-loop-super S [[in out] (<? S new-conns) 
+                       ]
+                    (drain (middleware (serialization-middleware [S peer [in out]])))
                     (recur (<? S new-conns)))
      peer)))
 

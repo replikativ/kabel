@@ -54,7 +54,7 @@
                                                                 " too full:" (count in-buffer))
                                                            {:url url
                                                             :count (count in-buffer)}))) 
-                                                 #_(prn "hk rec" data)
+                                                 #_(prn "hk rec" (mapv char data))
                                                  (let [m (from-binary data)]
                                                    (async/put! in (if (associative? m)
                                                                     (assoc m :kabel/host host)

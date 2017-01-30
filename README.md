@@ -56,7 +56,6 @@ From the tests (note that messages are always maps):
             [kabel.peer :as peer]
             [superv.async :refer [<?? go-try S go-loop-try <? >? put?]]
             [clojure.core.async :refer [timeout go go-loop <! >! <!! put! chan]]
-            [kabel.middleware.transit :refer [transit]]
             [hasch.core :refer [uuid]]))
 
 
@@ -75,16 +74,18 @@ From the tests (note that messages are always maps):
           cid #uuid "898dcf36-e07a-4338-92fd-f818d573444a"
           url "ws://localhost:47291"
           handler (http-kit/create-http-kit-handler! S url sid)
-          speer (peer/server-peer S handler sid pong-middleware)
-          cpeer (peer/client-peer S cid (fn [[S peer [in out]]]
-                                          (let [new-in (chan)
-                                                new-out (chan)]
-                                            (go-try S
+          speer (peer/server-peer S handler sid pong-middleware identity)
+          cpeer (peer/client-peer S cid
+                                  (fn [[S peer [in out]]]
+                                    (let [new-in (chan)
+                                          new-out (chan)]
+                                      (go-try S
                                               (put? S out "ping")
                                               (is (= "ping" (<? S in)))
                                               (put? S out "ping2")
                                               (is (= "ping2" (<? S in))))
-                                            [S peer [new-in new-out]])))]
+                                      [S peer [new-in new-out]]))
+                                  identity)]
       (<?? S (peer/start speer))
       (<?? S (peer/connect S cpeer url))
       (<?? S (timeout 1000))
@@ -119,6 +120,15 @@ You can find general middlewares in the corresponding folder. In
 general middlewares themselves form a "wire" and can filter,
 transform, inject and pass through messages.
 
+### Serialization
+
+Serialization is also done in a middleware, a transit middleware is currently
+provided and used by default. If you do not use any serialization middleware
+than a simple `pr-str <-> read-string` mechanism is combined with the 
+
+
+### External
+
 We provide the following middlewares separately: - [Passwordless
 authentication (and
 authorisation)](https://github.com/replikativ/kabel-auth) based on
@@ -139,38 +149,13 @@ SSEs, WebRTC or normal sockets should not be hard to add.
 
 
 ## TODO
-- android compatible websocket client (e.g. tyrus)
+- implement configuration as circling of config handshake before serialization
+  to allow adaptable configurations between peers, e.g. transit+msgpack on JVM,
+  transit + json with javascript peers etc. The configuration message circles
+  through all middlewares until a consensus/fix-point is reached and then
+  middlewares start their lifecycle.
 - factor platform neutral logging
 - implement node.js websocket server
-
-## Changelog
-
-### 0.1.9
-    - factor start stop
-    - support superv.async
-
-### 0.1.8
-    - small bugfixes
-
-### 0.1.7
-    - support node on client-side
-    - add an aleph http client (server still missing)
-    - add a generic callback middleware
-
-### 0.1.5
-    - use lightweight slf4j logging
-
-### 0.1.4
-    - expose consistent host ip
-
-### 0.1.3
-    - do not initialize http-client on compile time
-      fixes aot uberjar compilation
-
-### 0.1.2
-    - properly close cljs client connection on initial error
-    - add :sender peer-id to outgoing messages
-    - add :connection url to incoming messages
 
 ## License
 

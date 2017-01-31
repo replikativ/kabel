@@ -124,7 +124,9 @@ transform, inject and pass through messages.
 
 Serialization is also done in a middleware, a transit middleware is currently
 provided and used by default. If you do not use any serialization middleware
-than a simple `pr-str <-> read-string` mechanism is combined with the 
+than a simple `pr-str <-> read-string` mechanism is combined with a very simple
+binary header to track different serialization types over the wire including raw
+binary data.
 
 
 ### External

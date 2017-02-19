@@ -23,7 +23,8 @@ Only supports websocket at the moment, but is supposed to dispatch on
      (.log js/console "Setting global W3C WebSocket API to 'websocket' package.")
      (set! js/WebSocket (.-w3cwebsocket (js/require "websocket"))))
    (let [channel (goog.net.WebSocket. false)
-         in (chan)
+         in-buffer (buffer 1024) ;; standard size
+         in (chan in-buffer)
          out (chan)
          opener (chan)
          host (.getDomain (goog.Uri. (.replace url "ws" "http")))]
@@ -31,14 +32,27 @@ Only supports websocket at the moment, but is supposed to dispatch on
      (doto channel
        (events/listen goog.net.WebSocket.EventType.MESSAGE
                       (fn [evt]
-                        (try
-                          (from-binary (.. evt -message)
-                                       #(put! in (if (map? %)
-                                                   (assoc % :kabel/host host)
-                                                   %)))
-                          (catch js/Error e
-                            (error {:event :cannot-read-message :error e})
-                            (put! (-error S) e)))))
+                        (let [v (.. evt -message)]
+                          (try
+                            (when (> (count in-buffer) 100)
+                              (.close channel)
+                              (throw (ex-info
+                                      (str "incoming buffer for " url
+                                           " too full:" (count in-buffer))
+                                      {:url url
+                                       :count (count in-buffer)})))
+                            (if (string? v)
+                              (put! in {:kabel/serialization :string
+                                        :kabel/payload v})
+                              (from-binary v
+                                           #(put! in (if (map? %)
+                                                       (assoc % :kabel/host host)
+                                                       %))))
+                            (catch js/Error e
+                              (error {:event :cannot-read-message :error e})
+                              (.close channel)
+                              (close! opener)
+                              (put! (-error S) e))))))
        (events/listen goog.net.WebSocket.EventType.CLOSED
                       (fn [evt]
                         (let [e (ex-info "Connection closed!" {:event evt})]
@@ -71,7 +85,9 @@ Only supports websocket at the moment, but is supposed to dispatch on
                  (if m
                    (do
                      (try
-                       (.send channel (to-binary m))
+                       (if (= (:kabel/serialization m) :string)
+                         (.send channel (:kabel/payload m))
+                         (.send channel (to-binary m)))
                        (catch js/Error e
                          (error {:event :cannot-send-transit-message :error e})
                          (put! (-error S) e)))

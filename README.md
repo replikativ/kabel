@@ -158,6 +158,7 @@ SSEs, WebRTC or normal sockets should not be hard to add.
   middlewares start their lifecycle.
 - factor platform neutral logging
 - implement node.js websocket server
+- implement more of wamp client protocol (and maybe router)
 
 ## License
 

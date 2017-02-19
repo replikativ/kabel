@@ -1,4 +1,4 @@
-(defproject io.replikativ/kabel "0.2.0"
+(defproject io.replikativ/kabel "0.2.1-SNAPSHOT"
   :description "A library for simple wire-like connectivity semantics."
   :url "https://github.com/replikativ/kabel"
   :license {:name "Eclipse Public License"
@@ -8,7 +8,9 @@
                  [io.replikativ/superv.async "0.2.5"]
 
                  [com.cognitect/transit-clj "0.8.285"]
-                 [com.cognitect/transit-cljs "0.8.239"]
+                 [com.cognitect/transit-cljs "0.8.239" :scope "provided"]
+                 [cheshire "5.7.0" :scope "provided"]
+
                  [io.replikativ/incognito "0.2.1"]
 
                  [io.replikativ/hasch "0.3.4"]
@@ -22,6 +24,8 @@
                  [org.glassfish.tyrus/tyrus-container-grizzly-client "1.13"]]
 
   :plugins [[lein-cljsbuild "1.1.4"]]
+
+  :java-source-paths ["src/main/java"]
 
   :profiles {:dev {:dependencies [[figwheel-sidecar "0.5.8"]
                                   [com.cemerick/piggieback "0.2.1"]]

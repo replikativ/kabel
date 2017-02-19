@@ -21,7 +21,7 @@
          conns (chan)
          handler (fn [request]
                    (let [in-buffer (buffer 1024) ;; standard size
-                         in (chan)
+                         in (chan in-buffer)
                          out (chan)]
                      (async/put! conns [in out])
                      (with-channel request channel
@@ -30,7 +30,9 @@
                                       (when m
                                         (if (@channel-hub channel)
                                           (do (debug  {:event :sending-msg})
-                                              (send! channel (to-binary m)))
+                                              (if (= (:kabel/serialization m) :string)
+                                                (send! channel (:kabel/payload m))
+                                                (send! channel (to-binary m))))
                                           (warn {:event :dropping-msg-because-of-closed-channel
                                                  :url url :message m}))
                                         (recur (<? S out))))
@@ -55,10 +57,13 @@
                                                            {:url url
                                                             :count (count in-buffer)}))) 
                                                  #_(prn "hk rec" (mapv char data))
-                                                 (let [m (from-binary data)]
-                                                   (async/put! in (if (associative? m)
-                                                                    (assoc m :kabel/host host)
-                                                                    m)))
+                                                 (if (string? data)
+                                                   (async/put! in {:kabel/serialization :string
+                                                                   :kabel/payload data})
+                                                   (let [m (from-binary data)]
+                                                     (async/put! in (if (associative? m)
+                                                                      (assoc m :kabel/host host)
+                                                                      m))))
                                                  (catch Exception e
                                                    (put! (-error S)
                                                          (ex-info "Cannot receive data." {:data data
@@ -77,8 +82,10 @@
                                                        first
                                                        second
                                                        read-string)
-                                            :max-body (* 512 1024 1024)
-                                            :max-ws (* 512 1024 1024)})))))
+                                            ;; TODO this is only a temporary setting to allow large initial metadata payloads
+                                            ;; we want to break them apart with a hitchhiker tree or similar datastructure
+                                            :max-body (* 100 1024 1024)
+                                            :max-ws (* 100 1024 1024)})))))
       :url url
       :handler handler})))
 

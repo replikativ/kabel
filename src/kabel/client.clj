@@ -6,13 +6,33 @@
             [clojure.core.async :as async
              :refer [<! >! timeout chan alt! put! close! buffer]])
   (:import [javax.websocket Endpoint ClientEndpointConfig WebSocketContainer
-            ClientEndpointConfig$Builder MessageHandler$Whole]
+            ClientEndpointConfig$Builder
+            ClientEndpointConfig$Configurator]
+           ;; we need this to signal String and Binary dispatch to tyrus
+           ;; this is because of type erasure of the JVM and a lack of being able
+           ;; to communicate generics to tyrus
+           [io.replikativ.kabel MessageHandlerString MessageHandlerBinary]
            [org.glassfish.tyrus.client ClientManager]
            [java.nio ByteBuffer]))
 
-;; Build by https://tyrus.java.net/documentation/1.13.1/index/getting-started.html
+;; Example taken from https://tyrus.java.net/documentation/1.13.1/index/getting-started.html
 
-(def cec (.build (ClientEndpointConfig$Builder/create)))
+;; TODO make header configurable
+(def cec
+  (let [configurator (proxy [ClientEndpointConfig$Configurator] []
+                       (beforeRequest [headers]
+                         #_(prn "vanilla headers" headers)
+                         (.put headers "Sec-WebSocket-Protocol" (java.util.Arrays/asList (into-array ["wamp.2.json"])))
+                         #_(.put headers "Content-Type" (java.util.Arrays/asList (into-array ["application/json"])))
+                         #_(prn "new headers" headers)
+                         nil)
+                       (beforeResponse [handshake-response]
+                         (prn "after response" (.getHeaders handshake-response))))
+        config-builder (ClientEndpointConfig$Builder/create)]
+    (.configurator config-builder configurator)
+    (.build config-builder)))
+
+
 
 (defn client-connect!
   "Connects to url. Puts [in out] channels on return channel when ready.
@@ -26,11 +46,15 @@
    (client-connect! S url peer-id read-handlers write-handlers singleton-http-client))
   ([S url peer-id read-handlers write-handlers http-client]
    (let [in-buffer (buffer 1024) ;; standard size
-         in (chan)
+         in (chan in-buffer)
          out (chan)
          opener (chan)
          websockets (atom #{})
          host (.getHost (java.net.URL. (.replace url "ws" "http")))]
+     ;; TODO this is only a temporary setting to allow large initial metadata payloads
+     ;; we want to break them apart with a hitchhiker tree or similar datastructure
+     (.put (.getProperties http-client) "org.glassfish.tyrus.incomingBufferSize"
+           (* 100 1024 1024))
      (try
        (.connectToServer
         http-client
@@ -43,8 +67,11 @@
                   (do
                     (debug {:event :client-sending-message
                             :url url})
-                    @(.sendBinary (.getAsyncRemote session)
-                                  (ByteBuffer/wrap (to-binary m)))
+                    ;; special case: use websocket wire-level string type 
+                    (if (= (:kabel/serialization m) :string)
+                      @(.sendText (.getAsyncRemote session) (:kabel/payload m))
+                      @(.sendBinary (.getAsyncRemote session)
+                                    (ByteBuffer/wrap (to-binary m))))
                     #_(prn "cli send" m))
                   (warn {:event :dropping-msg-because-of-closed-channel
                          :url url :message m}))
@@ -55,35 +82,59 @@
 
             (try
               (.addMessageHandler session
-                                  (proxy [MessageHandler$Whole] []
+                                  (proxy [MessageHandlerString] []
                                     (onMessage [message]
-                                      (let [data (.array message)]
-                                        (try
-                                          (when (> (count in-buffer) 100)
-                                            (.close session)
-                                            (throw (ex-info
-                                                    (str "incoming buffer for " url
-                                                         " too full:" (count in-buffer))
-                                                    {:url url
-                                                     :count (count in-buffer)})))
-                                          (debug {:event :received-byte-message
-                                                  :url url
-                                                  :in-buffer-count (count in-buffer)})
-                                          (let [m (from-binary data)]
-                                            (async/put! in (if (map? m)
-                                                             (assoc m :kabel/host host)
-                                                             m)))
-                                          (catch Exception e
-                                            (let [e (ex-info "Cannot receive data." {:url url
-                                                                                     :data data
-                                                                                     :error e})]
-                                              (error {:event :cannot-receive-message
-                                                      :error e})
-                                              (put! (-error S) e)
-                                              (.close session))))))))
+                                      (try
+                                        (when (> (count in-buffer) 100)
+                                          (.close session)
+                                          (throw (ex-info
+                                                  (str "incoming buffer for " url
+                                                       " too full:" (count in-buffer))
+                                                  {:url url
+                                                   :count (count in-buffer)})))
+                                        (debug {:event :received-byte-message
+                                                :url url
+                                                :in-buffer-count (count in-buffer)})
+                                        (async/put! in {:kabel/serialization :string
+                                                        :kabel/payload message})
+                                        (catch Exception e
+                                          (let [e (ex-info "Cannot receive data." {:url url
+                                                                                   :data message
+                                                                                   :error e})]
+                                            (error {:event :cannot-receive-message
+                                                    :error e})
+                                            (put! (-error S) e)
+                                            (.close session)))))))
+              (.addMessageHandler session
+                                  (proxy [MessageHandlerBinary] []
+                                    (onMessage [message]
+                                      (try
+                                        (when (> (count in-buffer) 100)
+                                          (.close session)
+                                          (throw (ex-info
+                                                  (str "incoming buffer for " url
+                                                       " too full:" (count in-buffer))
+                                                  {:url url
+                                                   :count (count in-buffer)})))
+                                        (debug {:event :received-byte-message
+                                                :url url
+                                                :in-buffer-count (count in-buffer)})
+                                        (let [m (from-binary (.array message))]
+                                          (async/put! in (if (map? m)
+                                                           (assoc m :kabel/host host)
+                                                           m)))
+                                        (catch Exception e
+                                          (let [e (ex-info "Cannot receive data." {:url url
+                                                                                   :data message
+                                                                                   :error e})]
+                                            (error {:event :cannot-receive-message
+                                                    :error e})
+                                            (put! (-error S) e)
+                                            (.close session))))
+                                      )))
               (catch java.io.IOException e
                 (prn e))))
-          (onClose [reason session]
+          (onClose [session reason]
             (let [e (ex-info "Connection closed!" {:reason reason})]
               (debug {:event :closing-connection :url url
                       :reason reason})

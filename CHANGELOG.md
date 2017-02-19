@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.2.1
+ - JSON serialization
+ - experimental WAMP client
+
 ## 0.2.0
  - use tyrus java web-client
    + fixes stochastic reordering issues with http.async.client

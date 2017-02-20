@@ -31,7 +31,7 @@ implement *cross-platform* functionality in a very terse and
 expressive fashion, e.g. in the [pull-hooks for
 replikativ](https://github.com/replikativ/replikativ/blob/master/src/replikativ/p2p/hooks.cljc). But
 you do not need to write platform neutral symmetric middlewares, so on
-the JVM you can of course do IO without `core.async`.
+the JVM you can of course do IO without `core.async`. 
 
 We also extended and build
 on [superv.async](https://github.com/replikativ/superv.async/) to catch all
@@ -93,6 +93,11 @@ From the tests (note that messages are always maps):
 ~~~
 
 The client-side works the same in ClojureScript from the browser.
+
+## Applications
+
+- [replikativ](https://github.com/replikativ/replikativ)
+- [polo-collector](https://github.com/replikativ/polo-collector)
 
 ## Design
 

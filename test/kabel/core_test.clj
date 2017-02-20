@@ -53,9 +53,9 @@
                                           (let [new-in (chan)
                                                 new-out (chan)]
                                             (go-try S
-                                              (doseq [i (range 1000)]
+                                              (doseq [i (range 100)]
                                                 (>? S out i))
-                                              (doseq [i (range 1000)]
+                                              (doseq [i (range 100)]
                                                 (is (= i (<? S in)))))
                                             [S peer [new-in new-out]]))
                                   identity)]

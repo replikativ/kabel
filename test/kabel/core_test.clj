@@ -61,5 +61,5 @@
                                   identity)]
       (<?? S (peer/start speer))
       (<?? S (peer/connect S cpeer url))
-      (<?? S (timeout 1000))
+      (<?? S (timeout 2000))
       (<?? S (peer/stop speer)))))

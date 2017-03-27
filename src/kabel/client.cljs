@@ -4,12 +4,15 @@
             [goog.net.WebSocket]
             [goog.Uri]
             [goog.events :as events]
-            [cljs.core.async :as async :refer (take! put! close! chan)]
+            [cljs.core.async :as async :refer (take! put! close! chan buffer)]
             [superv.async :refer [-error]])
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]
                    [kabel.platform-log :refer [debug info warn error]]))
 
 
+(when (on-node?)
+  (.log js/console "Patching global env for: W3C WebSocket API.")
+  (set! js/WebSocket (.-w3cwebsocket (js/require "websocket"))))
 
 (defn client-connect!
   "Connects to url. Puts [in out] channels on return channel when ready.
@@ -19,9 +22,6 @@ Only supports websocket at the moment, but is supposed to dispatch on
   ([S url peer-id]
    (client-connect! S url peer-id (atom {}) (atom {})))
   ([S url peer-id read-handlers write-handlers]
-   (when (on-node?)
-     (.log js/console "Setting global W3C WebSocket API to 'websocket' package.")
-     (set! js/WebSocket (.-w3cwebsocket (js/require "websocket"))))
    (let [channel (goog.net.WebSocket. false)
          in-buffer (buffer 1024) ;; standard size
          in (chan in-buffer)

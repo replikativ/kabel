@@ -30,8 +30,11 @@
                                                 (t/reader backend
                                                           {:handlers {"u" (fn [v] (cljs.core/uuid v))
                                                                       "incognito" ir}})]
-                                            (t/read reader (-> (js/TextDecoder. "utf-8")
-                                                               (.decode payload)))))
+                                            (t/read reader
+                                                    (if (on-node?)
+                                                      (.toString payload "utf8")
+                                                      (-> (js/TextDecoder. "utf-8")
+                                                          (.decode payload))))))
                                merged (if (map? v)
                                         (merge v (dissoc % :kabel/serialization
                                                          :kabel/payload))
@@ -54,11 +57,16 @@
                                           writer (t/writer baos backend {:handlers {java.util.Map iw}})]
                                       (t/write writer %))
                                     (.toByteArray baos))
-                             :cljs (let [iw (incognito-write-handler write-handlers)
-                                         writer (t/writer backend {:handlers {"default" iw}})
-                                         encoder (js/TextEncoder. "utf-8")]
-                                     (->> (t/write writer %)
-                                          (.encode encoder))))})))
+                             :cljs (if (on-node?)
+                                     (let [iw (incognito-write-handler write-handlers)
+                                           writer (t/writer backend {:handlers {"default" iw}})]
+                                       (->> (t/write writer %)
+                                            (.from js/Buffer)))
+                                     (let [iw (incognito-write-handler write-handlers)
+                                           writer (t/writer backend {:handlers {"default" iw}})
+                                           encoder (js/TextEncoder. "utf-8")]
+                                       (->> (t/write writer %)
+                                            (.encode encoder)))))})))
             [S peer [in out]])))
 
 

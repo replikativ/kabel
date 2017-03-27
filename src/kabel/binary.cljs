@@ -32,26 +32,41 @@
   (let [l (if (on-node?)
             (.-length binary) ;; Buffer
             (.-size binary)) ;; Blob
-        fr (js/FileReader.)]
-    (set! (.-onload fr)
-          #(let [b (.. % -target -result)
-                 encoding (-> (.slice b 0 4)
-                              (js/Uint8Array.)
-                              (aget 3)
-                              decoding-table)
-                 payload (js/Uint8Array. (.slice b 4 l))]
-             (cb
-              (try
-                (if (= encoding :pr-str)
-                  (-> (js/TextDecoder. "utf-8")
-                      (.decode payload)
-                      read-string)
-                  {:kabel/serialization encoding
-                   :kabel/payload payload})
-                (catch js/Error e
-                  (ex-info "Cannot parse binary."
-                           {:error e}))))))
-    (.readAsArrayBuffer fr binary)))
+        ]
+    (if (on-node?)
+      (cb
+       (let [encoding (-> (.slice binary 0 4)
+                          (js/Uint8Array.)
+                          (aget 3)
+                          decoding-table)
+             payload (.slice binary 4 l)]
+         (try
+           (if (= encoding :pr-str)
+             (-> (.toString (.from js/Buffer payload) "utf8") read-string)
+             {:kabel/serialization encoding
+              :kabel/payload (.from js/Buffer payload)})
+           (catch js/Error e
+             (ex-info "Cannot parse binary." {:error e})))))
+      (let [fr (js/FileReader.)]
+        (set! (.-onload fr)
+              #(let [b (.. % -target -result)
+                     encoding (-> (.slice b 0 4)
+                                  (js/Uint8Array.)
+                                  (aget 3)
+                                  decoding-table)
+                     payload (js/Uint8Array. (.slice b 4 l))]
+                 (cb
+                  (try
+                    (if (= encoding :pr-str)
+                      (-> (js/TextDecoder. "utf-8")
+                          (.decode payload)
+                          read-string)
+                      {:kabel/serialization encoding
+                       :kabel/payload payload})
+                    (catch js/Error e
+                      (ex-info "Cannot parse binary."
+                               {:error e}))))))
+        (.readAsArrayBuffer fr binary)))))
 
 
 

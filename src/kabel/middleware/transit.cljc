@@ -5,6 +5,7 @@
    #?(:cljs [kabel.util :refer [on-node?]])
    #?(:clj [superv.async :refer [go-try]])
    [cognitect.transit :as t]
+   #?(:cljs [goog.crypt :as crypt])
    [incognito.transit :refer [incognito-read-handler incognito-write-handler]])
   #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream])
      :cljs (:require-macros [superv.async :refer [go-try]]
@@ -29,12 +30,19 @@
                                     :cljs (let [reader
                                                 (t/reader backend
                                                           {:handlers {"u" (fn [v] (cljs.core/uuid v))
-                                                                      "incognito" ir}})]
-                                            (t/read reader
-                                                    (if (on-node?)
-                                                      (.toString payload "utf8")
-                                                      (-> (js/TextDecoder. "utf-8")
-                                                          (.decode payload))))))
+                                                                      "incognito" ir}})
+                                                s (if (on-node?)
+                                                    (.toString payload "utf8")
+                                                    (-> payload
+                                                        crypt/utf8ByteArrayToString
+                                                        #_(js/TextDecoder. "utf-8")
+                                                        #_(.decode payload)))]
+                                            (try
+                                              (t/read reader s)
+                                              (catch js/Error e
+                                                (throw (ex-info "Cannot parse transit."
+                                                                {:string s
+                                                                 :error e}))))))
                                merged (if (map? v)
                                         (merge v (dissoc % :kabel/serialization
                                                          :kabel/payload))
@@ -64,9 +72,10 @@
                                             (.from js/Buffer)))
                                      (let [iw (incognito-write-handler write-handlers)
                                            writer (t/writer backend {:handlers {"default" iw}})
-                                           encoder (js/TextEncoder. "utf-8")]
+                                           #_encoder #_(js/TextEncoder. "utf-8")]
                                        (->> (t/write writer %)
-                                            (.encode encoder)))))})))
+                                            crypt/stringToUtf8ByteArray
+                                            #_(.encode encoder)))))})))
             [S peer [in out]])))
 
 

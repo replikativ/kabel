@@ -7,7 +7,8 @@ implementations. Clojure peers can connect to Clojure and ClojureScript peers in
 the same way and vice versa. kabel can use any bidirectional messaging channel,
 currently it supports web-sockets. It also ships
 a [transit](https://github.com/cognitect/transit-format) middleware for
-efficient serialization.
+efficient serialization. It works on different JavaScript runtimes, currently
+tested are the Browser, node.js and React-Native.
 
 
 ## Rationale

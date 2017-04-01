@@ -2,7 +2,12 @@
   "This namespace provides a minimal binary encoding for all connection types."
   (:require [cljs.reader :refer [read-string]]
             [hasch.platform :refer [utf8]]
-            [kabel.util :refer [on-node?]]))
+            [kabel.util :refer [on-node?]]
+            [goog.crypt :as crypt]))
+
+
+;; TODO this namespace needs a refactoring once the target platforms for js are
+;; pinned down
 
 (def encoding-table {:binary          0
                      :string          1
@@ -24,15 +29,20 @@
         _ (.set wrapped (js/Uint8Array. header) 0)
         _ (.set wrapped (js/Uint8Array. payload) 4)]
     (if-not (on-node?)
-      (js/Blob. #js [wrapped])
+      (if (exists? js/Blob)
+        (js/Blob. #js [wrapped])
+        ;; react native 
+        wrapped)
       (js/Buffer. wrapped))))
 
 
 (defn from-binary [binary cb]
   (let [l (if (on-node?)
             (.-length binary) ;; Buffer
-            (.-size binary)) ;; Blob
-        ]
+            (if (exists? js/Blob)
+              (.-size binary) ;; Blob
+              (.-byteLength binary) ;; react native array buffer
+              ))]
     (if (on-node?)
       (cb
        (let [encoding (-> (.slice binary 0 4)
@@ -47,26 +57,46 @@
               :kabel/payload (.from js/Buffer payload)})
            (catch js/Error e
              (ex-info "Cannot parse binary." {:error e})))))
-      (let [fr (js/FileReader.)]
-        (set! (.-onload fr)
-              #(let [b (.. % -target -result)
-                     encoding (-> (.slice b 0 4)
-                                  (js/Uint8Array.)
-                                  (aget 3)
-                                  decoding-table)
-                     payload (js/Uint8Array. (.slice b 4 l))]
-                 (cb
-                  (try
-                    (if (= encoding :pr-str)
-                      (-> (js/TextDecoder. "utf-8")
-                          (.decode payload)
-                          read-string)
-                      {:kabel/serialization encoding
-                       :kabel/payload payload})
-                    (catch js/Error e
-                      (ex-info "Cannot parse binary."
-                               {:error e}))))))
-        (.readAsArrayBuffer fr binary)))))
+      (if (exists? js/Blob)
+        (let [fr (js/FileReader.)]
+          (set! (.-onload fr)
+                #(let [b (.. % -target -result)
+                       encoding (-> (.slice b 0 4)
+                                    (js/Uint8Array.)
+                                    (aget 3)
+                                    decoding-table)
+                       payload (js/Uint8Array. (.slice b 4 l))]
+                   (cb
+                    (try
+                      (if (= encoding :pr-str)
+                        (-> payload
+                            crypt/utf8ByteArrayToString
+                            read-string)
+                        {:kabel/serialization encoding
+                         :kabel/payload payload})
+                      (catch js/Error e
+                        (ex-info "Cannot parse binary."
+                                 {:error e}))))))
+          (.readAsArrayBuffer fr binary))
+        ;; react native as array buffer
+        (let [b binary
+              encoding (-> (.slice b 0 4)
+                           (js/Uint8Array.)
+                           (aget 3)
+                           decoding-table)
+              payload (js/Uint8Array. (.slice b 4 l))]
+          (cb
+           (try
+             (if (= encoding :pr-str)
+               (-> payload
+                   crypt/utf8ByteArrayToString
+                   read-string)
+               {:kabel/serialization encoding
+                :kabel/payload payload})
+             (catch js/Error e
+               (ex-info "Cannot parse binary."
+                        {:error e})))))
+        ))))
 
 
 

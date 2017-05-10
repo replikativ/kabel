@@ -23,7 +23,7 @@
       (when i
         (>! out i)
         (recur (<! in))))
-    ;; Note that we pass through the supervisor peer and new channels
+    ;; Note that we pass through the supervisor, peer and new channels
     [S peer [new-in new-out]]))
 
 ;; this is useful to track messages, so each peer should have a unique id
@@ -37,6 +37,7 @@
                               ;; we could also pick the transit middleware
                               #_transit))
 
+;; we need to start the peer to open the socket
 (<?? S (peer/start server))
 
 

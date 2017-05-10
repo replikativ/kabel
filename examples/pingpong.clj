@@ -1,56 +1,71 @@
 (ns kabel.examples.pingpong
-  (:require [kabel.platform :refer [create-http-kit-handler! start stop]]
-            [kabel.peer :refer [client-peer server-peer connect]]
-            [kabel.platform-log :refer [info warn error]]
-            [kabel.middleware.log :refer [logger]]
+  (:require [clojure.test :refer :all]
+            [kabel.client :as cli]
+            [kabel.http-kit :as http-kit]
+            [kabel.peer :as peer]
+            [superv.async :refer [<?? go-try S go-loop-try <? >? put?]]
+            [clojure.core.async :refer [timeout go go-loop <! >! <!! put! chan]]
+            [kabel.middleware.transit :refer [transit]]
+            [hasch.core :refer [uuid]]))
 
-            [full.async :refer [go-try go-loop-try> <? <??]]
-            [clojure.core.async :refer [go-loop <! >! >!! timeout chan]]))
 
-;; track errors (this happens through full.async recursively through
-;; all participating subsystems)
-(def err-ch (chan))
-(go-loop [e (<! err-ch)]
-          (when e
-            (warn "ERROR:" e)
-            (recur (<! err-ch))))
+;; this url is needed for the server to open the proper
+;; socket and for the client to know where to connect to
+(def url "ws://localhost:47291")
 
-(def handler (create-http-kit-handler! "ws://127.0.0.1:9090/" err-ch))
 
-(defn pong-middleware [[peer [in out]]]
-  (let [new-in (chan)]
-    (go-loop [p (<! in)]
-      (when p
-        (info "received ping, sending pong")
-        (>! out {:type :pong})
-        (>! new-in p) ;; pass along (or not...)
+;; server peer code
+(defn pong-middleware [[S peer [in out]]]
+  (let [new-in (chan)
+        new-out (chan)]
+    ;; we just mirror the messages back
+    (go-loop [i (<! in)]
+      (when i
+        (>! out i)
         (recur (<! in))))
-    [peer [new-in out]]))
+    ;; Note that we pass through the supervisor peer and new channels
+    [S peer [new-in new-out]]))
 
-(def log-atom (atom {}))
+;; this is useful to track messages, so each peer should have a unique id
+(def server-id #uuid "05a06e85-e7ca-4213-9fe5-04ae511e50a0")
 
-(def remote-peer (server-peer handler "REMOTE" err-ch
-                              (comp pong-middleware
-                                    (partial logger log-atom :server))))
+(def server (peer/server-peer S (http-kit/create-http-kit-handler! S url server-id) server-id
+                              ;; here you can plug in your (composition of) middleware(s)
+                              pong-middleware
+                              ;; we chose no serialization (pr-str/read-string by default)
+                              identity
+                              ;; we could also pick the transit middleware
+                              #_transit))
 
-(start remote-peer)
-#_(stop remote-peer)
+(<?? S (peer/start server))
 
 
+(def client-id #uuid "c14c628b-b151-4967-ae0a-7c83e5622d0f")
 
-(defn ping [[peer [in out]]]
-  (go-loop []
-    (<! (timeout 5000))
-    (>! out {:type :ping})
-    (recur))
-  [peer [in out]])
+;; client
+(def client (peer/client-peer S client-id
+                              ;; Here we have a simple middleware to trigger some roundtrips
+                              ;; from the client
+                              (fn [[S peer [in out]]]
+                                (let [new-in (chan)
+                                      new-out (chan)]
+                                  (go-try S
+                                          (put? S out "ping")
+                                          (println "1. client incoming message:" (<? S in))
+                                          (put? S out "ping2")
+                                          (println "2. client incoming message:" (<? S in)))
+                                  [S peer [new-in new-out]]))
+                              ;; we need to pick the same middleware for serialization
+                              ;; (no auto-negotiation yet)
+                              identity))
 
-(def local-peer (client-peer "CLIENT" err-ch ping))
 
-(connect local-peer "ws://127.0.0.1:9090/")
+;; let's connect the client to the server
+(<?? S (peer/connect S client url))
+
 
 (comment
-  ;; inspect server side message exchange through logging middleware
-  @log-atom
-
+  ;; and stop the server
+  (<?? S (peer/stop speer))
   )
+

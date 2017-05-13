@@ -47,50 +47,81 @@ Add this to your project dependencies:
 
 [![Clojars Project](http://clojars.org/io.replikativ/kabel/latest-version.svg)](http://clojars.org/io.replikativ/kabel)
 
-From the tests (note that messages are always maps):
+From the `examples` folder (there is also a cljs client there):
 
 ~~~ clojure
-(ns kabel.core-test
-  (:require [clojure.test :refer :all]
-            [kabel.client :as cli]
+(ns kabel.examples.pingpong
+  (:require [kabel.client :as cli]
             [kabel.http-kit :as http-kit]
             [kabel.peer :as peer]
             [superv.async :refer [<?? go-try S go-loop-try <? >? put?]]
-            [clojure.core.async :refer [timeout go go-loop <! >! <!! put! chan]]
+            [clojure.core.async :refer [chan]]
+            ;; you can use below transit if you prefer
+            [kabel.middleware.transit :refer [transit]]
             [hasch.core :refer [uuid]]))
 
 
+;; this url is needed for the server to open the proper
+;; socket and for the client to know where to connect to
+(def url "ws://localhost:47291")
+
+
+;; server peer code
 (defn pong-middleware [[S peer [in out]]]
   (let [new-in (chan)
         new-out (chan)]
-    (go-loop [i (<! in)]
+    ;; we just mirror the messages back
+    (go-loop-try [i (<? S in)]
       (when i
-        (>! out i)
-        (recur (<! in))))
+        (>? S out i)
+        (recur (<? S in))))
+    ;; Note that we pass through the supervisor, peer and new channels
     [S peer [new-in new-out]]))
 
-(deftest roundtrip-test
-  (testing "Testing a roundtrip between a server and a client."
-    (let [sid #uuid "fd0278e4-081c-4925-abb9-ff4210be271b"
-          cid #uuid "898dcf36-e07a-4338-92fd-f818d573444a"
-          url "ws://localhost:47291"
-          handler (http-kit/create-http-kit-handler! S url sid)
-          speer (peer/server-peer S handler sid pong-middleware identity)
-          cpeer (peer/client-peer S cid
-                                  (fn [[S peer [in out]]]
-                                    (let [new-in (chan)
-                                          new-out (chan)]
-                                      (go-try S
-                                              (put? S out "ping")
-                                              (is (= "ping" (<? S in)))
-                                              (put? S out "ping2")
-                                              (is (= "ping2" (<? S in))))
-                                      [S peer [new-in new-out]]))
-                                  identity)]
-      (<?? S (peer/start speer))
-      (<?? S (peer/connect S cpeer url))
-      (<?? S (timeout 1000))
-      (<?? S (peer/stop speer)))))
+;; this is useful to track messages, so each peer should have a unique id
+(def server-id #uuid "05a06e85-e7ca-4213-9fe5-04ae511e50a0")
+
+(def server (peer/server-peer S (http-kit/create-http-kit-handler! S url server-id) server-id
+                              ;; here you can plug in your (composition of) middleware(s)
+                              pong-middleware
+                              ;; we chose no serialization (pr-str/read-string by default)
+                              identity
+                              ;; we could also pick the transit middleware
+                              #_transit))
+
+;; we need to start the peer to open the socket
+(<?? S (peer/start server))
+
+
+(def client-id #uuid "c14c628b-b151-4967-ae0a-7c83e5622d0f")
+
+;; client
+(def client (peer/client-peer S client-id
+                              ;; Here we have a simple middleware to trigger some roundtrips
+                              ;; from the client
+                              (fn [[S peer [in out]]]
+                                (let [new-in (chan)
+                                      new-out (chan)]
+                                  (go-try S
+                                          (put? S out "ping")
+                                          (println "1. client incoming message:" (<? S in))
+                                          (put? S out "ping2")
+                                          (println "2. client incoming message:" (<? S in)))
+                                  [S peer [new-in new-out]]))
+                              ;; we need to pick the same middleware for serialization
+                              ;; (no auto-negotiation yet)
+                              identity
+                              #_transit))
+
+
+;; let's connect the client to the server
+(<?? S (peer/connect S client url))
+
+
+(comment
+  ;; and stop the server
+  (<?? S (peer/stop speer))
+  )
 ~~~
 
 The client-side works the same in ClojureScript from the browser.
@@ -168,7 +199,7 @@ SSEs, WebRTC or normal sockets should not be hard to add.
 
 ## License
 
-Copyright © 2015-2016 Christian Weilbach, 2015 Konrad Kühne
+Copyright © 2015-2017 Christian Weilbach, 2015 Konrad Kühne
 
 Distributed under the Eclipse Public License either version 1.0 or (at
 your option) any later version.

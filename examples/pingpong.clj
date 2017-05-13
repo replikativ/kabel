@@ -1,10 +1,10 @@
 (ns kabel.examples.pingpong
-  (:require [clojure.test :refer :all]
-            [kabel.client :as cli]
+  (:require [kabel.client :as cli]
             [kabel.http-kit :as http-kit]
             [kabel.peer :as peer]
             [superv.async :refer [<?? go-try S go-loop-try <? >? put?]]
-            [clojure.core.async :refer [timeout go go-loop <! >! <!! put! chan]]
+            [clojure.core.async :refer [chan]]
+            ;; you can use below transit if you prefer
             [kabel.middleware.transit :refer [transit]]
             [hasch.core :refer [uuid]]))
 
@@ -19,10 +19,10 @@
   (let [new-in (chan)
         new-out (chan)]
     ;; we just mirror the messages back
-    (go-loop [i (<! in)]
+    (go-loop-try [i (<? S in)]
       (when i
-        (>! out i)
-        (recur (<! in))))
+        (>? S out i)
+        (recur (<? S in))))
     ;; Note that we pass through the supervisor, peer and new channels
     [S peer [new-in new-out]]))
 
@@ -58,7 +58,8 @@
                                   [S peer [new-in new-out]]))
                               ;; we need to pick the same middleware for serialization
                               ;; (no auto-negotiation yet)
-                              identity))
+                              identity
+                              #_transit))
 
 
 ;; let's connect the client to the server

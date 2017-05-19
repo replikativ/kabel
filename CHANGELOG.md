@@ -3,6 +3,8 @@
 ## 0.2.1
  - JSON serialization
  - experimental WAMP client
+ - update examples
+ - bump deps
 
 ## 0.2.0
  - use tyrus java web-client

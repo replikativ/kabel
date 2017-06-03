@@ -29,5 +29,5 @@
           (when-let [o (<? S (cb-out o))]
             (>? S out o))
           (recur (<? S new-out)))
-        (close! new-out)))
+        (close! out)))
     [S peer [new-in new-out]]))

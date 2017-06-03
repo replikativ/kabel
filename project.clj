@@ -18,7 +18,6 @@
                  [org.slf4j/slf4j-api "1.7.25"] ;; TODO factor logging
 
                  [http-kit "2.2.0" :scope "provided"]
-                 [http.async.client "1.2.0" :scope "provided"]
                  [org.glassfish.tyrus/tyrus-core "1.13.1"]
                  [org.glassfish.tyrus/tyrus-client "1.13.1"]
                  [org.glassfish.tyrus/tyrus-container-grizzly-client "1.13.1"]]

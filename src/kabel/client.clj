@@ -62,20 +62,22 @@
           (onOpen [session config]
             (info {:event :websocket-opened :websocket session :url url})
             (go-loop-super S [m (<? S out)] ;; ensure draining out on disconnect
-              (when m
-                (if (@websockets session)
-                  (do
-                    (debug {:event :client-sending-message
-                            :url url})
-                    ;; special case: use websocket wire-level string type 
-                    (if (= (:kabel/serialization m) :string)
-                      @(.sendText (.getAsyncRemote session) (:kabel/payload m))
-                      @(.sendBinary (.getAsyncRemote session)
-                                    (ByteBuffer/wrap (to-binary m))))
-                    #_(prn "cli send" m))
-                  (warn {:event :dropping-msg-because-of-closed-channel
-                         :url url :message m}))
-                (recur (<? S out))))
+              (if m
+                (do
+                  (if (@websockets session)
+                    (do
+                      (debug {:event :client-sending-message
+                              :url url})
+                      ;; special case: use websocket wire-level string type 
+                      (if (= (:kabel/serialization m) :string)
+                        @(.sendText (.getAsyncRemote session) (:kabel/payload m))
+                        @(.sendBinary (.getAsyncRemote session)
+                                      (ByteBuffer/wrap (to-binary m))))
+                      #_(prn "cli send" m))
+                    (warn {:event :dropping-msg-because-of-closed-channel
+                           :url url :message m}))
+                  (recur (<? S out)))
+                (.close session)))
             (swap! websockets conj session)
             (async/put! opener [in out])
             (close! opener)

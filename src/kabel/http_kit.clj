@@ -27,15 +27,17 @@
                      (with-channel request channel
                        (swap! channel-hub assoc channel request)
                        (go-loop-super S [m (<? S out)]
-                                      (when m
-                                        (if (@channel-hub channel)
-                                          (do (debug  {:event :sending-msg})
-                                              (if (= (:kabel/serialization m) :string)
-                                                (send! channel (:kabel/payload m))
-                                                (send! channel (to-binary m))))
-                                          (warn {:event :dropping-msg-because-of-closed-channel
-                                                 :url url :message m}))
-                                        (recur (<? S out))))
+                                      (if m
+                                        (do
+                                          (if (@channel-hub channel)
+                                            (do (debug  {:event :sending-msg})
+                                                (if (= (:kabel/serialization m) :string)
+                                                  (send! channel (:kabel/payload m))
+                                                  (send! channel (to-binary m))))
+                                            (warn {:event :dropping-msg-because-of-closed-channel
+                                                   :url url :message m}))
+                                          (recur (<? S out)))
+                                        (close channel)))
                        (on-close channel (fn [status]
                                            (let [e (ex-info "Connection closed!" {:status status})
                                                  host (:remote-addr request)]

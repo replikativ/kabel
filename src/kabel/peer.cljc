@@ -21,24 +21,25 @@
 
 (defn drain [[S peer [in out]]]
   (go-loop-super S [i (<? S in)]
-                 (when i
-                   (recur (<? S in)))))
+    (if i
+      (recur (<? S in))
+      (close! out))))
 
 (defn connect
   "Connect peer to url."
   [S peer url]
   (go-try S
-          (let [{{:keys [middleware serialization-middleware
-                         read-handlers write-handlers]} :volatile
-                 :keys [id]} @peer
-                [c-in c-out] (<? S (client-connect! S url
-                                                    id
-                                                    read-handlers
-                                                    write-handlers))]
-            (-> [S peer [c-in c-out]]
-                serialization-middleware
-                middleware
-                drain))))
+    (let [{{:keys [middleware serialization-middleware
+                   read-handlers write-handlers]} :volatile
+           :keys [id]} @peer
+          [c-in c-out] (<? S (client-connect! S url
+                                              id
+                                              read-handlers
+                                              write-handlers))]
+      (-> [S peer [c-in c-out]]
+          serialization-middleware
+          middleware
+          drain))))
 
 (defn client-peer
   "Creates a client-side peer only."
@@ -81,10 +82,9 @@
                                        :chans [bus-in bus-out]})
                      :addresses #{(:url handler)}
                      :id id})]
-     (go-loop-super S [[in out] (<? S new-conns) 
-                       ]
-                    (drain (middleware (serialization-middleware [S peer [in out]])))
-                    (recur (<? S new-conns)))
+     (go-loop-super S [[in out] (<? S new-conns)]
+       (drain (middleware (serialization-middleware [S peer [in out]])))
+       (recur (<? S new-conns)))
      peer)))
 
 
@@ -92,29 +92,29 @@
 (defn start [peer]
   (let [{{S :supervisor} :volatile} @peer]
     (go-try S
-            (if (:started? @peer)
-              false
-              (let [stop-fn (-> @peer :volatile :handler :stop-fn)]
-                (info {:event :starting-peer :id (:id @peer)})
-                (swap! peer update-in [:volatile] (get-in @peer [:volatile :start-fn]))
-                (swap! peer assoc :started? true)
-                true)))))
+      (if (:started? @peer)
+        false
+        (let [stop-fn (-> @peer :volatile :handler :stop-fn)]
+          (info {:event :starting-peer :id (:id @peer)})
+          (swap! peer update-in [:volatile] (get-in @peer [:volatile :start-fn]))
+          (swap! peer assoc :started? true)
+          true)))))
 
 
 (defn stop [peer]
   (let [{{S :supervisor} :volatile} @peer]
     (go-try S
-            (if-not (:started? @peer)
-              false
-              (do
-                (info {:event :stopping-peer :id (:id @peer)})
-                (when-let [stop-fn (get-in @peer [:volatile :stop-fn])]
-                  (stop-fn :timeout 1000))
-                (<? S (timeout 200))
-                (when-let [hub (get-in @peer [:volatile :channel-hub])]
-                  (reset! hub {}))
-                (when-let [in (-> @peer :volatile :chans first)]
-                  (close! in))
-                (swap! peer assoc :started? false)
-                true)))))
+      (if-not (:started? @peer)
+        false
+        (do
+          (info {:event :stopping-peer :id (:id @peer)})
+          (when-let [stop-fn (get-in @peer [:volatile :stop-fn])]
+            (stop-fn :timeout 1000))
+          (<? S (timeout 200))
+          (when-let [hub (get-in @peer [:volatile :channel-hub])]
+            (reset! hub {}))
+          (when-let [in (-> @peer :volatile :chans first)]
+            (close! in))
+          (swap! peer assoc :started? false)
+          true)))))
 

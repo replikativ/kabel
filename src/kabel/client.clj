@@ -87,16 +87,16 @@
                                   (proxy [MessageHandlerString] []
                                     (onMessage [message]
                                       (try
-                                        (when (> (count in-buffer) 100)
-                                          (.close session)
-                                          (throw (ex-info
-                                                  (str "incoming buffer for " url
-                                                       " too full:" (count in-buffer))
-                                                  {:url url
-                                                   :count (count in-buffer)})))
-                                        (debug {:event :received-byte-message
-                                                :url url
-                                                :in-buffer-count (count in-buffer)})
+                                        (let [in-count (count in-buffer)]
+                                          (when (> in-count 100)
+                                            (throw (ex-info
+                                                    (str "incoming buffer for " url
+                                                         " too full: " in-count)
+                                                    {:url url
+                                                     :count (count in-buffer)})))
+                                          (debug {:event :received-byte-message
+                                                  :url url
+                                                  :in-buffer-count in-count}))
                                         (async/put! in {:kabel/serialization :string
                                                         :kabel/payload message})
                                         (catch Exception e
@@ -111,16 +111,16 @@
                                   (proxy [MessageHandlerBinary] []
                                     (onMessage [message]
                                       (try
-                                        (when (> (count in-buffer) 100)
-                                          (.close session)
-                                          (throw (ex-info
-                                                  (str "incoming buffer for " url
-                                                       " too full:" (count in-buffer))
-                                                  {:url url
-                                                   :count (count in-buffer)})))
-                                        (debug {:event :received-byte-message
-                                                :url url
-                                                :in-buffer-count (count in-buffer)})
+                                        (let [in-count (count in-buffer)]
+                                          (when (> in-count 100)
+                                            (throw (ex-info
+                                                    (str "incoming buffer for " url
+                                                         " too full: " in-count)
+                                                    {:url url
+                                                     :count in-count})))
+                                          (debug {:event :received-byte-message
+                                                  :url url
+                                                  :in-buffer-count (count in-buffer)}))
                                         (let [m (from-binary (.array message))]
                                           (async/put! in (if (map? m)
                                                            (assoc m :kabel/host host)

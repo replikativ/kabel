@@ -15,7 +15,8 @@
 
                  [io.replikativ/hasch "0.3.4"]
 
-                 [org.slf4j/slf4j-api "1.7.25"] ;; TODO factor logging
+                 #_[org.slf4j/slf4j-api "1.7.25"] ;; TODO factor logging
+                 [com.taoensso/timbre "4.10.0"]
 
                  [http-kit "2.2.0" :scope "provided"]
                  [org.glassfish.tyrus/tyrus-core "1.13.1"]

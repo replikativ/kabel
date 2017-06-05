@@ -1,6 +1,10 @@
 (ns kabel.platform-log
   "Logging for Clojure."
-  (:import [org.slf4j LoggerFactory]))
+  (:require [taoensso.timbre :refer [-log! *config*] :as timbre])
+  #_(:import [org.slf4j LoggerFactory]))
+
+
+
 
 
 ;; support logging also in clj macroexpansion for cljs
@@ -16,12 +20,15 @@
   (if (cljs-env? &env) then else))
 
 
-(defmacro trace [& args]
+#_(defmacro trace [& args]
   `(if-cljs
    (.trace js/console ~(str *ns*) (pr-str ~@args))
    (.trace (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
 
-(defmacro debug [& args]
+(defmacro trace [& args]
+  `(timbre/trace ~@args))
+
+#_(defmacro debug [& args]
   `(if-cljs
    (when (.-debug js/console)
       (.debug js/console ~(str *ns*) (pr-str ~@args))
@@ -30,18 +37,30 @@
    (when (.isDebugEnabled (LoggerFactory/getLogger ~(str *ns*)))
       (.debug (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
 
-(defmacro info [& args]
+(defmacro debug [& args]
+  `(timbre/debug ~@args))
+
+#_(defmacro info [& args]
   `(if-cljs
    (.info js/console ~(str *ns*) (pr-str ~@args))
    (when (.isInfoEnabled (LoggerFactory/getLogger ~(str *ns*)))
       (.info (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
 
-(defmacro warn [& args]
+(defmacro info [& args]
+  `(timbre/info ~@args))
+
+#_(defmacro warn [& args]
   `(if-cljs
    (.warn js/console  ~(str *ns*) (pr-str ~@args))
    (.warn (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
 
-(defmacro error [& args]
+(defmacro warn [& args]
+  `(timbre/warn ~@args))
+
+#_(defmacro error [& args]
   `(if-cljs
    (.error js/console  ~(str *ns*) (pr-str ~@args))
    (.error (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
+
+(defmacro error [& args]
+  `(timbre/error ~@args))

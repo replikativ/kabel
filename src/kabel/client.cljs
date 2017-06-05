@@ -56,7 +56,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
        (events/listen goog.net.WebSocket.EventType.CLOSED
                       (fn [evt]
                         (let [e (ex-info "Connection closed!" {:event evt})]
-                          (info {:event :connection-closed :closed-event evt})
+                          (info {:event :connection-closed :url url})
                           (close! in)
                           (put! (-error S) e)
                           (try (put! opener e) (catch js/Object e))
@@ -67,7 +67,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
        (events/listen goog.net.WebSocket.EventType.ERROR
                       (fn [evt]
                         (let [e (ex-info "Connection error!" {:event evt})]
-                          (error {:event :websocket-error :error evt})
+                          (error {:event :websocket-error :url url})
                           (put! (-error S) e) ;; TODO needs happen first for replikativ.connect
                           (try (put! opener e) (catch js/Object e))
                           (close! opener))))

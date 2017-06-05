@@ -71,8 +71,9 @@
                        realm
                        {:roles {:subscriber {}
                                 :publisher {}}}])
-            (debug {:event ::welcome
-                    :message (conv-msg (<? S welcome-ch))})
+            (let [w (<? S welcome-ch)]
+              (debug {:event ::welcome
+                      :message (conv-msg w)}))
             (doseq [s subs]
               (>? S out [(type->int :SUBSCRIBE) 1 {} s])
               (let [[_ _ id] (<? S subed-ch)]

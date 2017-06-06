@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.2.2
+ - move to timbre for logging
+ - only readable log messages
+
 ## 0.2.1
  - JSON serialization
  - experimental WAMP client

@@ -183,8 +183,8 @@ Useful middlewares still missing:
 
 ## Connectivity
 
-More transport alternatives like long-polling with
-SSEs, WebRTC or normal sockets should not be hard to add.
+More transport alternatives like long-polling with SSEs, WebRTC, NFC, ... or
+normal sockets should not be hard to add.
 
 
 ## TODO

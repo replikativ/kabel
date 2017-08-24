@@ -135,11 +135,12 @@
                                             (.close session))))
                                       )))
               (catch java.io.IOException e
-                (prn e))))
+                (error {:event :unexpected-ioexception :error (pr-str e)})
+                (put! (-error S) e))))
           (onClose [session reason]
             (let [e (ex-info "Connection closed!" {:reason reason})]
               (debug {:event :closing-connection :url url
-                      :reason reason})
+                      :reason (pr-str reason)})
               (close! in)
               (go-try S (while (<! in))) ;; flush
               (swap! websockets disj session)
@@ -152,12 +153,12 @@
                               :url url
                               :error err})]
               (put! (-error S) e)
-              (error {:event :websocket-error :url url :error err})
+              (error {:event :websocket-error :url url :error (pr-str err)})
               (.close session))))
         cec
         (java.net.URI. url))
        (catch Exception e
-         (error {:event :client-connect-error :url url :error e})
+         (error {:event :client-connect-error :url url :error (pr-str e)})
          (async/put! opener (ex-info "client-connect error"
                                      {:type :websocket-connection-error
                                       :url url

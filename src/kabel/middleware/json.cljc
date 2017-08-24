@@ -18,7 +18,7 @@
                      (let [{:keys [kabel/serialization kabel/payload]} %]
                        (if (= serialization :string)
                          (let [v #?(:clj (json/parse-string payload) 
-                                    :cljs (js->clj (JSON/parse payload)))
+                                    :cljs (js->clj (.parse js/JSON payload)))
                                merged (if (map? v)
                                         (merge v (dissoc % :kabel/serialization
                                                          :kabel/payload))
@@ -35,7 +35,7 @@
                                  :value %})
                          {:kabel/serialization :string
                           :kabel/payload #?(:clj (json/generate-string %)
-                                            :cljs (JSON/stringify %))})))
+                                            :cljs (.stringify js/JSON %))})))
             [S peer [in out]])))
 
 

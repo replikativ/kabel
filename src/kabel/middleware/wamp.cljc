@@ -1,8 +1,10 @@
 (ns kabel.middleware.wamp
   "This is an experimental wamp client middleware."
   (:require
-   [clojure.core.async :refer [timeout go go-loop <! >! >!! put! chan]
-    :as async]
+   #?(:clj [clojure.core.async :as async
+            :refer [>! timeout chan put! pub sub unsub close!]]
+      :cljs [cljs.core.async :as async
+             :refer [>! timeout chan put! pub sub unsub close!]])
    #?(:clj [kabel.platform-log :refer [debug]])
    [superv.async :refer [<?? go-try S go-loop-try <? >? put?]])
   #?(:cljs (:require-macros [superv.async :refer [go-try <? >? put? go-loop-try S]]

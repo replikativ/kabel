@@ -197,6 +197,12 @@ normal sockets should not be hard to add.
 - implement node.js websocket server
 - implement more of wamp client protocol (and maybe router)
 
+## Contributors
+- Konrad Kühne
+- Sang-Kyu Park
+- Brian Marco
+- Christian Weilbach
+
 ## License
 
 Copyright © 2015-2017 Christian Weilbach, 2015 Konrad Kühne

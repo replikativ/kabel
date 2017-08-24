@@ -60,7 +60,7 @@
         http-client
         (proxy [Endpoint] []
           (onOpen [session config]
-            (info {:event :websocket-opened :websocket session :url url})
+            (info {:event :websocket-opened :url url})
             (go-loop-super S [m (<? S out)] ;; ensure draining out on disconnect
               (if m
                 (do

@@ -12,7 +12,7 @@
 
 ;; TODO do not abuse poloniex
 
-(deftest wamp-test
+#_(deftest wamp-test
   (testing "Testing a simple subscription on the wamp middleware."
     (let [event-ch (chan)
           client (peer/client-peer S #uuid "898dcf36-e07a-4338-92fd-f818d573444a"

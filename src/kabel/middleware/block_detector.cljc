@@ -1,6 +1,7 @@
 (ns kabel.middleware.block-detector
   "Block detection middleware for replikativ."
-  (:require #?(:clj [kabel.platform-log :refer [debug info warn error]])
+  (:require [kabel.platform-log #?@(:clj [:refer [debug info warn error]]
+                                    :cljs [:refer-macros [debug info warn error]])]
             [clojure.set :as set]
             #?(:clj [clojure.core.async :as async
                      :refer [<! >! >!! <!! timeout chan alt! go put!

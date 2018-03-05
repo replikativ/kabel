@@ -71,7 +71,7 @@ From the `examples` folder (there is also a cljs client there):
   (let [new-in (chan)
         new-out (chan)]
     ;; we just mirror the messages back
-    (go-loop-try [i (<? S in)]
+    (go-loop-try S [i (<? S in)]
       (when i
         (>? S out i)
         (recur (<? S in))))

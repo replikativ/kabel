@@ -196,6 +196,7 @@ normal sockets should not be hard to add.
 - factor platform neutral logging
 - implement node.js websocket server
 - implement more of wamp client protocol (and maybe router)
+- investigate https://github.com/touch/pubsure-core
 
 ## Contributors
 - Konrad Kühne

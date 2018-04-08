@@ -4,10 +4,10 @@
             [goog.net.WebSocket]
             [goog.Uri]
             [goog.events :as events]
-            [cljs.core.async :as async :refer (take! put! close! chan buffer)]
+            [cljs.core.async :as async :refer (take! put! close! chan buffer timeout)]
             [superv.async :refer [-error]])
   (:require-macros [cljs.core.async.macros :refer [go go-loop]]
-                   [kabel.platform-log :refer [debug info warn error]]))
+                   [kabel.platform-log :refer [debug info error]]))
 
 
 (when (on-node?)
@@ -83,7 +83,11 @@ Only supports websocket at the moment, but is supposed to dispatch on
         (take! out
                (fn [m]
                  (if m
-                   (do
+                   (go
+                     (while (pos? (.getBufferedAmount channel))
+                       (debug {:event :output-blocked
+                               :buffered-amount (.getBufferedAmount channel)})
+                       (<! (timeout 100)))
                      (try
                        (if (= (:kabel/serialization m) :string)
                          (.send channel (:kabel/payload m))

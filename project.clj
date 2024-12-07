@@ -1,29 +1,27 @@
-(defproject io.replikativ/kabel "0.2.2"
+(defproject io.replikativ/kabel "0.2.3-SNAPSHOT"
   :description "A library for simple wire-like connectivity semantics."
   :url "https://github.com/replikativ/kabel"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
-  :dependencies [[org.clojure/clojure "1.9.0-alpha16" :scope "provided"]
-                 [org.clojure/clojurescript "1.9.542" :scope "provided"]
-                 [io.replikativ/superv.async "0.2.7"]
+  :dependencies [[org.clojure/clojure "1.11.1" :scope "provided"]
+                 [org.clojure/clojurescript "1.11.132" :scope "provided"]
 
-                 [com.cognitect/transit-clj "0.8.285"]
-                 [com.cognitect/transit-cljs "0.8.239" :scope "provided"]
-                 [cheshire "5.7.1" :scope "provided"] ;; for JSON serialization
+                 [com.cognitect/transit-clj "1.0.333"]
+                 [com.cognitect/transit-cljs "0.8.280" :scope "provided"]
+                 [cheshire "5.13.0" :scope "provided"] ;; for JSON serialization
 
-                 [io.replikativ/incognito "0.2.1"]
+                 [io.replikativ/superv.async "0.3.48"]
+                 [io.replikativ/incognito "0.3.66"]
+                 [io.replikativ/hasch "0.3.94"]
 
-                 [io.replikativ/hasch "0.3.4"]
+                 [com.taoensso/timbre "6.6.1"]
 
-                 #_[org.slf4j/slf4j-api "1.7.25"] ;; TODO factor logging
-                 [com.taoensso/timbre "4.10.0"]
+                 [http-kit "2.8.0"  :scope "provided"]
+                 [org.glassfish.tyrus/tyrus-core "1.21"]
+                 [org.glassfish.tyrus/tyrus-client "1.21"]
+                 [org.glassfish.tyrus/tyrus-container-grizzly-client "1.21"]]
 
-                 [http-kit "2.2.0" :scope "provided"]
-                 [org.glassfish.tyrus/tyrus-core "1.13.1"]
-                 [org.glassfish.tyrus/tyrus-client "1.13.1"]
-                 [org.glassfish.tyrus/tyrus-container-grizzly-client "1.13.1"]]
-
-  :plugins [[lein-cljsbuild "1.1.4"]]
+  :plugins [[lein-cljsbuild "1.1.8"]]
 
   :java-source-paths ["src/main/java"]
 

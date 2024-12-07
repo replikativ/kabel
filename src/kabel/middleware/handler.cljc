@@ -6,7 +6,8 @@
             #?(:clj [clojure.core.async :as async
                       :refer [chan close!]]
                :cljs [cljs.core.async :as async :refer [chan close!]]))
-  #?(:cljs (:require-macros [superv.async :refer [<? >? go-loop-try]])))
+  #?(:cljs (:require-macros [superv.async :refer [<? >? go-loop-try]]
+                            [cljs.core.async :refer [go]])))
 
 
 (defn handler

@@ -33,6 +33,7 @@
     (.build config-builder)))
 
 
+(def ^:dynamic *max-buffer-size* 10000)
 
 (defn client-connect!
   "Connects to url. Puts [in out] channels on return channel when ready.
@@ -88,7 +89,7 @@
                                     (onMessage [message]
                                       (try
                                         (let [in-count (count in-buffer)]
-                                          (when (> in-count 100)
+                                          (when (> in-count *max-buffer-size*)
                                             (throw (ex-info
                                                     (str "incoming buffer for " url
                                                          " too full: " in-count)
@@ -112,7 +113,7 @@
                                     (onMessage [message]
                                       (try
                                         (let [in-count (count in-buffer)]
-                                          (when (> in-count 100)
+                                          (when (> in-count *max-buffer-size*)
                                             (throw (ex-info
                                                     (str "incoming buffer for " url
                                                          " too full: " in-count)

@@ -1,10 +1,7 @@
 (ns kabel.platform-log
   "Logging for Clojure."
-  (:require [taoensso.timbre :refer [-log! *config*] :as timbre])
-  #_(:import [org.slf4j LoggerFactory]))
-
-
-
+  #?(:clj (:require [taoensso.telemere :as tel])
+     :cljs (:require [taoensso.telemere :as tel :refer-macros [log!]])))
 
 
 ;; support logging also in clj macroexpansion for cljs
@@ -26,7 +23,9 @@
    (.trace (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
 
 (defmacro trace [& args]
-  `(timbre/trace ~@args))
+  `(tel/log! {:level :trace
+              :ns    ~(str *ns*)
+              :msg   (pr-str ~@args)}))
 
 #_(defmacro debug [& args]
   `(if-cljs
@@ -38,7 +37,9 @@
       (.debug (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
 
 (defmacro debug [& args]
-  `(timbre/debug ~@args))
+  `(tel/log! {:level :debug
+              :ns    ~(str *ns*)
+              :msg   (pr-str ~@args)}))
 
 #_(defmacro info [& args]
   `(if-cljs
@@ -47,7 +48,9 @@
       (.info (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
 
 (defmacro info [& args]
-  `(timbre/info ~@args))
+  `(tel/log! {:level :info
+              :ns    ~(str *ns*)
+              :msg   (pr-str ~@args)}))
 
 #_(defmacro warn [& args]
   `(if-cljs
@@ -55,7 +58,9 @@
    (.warn (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
 
 (defmacro warn [& args]
-  `(timbre/warn ~@args))
+  `(tel/log! {:level :warn
+              :ns    ~(str *ns*)
+              :msg   (pr-str ~@args)}))
 
 #_(defmacro error [& args]
   `(if-cljs
@@ -63,4 +68,6 @@
    (.error (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
 
 (defmacro error [& args]
-  `(timbre/error ~@args))
+  `(tel/log! {:level :error
+              :ns    ~(str *ns*)
+              :msg   (pr-str ~@args)}))

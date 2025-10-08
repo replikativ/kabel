@@ -10,11 +10,10 @@
                                            -track-exception -free-exception
                                            -register-go -unregister-go]])
             #?(:clj [clojure.core.async :as async
-                     :refer [>! timeout chan put! pub sub unsub close!]]
-               :cljs [cljs.core.async :as async
-                      :refer [>! timeout chan put! pub sub unsub close!]]))
-  #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)]
-                            [kabel.platform-log :refer [debug info warn error]]
+                     :refer [>! timeout chan put! pub sub unsub close! alts!]]
+               :cljs [clojure.core.async :as async
+                      :refer [>! timeout chan put! pub sub unsub close! alts!] :include-macros true]))
+  #?(:cljs (:require-macros [kabel.platform-log :refer [debug info warn error]]
                             [superv.async :refer [<<? <? go-try go-loop-try alt?
                                                   go-loop-super]])))
 

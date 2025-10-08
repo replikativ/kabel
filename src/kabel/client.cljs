@@ -4,10 +4,10 @@
             [goog.net.WebSocket]
             [goog.Uri]
             [goog.events :as events]
-            [cljs.core.async :as async :refer (take! put! close! chan buffer timeout)]
-            [superv.async :refer [-error]])
-  (:require-macros [cljs.core.async.macros :refer [go go-loop]]
-                   [kabel.platform-log :refer [debug info error]]))
+            [clojure.core.async :as async :refer (take! put! close! chan buffer timeout go) :include-macros true]
+            [superv.async :refer [-error]]
+            [taoensso.telemere :as tel])
+  (:require-macros [kabel.platform-log :refer [debug info error]]))
 
 
 (when (on-node?)

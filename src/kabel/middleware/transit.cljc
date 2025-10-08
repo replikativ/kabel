@@ -9,6 +9,7 @@
    [incognito.transit :refer [incognito-read-handler incognito-write-handler]])
   #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream])
      :cljs (:require-macros [superv.async :refer [go-try]]
+                            [clojure.core.async :refer [go]]
                             [kabel.platform-log :refer [debug]])))
 
 

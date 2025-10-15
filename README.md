@@ -5,10 +5,11 @@ a bidirectional wire to pass Clojure values between peers. Peers in Clojure and
 ClojureScript are symmetric and hence allow symmetric cross-platform
 implementations. Clojure peers can connect to Clojure and ClojureScript peers in
 the same way and vice versa. kabel can use any bidirectional messaging channel,
-currently it supports web-sockets. It also ships
-a [transit](https://github.com/cognitect/transit-format) middleware for
-efficient serialization. It works on different JavaScript runtimes, currently
-tested are the Browser, node.js and React-Native.
+currently it supports web-sockets. It ships multiple serialization middlewares
+including [transit](https://github.com/cognitect/transit-format) and
+[fressian](https://github.com/clojure/data.fressian) for efficient serialization.
+It works on different JavaScript runtimes, currently tested are the Browser,
+node.js and React-Native.
 
 
 ## Rationale
@@ -46,6 +47,22 @@ handling guarantees.
 Add this to your project dependencies:
 
 [![Clojars Project](http://clojars.org/io.replikativ/kabel/latest-version.svg)](http://clojars.org/io.replikativ/kabel)
+
+### Build
+
+The project uses deps.edn and tools.build. To compile the Java helper classes:
+
+```clojure
+clj -T:build compile-java
+```
+
+Run the example:
+
+```clojure
+clj -M:pingpong
+```
+
+### Example
 
 From the `examples` folder (there is also a cljs client there):
 
@@ -159,11 +176,16 @@ transform, inject and pass through messages.
 
 ### Serialization
 
-Serialization is also done in a middleware, a transit middleware is currently
-provided and used by default. If you do not use any serialization middleware
-than a simple `pr-str <-> read-string` mechanism is combined with a very simple
+The following serialization middlewares are provided:
+- **Transit** - Efficient binary serialization (JSON or MessagePack encoding)
+- **Fressian** - Clojure-optimized binary format
+- **JSON** - Plain JSON for interoperability with non-Clojure systems
+- **Default** - EDN with pr-str/read-string (no middleware required)
+
+If you do not use any serialization middleware, the default
+`pr-str <-> read-string` mechanism is combined with a simple
 binary header to track different serialization types over the wire including raw
-binary data.
+binary data, transit-json, transit-msgpack, and fressian.
 
 
 ### External
@@ -206,7 +228,7 @@ normal sockets should not be hard to add.
 
 ## License
 
-Copyright © 2015-2017 Christian Weilbach, 2015 Konrad Kühne
+Copyright © 2015-2025 Christian Weilbach, 2015 Konrad Kühne
 
 Distributed under the Eclipse Public License either version 1.0 or (at
 your option) any later version.

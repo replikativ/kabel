@@ -8,6 +8,8 @@
         io.replikativ/incognito {:mvn/version "0.3.66"}
         io.replikativ/hasch {:mvn/version "0.3.94"}
         com.taoensso/telemere {:mvn/version "1.1.0"}
+        org.clojure/data.fressian {:mvn/version "1.0.0"}
+        com.github.pkpkpk/fress {:mvn/version "0.4.312"}
         http-kit/http-kit {:mvn/version "2.8.0"}
         org.glassfish.tyrus/tyrus-core {:mvn/version "1.13.1"}
         org.glassfish.tyrus/tyrus-client {:mvn/version "1.13.1"}
@@ -15,5 +17,7 @@
  :aliases {:dev {:extra-deps {thheller/shadow-cljs      {:mvn/version "2.28.20"}}}
            :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}}}
+           :pingpong {:extra-paths ["examples"]
+                      :main-opts ["-m" "kabel.examples.pingpong"]}
            :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
                    :ns-default build}}}

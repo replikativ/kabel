@@ -9,7 +9,8 @@
                      :string          1
                      :pr-str          2
                      :transit-json    11
-                     :transit-msgpack 12})
+                     :transit-msgpack 12
+                     :fressian        13})
 
 (def decoding-table (into {} (map (fn [[k v]] [v k])) encoding-table))
 

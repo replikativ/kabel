@@ -32,9 +32,9 @@
     (if-not (on-node?)
       (if (exists? js/Blob)
         (js/Blob. #js [wrapped])
-        ;; react native 
+        ;; react native
         wrapped)
-      (js/Buffer. wrapped))))
+      (.from js/Buffer wrapped))))
 
 
 (defn from-binary [binary cb]

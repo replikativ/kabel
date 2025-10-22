@@ -75,7 +75,7 @@
         to-send (transit/write writer (assoc m :sender peer-id))]
     (if-not (on-node?)
       ;(.send channel (js/Blob. #js [to-send])) ;; Browser
-      (.send channel (js/Buffer. to-send)) ;; NodeJS
+      (.send channel (.from js/Buffer to-send)) ;; NodeJS
       ))
 
   )

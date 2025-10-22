@@ -50,10 +50,18 @@ Add this to your project dependencies:
 
 ### Build
 
-The project uses deps.edn and tools.build. To compile the Java helper classes:
+The project uses deps.edn and tools.build for Clojure, and shadow-cljs for ClojureScript builds.
+
+To compile the Java helper classes:
 
 ```clojure
 clj -T:build compile-java
+```
+
+For ClojureScript development with shadow-cljs:
+
+```bash
+npm install  # Install shadow-cljs and Node.js dependencies
 ```
 
 Run the example:
@@ -61,6 +69,33 @@ Run the example:
 ```clojure
 clj -M:pingpong
 ```
+
+### Testing
+
+kabel has comprehensive test coverage across multiple platforms:
+
+**JVM Tests** (Clojure):
+```bash
+clj -X:test
+```
+
+**Browser Tests** (ClojureScript via shadow-cljs):
+```bash
+npx shadow-cljs watch test
+# Open http://localhost:8022 in your browser to run tests
+```
+
+**Node.js Tests** (ClojureScript via shadow-cljs):
+```bash
+npx shadow-cljs compile node-test && node target/node-tests.js
+```
+
+**Integration Tests** (JVM server + Node.js client):
+```bash
+./test-integration.sh
+```
+
+The integration test demonstrates cross-platform communication between a JVM Clojure server and a Node.js ClojureScript client using the fressian middleware.
 
 ### Example
 

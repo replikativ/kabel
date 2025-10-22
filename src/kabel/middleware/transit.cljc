@@ -33,7 +33,7 @@
                                                           {:handlers {"u" (fn [v] (cljs.core/uuid v))
                                                                       "incognito" ir}})
                                                 s (if (on-node?)
-                                                    (.toString payload "utf8")
+                                                    (.toString (.from js/Buffer payload) "utf8")
                                                     (-> payload
                                                         crypt/utf8ByteArrayToString
                                                         #_(js/TextDecoder. "utf-8")
@@ -116,7 +116,7 @@
         to-send (transit/write writer (assoc m :sender peer-id))]
     (if-not (on-node?)
       ;(.send channel (js/Blob. #js [to-send])) ;; Browser
-      (.send channel (js/Buffer. to-send)) ;; NodeJS
+      (.send channel (.from js/Buffer to-send)) ;; NodeJS
       ))
 
   )

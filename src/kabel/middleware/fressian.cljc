@@ -10,7 +10,8 @@
             [incognito.fressian :refer [incognito-read-handlers
                                        incognito-write-handlers]])
   #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream])
-     :cljs (:require-macros [superv.async :refer [go-try]])))
+     :cljs (:require-macros [superv.async :refer [go-try]]
+                            [clojure.core.async :refer [go]])))
 
 
 (defn merge-read-handlers

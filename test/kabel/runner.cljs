@@ -1,7 +1,12 @@
 (ns kabel.runner
-  (:require [cljs.test :refer-macros [run-all-tests]]))
+  (:require [shadow.test.browser :as browser]))
 
-(enable-console-print!)
+(defn start []
+  (browser/init))
 
-(defn ^:export run []
-  (run-all-tests #_"kabel.transit-test"))
+(defn stop []
+  ;; called before re-running tests
+  )
+
+(defn ^:export init []
+  (start))

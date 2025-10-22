@@ -22,7 +22,10 @@ Only supports websocket at the moment, but is supposed to dispatch on
   ([S url peer-id]
    (client-connect! S url peer-id (atom {}) (atom {})))
   ([S url peer-id read-handlers write-handlers]
-   (let [channel (goog.net.WebSocket. false)
+   (let [channel (if (on-node?)
+                   ;; Node.js websocket polyfill only supports arraybuffer
+                   (goog.net.WebSocket. #js {:binaryType goog.net.WebSocket.BinaryType.ARRAY_BUFFER})
+                   (goog.net.WebSocket. false))
          in-buffer (buffer 1024) ;; standard size
          in (chan in-buffer)
          out (chan)

@@ -7,7 +7,8 @@
              :refer [>! timeout chan put! pub sub unsub close!]])
    #?(:clj [kabel.platform-log :refer [debug]])
    [superv.async :refer [<?? go-try S go-loop-try <? >? put?]])
-  #?(:cljs (:require-macros [superv.async :refer [go-try <? >? put? go-loop-try S]]
+  #?(:cljs (:require-macros [clojure.core.async :refer [go go-loop]]
+                            [superv.async :refer [go-try <? >? put? go-loop-try S]]
                             [kabel.platform-log :refer [debug]])))
 
 ;; https://tools.ietf.org/html/draft-oberstet-hybi-tavendo-wamp-02

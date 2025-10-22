@@ -1,0 +1,12 @@
+{
+  "name": "kabel",
+  "version": "1.0.0",
+  "description": "Kabel WebSocket connection library",
+  "dependencies": {
+    "websocket": "^1.0.34"
+  },
+  "devDependencies": {
+    "shadow-cljs": "^2.28.20"
+  },
+  "license": "EPL-1.0"
+}

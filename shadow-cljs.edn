@@ -1,0 +1,35 @@
+{:deps {:aliases [:dev :test]}
+
+ :dependencies []
+
+ :dev-http {8020 "resources/public"
+            8021 "resources/private"}
+
+ :builds
+ {:app
+  {:target :browser
+   :output-dir "resources/public/js"
+   :asset-path "/js"
+   :modules {:main {:init-fn kabel.client/init
+                    :preloads []}}
+   :devtools {:http-root "resources/public"
+              :http-port 8020
+              :preloads []}}
+
+  :test
+  {:target :browser-test
+   :test-dir "resources/private"
+   :ns-regexp "-test$"
+   :runner-ns kabel.runner
+   :devtools {:http-root "resources/private"
+              :http-port 8021}}
+
+  :node-test
+  {:target :node-test
+   :output-to "target/node-tests.js"
+   :ns-regexp "-test$"}
+
+  :integration
+  {:target :node-test
+   :output-to "target/integration-test.js"
+   :ns-regexp "integration-test$"}}}

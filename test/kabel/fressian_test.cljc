@@ -2,14 +2,16 @@
   (:require
    #?(:clj [clojure.test :refer :all]
       :cljs [cljs.test :refer-macros [deftest is testing run-tests async run-all-tests]])
-   [superv.async :refer [#?(:clj <??) go-try S go-loop-try <? >? put?]
-    #?@(:cljs [:include-macros true])]
+   #?(:clj [superv.async :refer [<?? go-try S go-loop-try <? >? put?]]
+      :cljs [superv.async :refer [go-try S go-loop-try <? >? put?]
+             :include-macros true])
    #?(:clj [kabel.http-kit :as http-kit])
    #?(:clj [kabel.peer :as peer])
    #?(:clj [clojure.data.fressian :as fress]
       :cljs [fress.api :as fress])
-   [#?(:clj clojure.core.async :cljs cljs.core.async) :refer [timeout chan]]
-   [kabel.middleware.fressian :refer [fressian merge-read-handlers merge-write-handlers]]))
+   [clojure.core.async :refer [timeout chan alts! >!]]
+   [kabel.middleware.fressian :refer [fressian merge-read-handlers merge-write-handlers]])
+  #?(:cljs (:require-macros [clojure.core.async :refer [go go-loop alt!]])))
 
 #?(:cljs (def byte-array #(-> % into-array js/Uint8Array.)))
 

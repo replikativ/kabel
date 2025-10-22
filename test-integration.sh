@@ -19,9 +19,15 @@ SERVER_PID=$!
 cleanup() {
     echo -e "${YELLOW}==> Cleaning up...${NC}"
     if [ ! -z "$SERVER_PID" ]; then
-        kill $SERVER_PID 2>/dev/null || true
-        wait $SERVER_PID 2>/dev/null || true
+        # Kill the process group to ensure child Java processes are terminated
+        kill -TERM -$SERVER_PID 2>/dev/null || true
+        sleep 1
+        # Force kill if still running
+        kill -KILL -$SERVER_PID 2>/dev/null || true
+        # Don't wait - it can hang. Just move on.
     fi
+    # Also kill any Java processes listening on our port as a fallback
+    lsof -ti:47295 | xargs kill -9 2>/dev/null || true
 }
 
 # Register cleanup on exit

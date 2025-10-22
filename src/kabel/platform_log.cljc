@@ -1,7 +1,6 @@
 (ns kabel.platform-log
   "Logging for Clojure."
-  #?(:clj (:require [taoensso.telemere :as tel])
-     :cljs (:require [taoensso.telemere :as tel :refer-macros [log!]])))
+  (:require [taoensso.telemere :as tel :include-macros true]))
 
 
 ;; support logging also in clj macroexpansion for cljs

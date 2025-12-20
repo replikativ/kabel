@@ -17,6 +17,32 @@
                             [superv.async :refer [<<? <? go-try go-loop-try alt?
                                                   go-loop-super]])))
 
+;; ============================================================================
+;; Peer Registry
+;; ============================================================================
+;; Global registry of peers by id. Enables lookup from handlers that need
+;; to access peer for pubsub or other operations.
+
+(defonce peers (atom {}))
+
+(defn register-peer!
+  "Register a peer in the global registry. Called automatically by client-peer
+   and server-peer."
+  [peer]
+  (let [id (:id @peer)]
+    (swap! peers assoc id peer)
+    peer))
+
+(defn unregister-peer!
+  "Unregister a peer from the global registry."
+  [peer-id]
+  (swap! peers dissoc peer-id))
+
+(defn get-peer
+  "Get a peer by id from the global registry."
+  [peer-id]
+  (get @peers peer-id))
+
 
 (defn drain [[S peer [in out]]]
   (go-loop-super S [i (<? S in)]
@@ -49,15 +75,16 @@
   ([S id middleware serialization-middleware read-handlers write-handlers]
    (let [log (atom {})
          bus-in (chan)
-         bus-out (pub bus-in :type)]
-     (atom {:volatile {:log log
-                       :middleware middleware
-                       :serialization-middleware serialization-middleware
-                       :read-handlers read-handlers
-                       :write-handlers write-handlers
-                       :supervisor S
-                       :chans [bus-in bus-out]}
-            :id id}))))
+         bus-out (pub bus-in :type)
+         peer (atom {:volatile {:log log
+                                :middleware middleware
+                                :serialization-middleware serialization-middleware
+                                :read-handlers read-handlers
+                                :write-handlers write-handlers
+                                :supervisor S
+                                :chans [bus-in bus-out]}
+                     :id id})]
+     (register-peer! peer))))
 
 
 (defn server-peer
@@ -84,7 +111,7 @@
      (go-loop-super S [[in out] (<? S new-conns)]
        (drain (middleware (serialization-middleware [S peer [in out]])))
        (recur (<? S new-conns)))
-     peer)))
+     (register-peer! peer))))
 
 
 
@@ -115,5 +142,7 @@
           (when-let [in (-> @peer :volatile :chans first)]
             (close! in))
           (swap! peer assoc :started? false)
+          ;; Unregister from global registry
+          (unregister-peer! (:id @peer))
           true)))))
 

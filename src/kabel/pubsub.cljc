@@ -26,7 +26,7 @@
             #?(:clj [clojure.core.async :as async
                      :refer [>! <! chan put! close! timeout pub sub unsub alts!]]
                :cljs [clojure.core.async :as async
-                      :refer [>! <! chan put! close! timeout alts!] :include-macros true]))
+                      :refer [>! <! chan put! close! timeout pub sub alts!] :include-macros true]))
   #?(:cljs (:require-macros [kabel.platform-log :refer [debug info warn error]]
                             [superv.async :refer [<? >? go-try go-loop-try go-loop-super]])))
 
@@ -36,7 +36,8 @@
 
 (def default-opts
   {:batch-size 20
-   :batch-timeout-ms 30000})
+   :batch-timeout-ms 30000
+   :item-timeout-ms 100})
 
 ;; =============================================================================
 ;; State Management
@@ -68,6 +69,7 @@
      - :strategy - PSyncStrategy implementation (required)
      - :batch-size - Items per handshake batch (default 20)
      - :batch-timeout-ms - Batch ack timeout (default 30000)
+     - :item-timeout-ms - Timeout waiting for next item (default 100)
 
    Returns: topic"
   [peer topic {:keys [strategy] :as opts}]
@@ -166,7 +168,7 @@
 
    Returns channel yielding {:ok true} or {:error ...}"
   [S out topic handshake-ch opts pending-acks]
-  (let [{:keys [batch-size batch-timeout-ms]} opts]
+  (let [{:keys [batch-size batch-timeout-ms item-timeout-ms]} opts]
     (go-try S
       (loop [batch-idx 0]
         ;; Collect up to batch-size items
@@ -174,7 +176,7 @@
                           remaining batch-size]
                      (if (zero? remaining)
                        items
-                       (let [[item ch] (alts! [handshake-ch (timeout 100)])]
+                       (let [[item ch] (alts! [handshake-ch (timeout item-timeout-ms)])]
                          (cond
                            ;; Got an item
                            (and (= ch handshake-ch) (some? item))
@@ -421,38 +423,37 @@
           (handle-unsubscription! S peer out msg)
           (recur (<? S unsubscribe-ch))))
 
-      ;; Handle handshake data (client-side)
-      (go-loop-super S [msg (<? S handshake-data-ch)]
-        (when msg
-          (let [{:keys [topic data]} msg]
-            (debug {:event :pubsub/handshake-data-received :topic topic})
-            ;; Accumulate items for this batch
-            (swap! handshake-items update topic (fnil conj []) data))
-          (recur (<? S handshake-data-ch))))
+      ;; Handle handshake data and batch-complete (client-side)
+      ;; Using single go-loop with alts! to preserve message ordering
+      ;; (both message types must be processed in order they arrive)
+      (go-loop-super S []
+        (let [[msg ch] (alts! [handshake-data-ch batch-complete-ch])]
+          (when msg
+            (cond
+              (= ch handshake-data-ch)
+              (let [{:keys [topic data]} msg]
+                (debug {:event :pubsub/handshake-data-received :topic topic})
+                ;; Accumulate items for this batch
+                (swap! handshake-items update topic (fnil conj []) data))
 
-      ;; Handle batch-complete (client-side)
-      (go-loop-super S [msg (<? S batch-complete-ch)]
-        (when msg
-          ;; Small yield to let handshake-data processing catch up
-          ;; (messages arrive in order but are processed by separate go-loops)
-          (<? S (timeout 10))
-          (let [{:keys [topic batch-idx]} msg
-                items (get @handshake-items topic [])
-                sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
-                strategy (:strategy sub-state)]
-            (debug {:event :pubsub/batch-complete-received
-                    :topic topic
-                    :batch-idx batch-idx
-                    :item-count (count items)})
-            ;; Apply all items
-            (when strategy
-              (doseq [item items]
-                (<? S (proto/-apply-handshake-item strategy item))))
-            ;; Clear accumulated items
-            (swap! handshake-items assoc topic [])
-            ;; Send ack
-            (>? S out (proto/handshake-ack-msg topic batch-idx)))
-          (recur (<? S batch-complete-ch))))
+              (= ch batch-complete-ch)
+              (let [{:keys [topic batch-idx]} msg
+                    items (get @handshake-items topic [])
+                    sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
+                    strategy (:strategy sub-state)]
+                (debug {:event :pubsub/batch-complete-received
+                        :topic topic
+                        :batch-idx batch-idx
+                        :item-count (count items)})
+                ;; Apply all items
+                (when strategy
+                  (doseq [item items]
+                    (<? S (proto/-apply-handshake-item strategy item))))
+                ;; Clear accumulated items
+                (swap! handshake-items assoc topic [])
+                ;; Send ack
+                (>? S out (proto/handshake-ack-msg topic batch-idx))))
+            (recur))))
 
       ;; Handle handshake-ack (server-side)
       (go-loop-super S [msg (<? S handshake-ack-ch)]

@@ -4,8 +4,7 @@
             [kabel.pubsub.protocol :as proto]
             [superv.async :refer [S go-try <?]]
             #?(:clj [clojure.core.async :as async :refer [go <! >! chan put! close! timeout alts!]]
-               :cljs [clojure.core.async :as async :refer [chan put! close! timeout] :include-macros true]))
-  #?(:cljs (:require-macros [clojure.core.async :refer [go <! >! alts!]])))
+               :cljs [clojure.core.async :as async :refer [chan put! close! timeout go <! >! alts!]])))
 
 ;; =============================================================================
 ;; Test Helpers
@@ -141,25 +140,26 @@
 ;; Integration Tests
 ;; =============================================================================
 
-(deftest handshake-flow-test
-  (testing "handshake sends items in batches"
-    ;; This would require running the full middleware
-    ;; For now, just test the strategy interface
-    (let [items [{:key :a :value 1}
-                 {:key :b :value 2}
-                 {:key :c :value 3}]
-          strategy (make-test-sync-strategy items)
-          handshake-ch (proto/-handshake-items strategy {:client-version 1})
-          received (atom [])]
-      ;; Read all items from channel
-      (go
-        (loop []
-          (when-let [item (<! handshake-ch)]
-            (swap! received conj item)
-            (recur))))
-      ;; Wait a bit for async
-      #?(:clj (Thread/sleep 100))
-      (is (= items @received)))))
+#?(:clj
+   (deftest handshake-flow-test
+     (testing "handshake sends items in batches"
+       ;; This would require running the full middleware
+       ;; For now, just test the strategy interface
+       (let [items [{:key :a :value 1}
+                    {:key :b :value 2}
+                    {:key :c :value 3}]
+             strategy (make-test-sync-strategy items)
+             handshake-ch (proto/-handshake-items strategy {:client-version 1})
+             received (atom [])]
+         ;; Read all items from channel
+         (go
+           (loop []
+             (when-let [item (<! handshake-ch)]
+               (swap! received conj item)
+               (recur))))
+         ;; Wait a bit for async
+         (Thread/sleep 100)
+         (is (= items @received))))))
 
 ;; =============================================================================
 ;; End-to-End Tests (with middleware)

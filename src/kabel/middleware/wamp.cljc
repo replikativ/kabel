@@ -52,7 +52,6 @@
                 :INTERRUPT 69,
                 :YIELD 70})
 
-
 (def int->type (into {} (map (fn [[k v]] [v k])) type->int))
 
 (defn conv-msg [m]

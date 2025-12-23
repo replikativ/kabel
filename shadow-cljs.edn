@@ -27,7 +27,8 @@
   :node-test
   {:target :node-test
    :output-to "target/node-tests.js"
-   :ns-regexp "-test$"}
+   :ns-regexp "-test$"
+   :exclude #{kabel.integration-test}}
 
   :integration
   {:target :node-test

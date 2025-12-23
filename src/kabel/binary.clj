@@ -4,7 +4,6 @@
   (:import [java.io ByteArrayOutputStream DataOutputStream
             ByteArrayInputStream DataInputStream]))
 
-
 (def encoding-table {:binary          0
                      :string          1
                      :pr-str          2
@@ -13,7 +12,6 @@
                      :fressian        13})
 
 (def decoding-table (into {} (map (fn [[k v]] [v k])) encoding-table))
-
 
 (defn to-binary [{:keys [kabel/serialization kabel/payload] :as m}]
   (let [payload (if-not serialization

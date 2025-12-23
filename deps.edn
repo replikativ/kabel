@@ -25,8 +25,10 @@
                   :exec-args {:dirs ["test"]}}
            :pingpong {:extra-paths ["examples"]
                       :main-opts ["-m" "kabel.examples.pingpong"]}
-           :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
-                   :ns-default build}}
- :deps/prep-lib {:ensure "target/classes"
-                 :alias :build
-                 :fn compile-java}}
+           :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+                          slipset/deps-deploy {:mvn/version "0.2.2"}}
+                   :ns-default build}
+           :format {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
+                    :main-opts ["-m" "cljfmt.main" "check"]}
+           :ffix {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
+                  :main-opts ["-m" "cljfmt.main" "fix"]}}}

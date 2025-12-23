@@ -89,10 +89,11 @@
 
 (defn handshake-batch-complete-msg
   "Create a batch complete message."
-  [topic batch-idx]
+  [topic batch-idx item-count]
   {:type :pubsub/handshake-batch-complete
    :topic topic
-   :batch-idx batch-idx})
+   :batch-idx batch-idx
+   :item-count item-count})
 
 (defn handshake-ack-msg
   "Create a handshake acknowledgment message."

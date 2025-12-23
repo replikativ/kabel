@@ -8,7 +8,6 @@
             [kabel.middleware.transit :refer [transit]]
             [hasch.core :refer [uuid]]))
 
-
 (defn pong-middleware [[S peer [in out]]]
   (let [new-in (chan)
         new-out (chan)]
@@ -41,7 +40,6 @@
       (<?? S (timeout 1000))
       (<?? S (peer/stop speer)))))
 
-
 (deftest stress-test
   (testing "Pushing a thousand messages through."
     (let [sid #uuid "fd0278e4-081c-4925-abb9-ff4210be271b"
@@ -53,10 +51,10 @@
                                           (let [new-in (chan)
                                                 new-out (chan)]
                                             (go-try S
-                                              (doseq [i (range 100)]
-                                                (>? S out i))
-                                              (doseq [i (range 100)]
-                                                (is (= i (<? S in)))))
+                                                    (doseq [i (range 100)]
+                                                      (>? S out i))
+                                                    (doseq [i (range 100)]
+                                                      (is (= i (<? S in)))))
                                             [S peer [new-in new-out]]))
                                   identity)]
       (<?? S (peer/start speer))

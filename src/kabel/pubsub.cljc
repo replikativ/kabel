@@ -21,6 +21,7 @@
    (publish! peer :my-topic {:data 123})
    ```"
   (:require [kabel.pubsub.protocol :as proto]
+            [taoensso.telemere :as tel]
             #?(:clj [kabel.platform-log :refer [debug info warn error]])
             #?(:clj [superv.async :refer [<? >? go-try go-loop-try go-loop-super]])
             #?(:clj [clojure.core.async :as async
@@ -140,24 +141,24 @@
         subscribers (get-subscribers peer topic)
         is-client? (and out (empty? subscribers))]
     (go-try S
-      (let [msg (proto/publish-msg topic payload)
-            sent (atom 0)]
-        (if is-client?
+            (let [msg (proto/publish-msg topic payload)
+                  sent (atom 0)]
+              (if is-client?
           ;; Client: send to server
-          (do
-            (debug {:event :pubsub/publish-to-server :topic topic})
-            (>? S out msg)
-            (swap! sent inc))
+                (do
+                  (debug {:event :pubsub/publish-to-server :topic topic})
+                  (>? S out msg)
+                  (swap! sent inc))
           ;; Server: send to local subscribers
-          (doseq [transport subscribers]
-            (try
-              (>? S transport msg)
-              (swap! sent inc)
-              (catch #?(:clj Exception :cljs js/Error) e
-                (warn {:event :pubsub/publish-failed
-                       :topic topic
-                       :error (str e)})))))
-        {:ok true :sent-count @sent}))))
+                (doseq [transport subscribers]
+                  (try
+                    (>? S transport msg)
+                    (swap! sent inc)
+                    (catch #?(:clj Exception :cljs js/Error) e
+                      (warn {:event :pubsub/publish-failed
+                             :topic topic
+                             :error (str e)})))))
+              {:ok true :sent-count @sent}))))
 
 ;; =============================================================================
 ;; Handshake Logic
@@ -170,56 +171,57 @@
   [S out topic handshake-ch opts pending-acks]
   (let [{:keys [batch-size batch-timeout-ms item-timeout-ms]} opts]
     (go-try S
-      (loop [batch-idx 0]
+            (loop [batch-idx 0
+                   total-sent 0]
         ;; Collect up to batch-size items
-        (let [items (loop [items []
-                          remaining batch-size]
-                     (if (zero? remaining)
-                       items
-                       (let [[item ch] (alts! [handshake-ch (timeout item-timeout-ms)])]
-                         (cond
+              (let [items (loop [items []
+                                 remaining batch-size]
+                            (if (zero? remaining)
+                              items
+                              (let [[item ch] (alts! [handshake-ch (timeout item-timeout-ms)])]
+                                (cond
                            ;; Got an item
-                           (and (= ch handshake-ch) (some? item))
-                           (recur (conj items item) (dec remaining))
+                                  (and (= ch handshake-ch) (some? item))
+                                  (recur (conj items item) (dec remaining))
 
                            ;; Channel closed
-                           (and (= ch handshake-ch) (nil? item))
-                           items
+                                  (and (= ch handshake-ch) (nil? item))
+                                  items
 
                            ;; Timeout - return what we have
-                           :else
-                           items))))]
-          (if (empty? items)
+                                  :else
+                                  items))))]
+                (if (empty? items)
             ;; Done - send complete
-            (do
-              (debug {:event :pubsub/handshake-complete :topic topic})
-              (>? S out (proto/handshake-complete-msg topic))
-              {:ok true})
+                  (do
+                    (debug {:event :pubsub/handshake-complete :topic topic :total-sent total-sent})
+                    (>? S out (proto/handshake-complete-msg topic))
+                    {:ok true})
 
             ;; Send batch
-            (do
-              (debug {:event :pubsub/sending-batch
-                      :topic topic
-                      :batch-idx batch-idx
-                      :item-count (count items)})
+                  (do
+                    (debug {:event :pubsub/sending-batch
+                            :topic topic
+                            :batch-idx batch-idx
+                            :item-count (count items)})
               ;; Send each item
-              (doseq [item items]
-                (>? S out (proto/handshake-data-msg topic item)))
+                    (doseq [item items]
+                      (>? S out (proto/handshake-data-msg topic item)))
 
-              ;; Send batch-complete
-              (>? S out (proto/handshake-batch-complete-msg topic batch-idx))
+              ;; Send batch-complete with item count
+                    (>? S out (proto/handshake-batch-complete-msg topic batch-idx (count items)))
 
               ;; Create promise for ack
-              (let [ack-ch (chan 1)]
-                (swap! pending-acks assoc-in [topic batch-idx] ack-ch)
+                    (let [ack-ch (chan 1)]
+                      (swap! pending-acks assoc-in [topic batch-idx] ack-ch)
 
                 ;; Wait for ack or timeout
-                (let [[result ch] (alts! [ack-ch (timeout batch-timeout-ms)])]
-                  (swap! pending-acks update topic dissoc batch-idx)
-                  (if (= ch ack-ch)
-                    (recur (inc batch-idx))
-                    {:error (ex-info "Handshake batch ack timeout"
-                                     {:topic topic :batch-idx batch-idx})}))))))))))
+                      (let [[result ch] (alts! [ack-ch (timeout batch-timeout-ms)])]
+                        (swap! pending-acks update topic dissoc batch-idx)
+                        (if (= ch ack-ch)
+                          (recur (inc batch-idx) (+ total-sent (count items)))
+                          {:error (ex-info "Handshake batch ack timeout"
+                                           {:topic topic :batch-idx batch-idx})}))))))))))
 
 (defn- handle-subscription!
   "Handle a subscription request from a client.
@@ -227,52 +229,52 @@
    Returns channel yielding {:ok topics} or {:error ...}"
   [S peer out msg pending-acks]
   (go-try S
-    (let [{:keys [id topics client-states]} msg
-          successful-topics (atom #{})]
-      (debug {:event :pubsub/handle-subscription
-              :topics topics
-              :msg-id id})
+          (let [{:keys [id topics client-states]} msg
+                successful-topics (atom #{})]
+            (debug {:event :pubsub/handle-subscription
+                    :topics topics
+                    :msg-id id})
 
       ;; Process each topic
-      (doseq [topic topics]
-        (if-let [topic-config (get-topic-config peer topic)]
-          (let [{:keys [strategy opts]} topic-config
-                client-state (get client-states topic)
-                handshake-ch (proto/-handshake-items strategy client-state)]
+            (doseq [topic topics]
+              (if-let [topic-config (get-topic-config peer topic)]
+                (let [{:keys [strategy opts]} topic-config
+                      client-state (get client-states topic)
+                      handshake-ch (proto/-handshake-items strategy client-state)]
 
             ;; Add as subscriber before handshake
-            (add-subscriber! peer topic out)
+                  (add-subscriber! peer topic out)
 
             ;; Send handshake
-            (let [result (<? S (send-handshake! S out topic handshake-ch opts pending-acks))]
-              (if (:ok result)
-                (do
-                  (info {:event :pubsub/subscription-complete :topic topic})
-                  (swap! successful-topics conj topic))
-                (do
-                  (warn {:event :pubsub/subscription-failed
-                         :topic topic
-                         :error (:error result)})
-                  (remove-subscriber! peer topic out)))))
+                  (let [result (<? S (send-handshake! S out topic handshake-ch opts pending-acks))]
+                    (if (:ok result)
+                      (do
+                        (info {:event :pubsub/subscription-complete :topic topic})
+                        (swap! successful-topics conj topic))
+                      (do
+                        (warn {:event :pubsub/subscription-failed
+                               :topic topic
+                               :error (:error result)})
+                        (remove-subscriber! peer topic out)))))
 
           ;; Topic not registered
-          (do
-            (warn {:event :pubsub/topic-not-found :topic topic})
-            (>? S out (proto/error-msg topic "Topic not registered")))))
+                (do
+                  (warn {:event :pubsub/topic-not-found :topic topic})
+                  (>? S out (proto/error-msg topic "Topic not registered")))))
 
       ;; Send subscribe-ack with successful topics
-      (>? S out (proto/subscribe-ack-msg id @successful-topics))
-      {:ok @successful-topics})))
+            (>? S out (proto/subscribe-ack-msg id @successful-topics))
+            {:ok @successful-topics})))
 
 (defn- handle-unsubscription!
   "Handle an unsubscribe request."
   [S peer out msg]
   (go-try S
-    (let [{:keys [topics]} msg]
-      (debug {:event :pubsub/handle-unsubscription :topics topics})
-      (doseq [topic topics]
-        (remove-subscriber! peer topic out))
-      {:ok true})))
+          (let [{:keys [topics]} msg]
+            (debug {:event :pubsub/handle-unsubscription :topics topics})
+            (doseq [topic topics]
+              (remove-subscriber! peer topic out))
+            {:ok true})))
 
 ;; =============================================================================
 ;; Client-Side API
@@ -310,22 +312,22 @@
               :cljs (random-uuid))]
     (go-try S
       ;; Initialize subscription state
-      (doseq [topic topics]
-        (init-subscription-state! peer topic (get strategies topic)))
+            (doseq [topic topics]
+              (init-subscription-state! peer topic (get strategies topic)))
 
       ;; Build client-states (await async init)
-      (let [client-states (loop [topics-seq (seq topics)
-                                 states {}]
-                            (if-let [topic (first topics-seq)]
-                              (let [state (<? S (proto/-init-client-state (get strategies topic)))]
-                                (recur (rest topics-seq) (assoc states topic state)))
-                              states))]
+            (let [client-states (loop [topics-seq (seq topics)
+                                       states {}]
+                                  (if-let [topic (first topics-seq)]
+                                    (let [state (<? S (proto/-init-client-state (get strategies topic)))]
+                                      (recur (rest topics-seq) (assoc states topic state)))
+                                    states))]
         ;; Send subscribe request
-        (debug {:event :pubsub/sending-subscribe :topics topics :id id})
-        (>? S out (proto/subscribe-msg id topics client-states))
+              (debug {:event :pubsub/sending-subscribe :topics topics :id id})
+              (>? S out (proto/subscribe-msg id topics client-states))
 
         ;; Return - actual handling happens in middleware
-        {:ok topics :id id}))))
+              {:ok topics :id id}))))
 
 (defn unsubscribe!
   "Unsubscribe from topics.
@@ -335,10 +337,10 @@
   (let [{{S :supervisor} :volatile} @peer
         out (get-in (get-pubsub-state peer) [:out])]
     (go-try S
-      (doseq [topic topics]
-        (update-pubsub-state! peer update :subscriptions dissoc topic))
-      (>? S out (proto/unsubscribe-msg topics))
-      {:ok true})))
+            (doseq [topic topics]
+              (update-pubsub-state! peer update :subscriptions dissoc topic))
+            (>? S out (proto/unsubscribe-msg topics))
+            {:ok true})))
 
 ;; =============================================================================
 ;; Middleware
@@ -405,126 +407,133 @@
 
       ;; Handle subscribe requests (server-side)
       (go-loop-super S [msg (<? S subscribe-ch)]
-        (when msg
-          (handle-subscription! S peer out msg pending-acks)
-          (recur (<? S subscribe-ch))))
+                     (when msg
+                       (handle-subscription! S peer out msg pending-acks)
+                       (recur (<? S subscribe-ch))))
 
       ;; Handle subscribe-ack (client-side)
       (go-loop-super S [msg (<? S subscribe-ack-ch)]
-        (when msg
-          (debug {:event :pubsub/subscribe-ack-received
-                  :topics (:topics msg)
-                  :id (:id msg)})
-          (recur (<? S subscribe-ack-ch))))
+                     (when msg
+                       (debug {:event :pubsub/subscribe-ack-received
+                               :topics (:topics msg)
+                               :id (:id msg)})
+                       (recur (<? S subscribe-ack-ch))))
 
       ;; Handle unsubscribe (server-side)
       (go-loop-super S [msg (<? S unsubscribe-ch)]
-        (when msg
-          (handle-unsubscription! S peer out msg)
-          (recur (<? S unsubscribe-ch))))
+                     (when msg
+                       (handle-unsubscription! S peer out msg)
+                       (recur (<? S unsubscribe-ch))))
 
       ;; Handle handshake data and batch-complete (client-side)
-      ;; Using single go-loop with alts! to preserve message ordering
-      ;; (both message types must be processed in order they arrive)
-      (go-loop-super S []
-        (let [[msg ch] (alts! [handshake-data-ch batch-complete-ch])]
-          (when msg
-            (cond
-              (= ch handshake-data-ch)
-              (let [{:keys [topic data]} msg]
-                (debug {:event :pubsub/handshake-data-received :topic topic})
-                ;; Accumulate items for this batch
-                (swap! handshake-items update topic (fnil conj []) data))
+      ;; Process batch-complete messages, waiting for all data items to arrive
+      (let [pending-batches (atom {})] ;; {topic -> {:batch-idx N :expected-count M}}
+        ;; Process data items - accumulate for current batch
+        (go-loop-super S [msg (<? S handshake-data-ch)]
+                       (when msg
+                         (let [{:keys [topic data]} msg]
+                           (debug {:event :pubsub/handshake-data-received :topic topic})
+                           (swap! handshake-items update topic (fnil conj []) data))
+                         (recur (<? S handshake-data-ch))))
 
-              (= ch batch-complete-ch)
-              (let [{:keys [topic batch-idx]} msg
-                    items (get @handshake-items topic [])
-                    sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
-                    strategy (:strategy sub-state)]
-                (debug {:event :pubsub/batch-complete-received
-                        :topic topic
-                        :batch-idx batch-idx
-                        :item-count (count items)})
+        ;; Process batch-complete - wait for all items, then apply
+        (go-loop-super S [msg (<? S batch-complete-ch)]
+                       (when msg
+                         (let [{:keys [topic batch-idx item-count]} msg]
+              ;; Wait until we have all items for this batch
+                           (loop [wait-count 0]
+                             (let [current-items (get @handshake-items topic [])]
+                               (when (and (< (count current-items) item-count)
+                                          (< wait-count 100)) ;; max 100 * 10ms = 1s wait
+                                 (<? S (timeout 10))
+                                 (recur (inc wait-count)))))
+                           (let [items (get @handshake-items topic [])
+                                 sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
+                                 strategy (:strategy sub-state)]
+                             (debug {:event :pubsub/batch-complete-received
+                                     :topic topic
+                                     :batch-idx batch-idx
+                                     :item-count (count items)})
                 ;; Apply all items
-                (when strategy
-                  (doseq [item items]
-                    (<? S (proto/-apply-handshake-item strategy item))))
+                             (when strategy
+                               (doseq [item items]
+                                 (<? S (proto/-apply-handshake-item strategy item))))
                 ;; Clear accumulated items
-                (swap! handshake-items assoc topic [])
+                             (swap! handshake-items assoc topic [])
                 ;; Send ack
-                (>? S out (proto/handshake-ack-msg topic batch-idx))))
-            (recur))))
+                             (>? S out (proto/handshake-ack-msg topic batch-idx))))
+                         (recur (<? S batch-complete-ch)))))
 
       ;; Handle handshake-ack (server-side)
       (go-loop-super S [msg (<? S handshake-ack-ch)]
-        (when msg
-          (let [{:keys [topic batch-idx]} msg]
-            (debug {:event :pubsub/handshake-ack-received
-                    :topic topic
-                    :batch-idx batch-idx})
+                     (when msg
+                       (let [{:keys [topic batch-idx]} msg]
+                         (debug {:event :pubsub/handshake-ack-received
+                                 :topic topic
+                                 :batch-idx batch-idx})
             ;; Signal waiting send-handshake!
-            (when-let [ack-ch (get-in @pending-acks [topic batch-idx])]
-              (put! ack-ch :ack)
-              (close! ack-ch)))
-          (recur (<? S handshake-ack-ch))))
+                         (when-let [ack-ch (get-in @pending-acks [topic batch-idx])]
+                           (put! ack-ch :ack)
+                           (close! ack-ch)))
+                       (recur (<? S handshake-ack-ch))))
 
       ;; Handle handshake-complete (client-side)
       (go-loop-super S [msg (<? S handshake-complete-ch)]
-        (when msg
-          (let [{:keys [topic]} msg
-                on-complete (get opts :on-handshake-complete)]
-            (info {:event :pubsub/handshake-complete-received :topic topic})
-            (mark-handshake-complete! peer topic)
-            (when on-complete
-              (on-complete topic)))
-          (recur (<? S handshake-complete-ch))))
+                     (when msg
+                       (let [{:keys [topic]} msg
+                             on-complete (get opts :on-handshake-complete)]
+                         (info {:event :pubsub/handshake-complete-received :topic topic})
+                         (mark-handshake-complete! peer topic)
+                         (when on-complete
+                           (on-complete topic)))
+                       (recur (<? S handshake-complete-ch))))
 
       ;; Handle publish (both sides)
       (go-loop-super S [msg (<? S publish-ch)]
-        (when msg
-          (let [{:keys [topic payload]} msg
+                     (when msg
+                       (let [{:keys [topic payload]} msg
                 ;; Check server-side (topic registered)
-                topic-config (get-topic-config peer topic)
+                             topic-config (get-topic-config peer topic)
                 ;; Check client-side (subscribed)
-                sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
-                strategy (or (:strategy topic-config) (:strategy sub-state))
-                on-publish (get opts :on-publish)
+                             sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
+                             strategy (or (:strategy topic-config) (:strategy sub-state))
+                             on-publish (get opts :on-publish)
                 ;; Get subscribers for forwarding (server-side only)
-                subscribers (get-subscribers peer topic)]
-            (debug {:event :pubsub/publish-received :topic topic :subscriber-count (count subscribers)})
+                             subscribers (get-subscribers peer topic)]
+                         (debug {:event :pubsub/publish-received :topic topic :subscriber-count (count subscribers)})
             ;; Apply locally
-            (when strategy
-              (<? S (proto/-apply-publish strategy payload)))
-            (when on-publish
-              (on-publish topic payload))
+                         (when strategy
+                           (<? S (proto/-apply-publish strategy payload)))
+                         (when on-publish
+                           (on-publish topic payload))
             ;; Server-side: forward to other subscribers (except the sender)
             ;; Note: We forward to all subscribers since the sender is the out channel
             ;; which is not in the subscribers set (subscribers are the transport channels
             ;; from connected clients, not the peer's own out channel)
-            (when (and topic-config (seq subscribers))
-              (debug {:event :pubsub/forwarding-publish :topic topic :count (count subscribers)})
-              (let [fwd-msg (proto/publish-msg topic payload)]
-                (doseq [transport subscribers]
+                         (when (and topic-config (seq subscribers))
+                           (debug {:event :pubsub/forwarding-publish :topic topic :count (count subscribers)})
+                           (let [fwd-msg (proto/publish-msg topic payload)]
+                             (doseq [transport subscribers]
                   ;; Don't forward back to sender (sender is 'out' which is the channel
                   ;; that received this message, so we compare with subscriber transports)
-                  (when (not= transport out)
-                    (try
-                      (>? S transport fwd-msg)
-                      (catch #?(:clj Exception :cljs js/Error) e
-                        (warn {:event :pubsub/forward-failed :topic topic :error (str e)}))))))))
-          (recur (<? S publish-ch))))
+                               (when (not= transport out)
+                                 (try
+                                   (>? S transport fwd-msg)
+                                   (catch #?(:clj Exception :cljs js/Error) e
+                                     (warn {:event :pubsub/forward-failed :topic topic :error (str e)}))))))))
+                       (recur (<? S publish-ch))))
 
       ;; Pass through unrelated messages
       (go-loop-super S [msg (<? S unrelated-ch)]
-        (when msg
-          (>? S pass-in msg)
-          (recur (<? S unrelated-ch))))
+                     (when msg
+                       (>? S pass-in msg)
+                       (recur (<? S unrelated-ch))))
 
       ;; Pass through outgoing messages
       (go-loop-super S [msg (<? S pass-out)]
-        (when msg
-          (>? S out msg)
-          (recur (<? S pass-out))))
+                     (when msg
+                       (>? S out msg)
+                       (recur (<? S pass-out))))
 
       [S peer [pass-in pass-out]])))
 

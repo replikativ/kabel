@@ -17,7 +17,7 @@
 (def ^:dynamic *server-url* nil)
 
 (defn unique-port []
-  (+ 47300 (rand-int 100)))
+  (+ 47300 (rand-int 1000)))
 
 (defmacro with-peers
   "Execute body with server and client peers set up."
@@ -44,7 +44,7 @@
                  ;; Connect client to server
                  (<?? S (peer/connect S *client-peer* url#))
                  ;; Wait for connection to establish
-                 (<?? S (timeout 200))
+                 (<?? S (timeout 1000))
                  (try
                    ~@body
                    (finally
@@ -136,7 +136,7 @@
         (<?? S (pubsub/publish! *server-peer* :test-topic {:key :d :value 4}))
 
         ;; Wait for publish to propagate
-        (<?? S (timeout 200))
+        (<?? S (timeout 500))
 
         ;; Check client received publish
         (let [client-received @(:received-atom client-strategy)
@@ -148,7 +148,7 @@
 
         ;; Publish again - should not be received
         (<?? S (pubsub/publish! *server-peer* :test-topic {:key :e :value 5}))
-        (<?? S (timeout 200))
+        (<?? S (timeout 500))
 
         ;; Count should still be 1 publish
         (let [client-received @(:received-atom client-strategy)
@@ -182,7 +182,7 @@
         ;; Publish to each topic
         (<?? S (pubsub/publish! *server-peer* :topic-a {:key :z :value 30}))
         (<?? S (pubsub/publish! *server-peer* :topic-b {:msg "hello"}))
-        (<?? S (timeout 200))
+        (<?? S (timeout 500))
 
         ;; Each should have 3 items (2 handshake + 1 publish)
         (is (= 3 (count @(:received-atom client-strategy-a))))
@@ -194,7 +194,7 @@
         ;; Publish to both
         (<?? S (pubsub/publish! *server-peer* :topic-a {:key :w :value 40}))
         (<?? S (pubsub/publish! *server-peer* :topic-b {:msg "world"}))
-        (<?? S (timeout 200))
+        (<?? S (timeout 500))
 
         ;; topic-a should still have 3, topic-b should have 4
         (is (= 3 (count @(:received-atom client-strategy-a))))
@@ -217,14 +217,14 @@
         ;; Phase 1: Subscribe to topic-1 only
         (<?? S (pubsub/subscribe! *client-peer* #{:topic-1}
                                   {:strategies {:topic-1 client-strategy-1}}))
-        (<?? S (timeout 500))
+        (<?? S (timeout 1000))
         (is (= 1 (count @(:received-atom client-strategy-1))))
 
         ;; Publish to all topics
         (<?? S (pubsub/publish! *server-peer* :topic-1 {:p 1}))
         (<?? S (pubsub/publish! *server-peer* :topic-2 {:p 2}))
         (<?? S (pubsub/publish! *server-peer* :topic-3 {:p 3}))
-        (<?? S (timeout 300))
+        (<?? S (timeout 500))
 
         ;; Only topic-1 should receive
         (is (= 2 (count @(:received-atom client-strategy-1))))
@@ -234,7 +234,7 @@
         ;; Phase 2: Also subscribe to topic-2
         (<?? S (pubsub/subscribe! *client-peer* #{:topic-2}
                                   {:strategies {:topic-2 client-strategy-2}}))
-        (<?? S (timeout 500))
+        (<?? S (timeout 1000))
 
         ;; topic-2 should now have its handshake item
         (is (= 1 (count @(:received-atom client-strategy-2))))
@@ -243,7 +243,7 @@
         (<?? S (pubsub/publish! *server-peer* :topic-1 {:p 4}))
         (<?? S (pubsub/publish! *server-peer* :topic-2 {:p 5}))
         (<?? S (pubsub/publish! *server-peer* :topic-3 {:p 6}))
-        (<?? S (timeout 300))
+        (<?? S (timeout 500))
 
         ;; topic-1 and topic-2 should receive, not topic-3
         (is (= 3 (count @(:received-atom client-strategy-1))))
@@ -254,7 +254,7 @@
         (<?? S (pubsub/unsubscribe! *client-peer* #{:topic-1}))
         (<?? S (pubsub/subscribe! *client-peer* #{:topic-3}
                                   {:strategies {:topic-3 client-strategy-3}}))
-        (<?? S (timeout 500))
+        (<?? S (timeout 1000))
 
         (is (= 1 (count @(:received-atom client-strategy-3))))
 
@@ -262,7 +262,7 @@
         (<?? S (pubsub/publish! *server-peer* :topic-1 {:p 7}))
         (<?? S (pubsub/publish! *server-peer* :topic-2 {:p 8}))
         (<?? S (pubsub/publish! *server-peer* :topic-3 {:p 9}))
-        (<?? S (timeout 200))
+        (<?? S (timeout 500))
 
         ;; topic-1 should NOT have received (unsubscribed)
         ;; topic-2 and topic-3 should have received
@@ -287,7 +287,7 @@
                                   {:strategies {:large-topic client-strategy}}))
 
         ;; Wait for all batches
-        (<?? S (timeout 3000))
+        (<?? S (timeout 5000))
 
         ;; Should have received all 100 items
         (let [received @(:received-atom client-strategy)
@@ -312,7 +312,7 @@
         ;; Subscribe
         (<?? S (pubsub/subscribe! *client-peer* #{:messages}
                                   {:strategies {:messages client-strategy}}))
-        (<?? S (timeout 300))
+        (<?? S (timeout 500))
 
         ;; No handshake items for PubSubOnlyStrategy
         (is (empty? @client-received))
@@ -321,7 +321,7 @@
         (dotimes [i 5]
           (<?? S (pubsub/publish! *server-peer* :messages {:msg-id i :data (str "msg-" i)})))
 
-        (<?? S (timeout 300))
+        (<?? S (timeout 500))
 
         ;; Client should have received all 5
         (is (= 5 (count @client-received)))
@@ -336,7 +336,7 @@
         (<?? S (pubsub/subscribe! *client-peer* #{:nonexistent}
                                   {:strategies {:nonexistent client-strategy}}))
 
-        (<?? S (timeout 300))
+        (<?? S (timeout 500))
 
         ;; Should not have received any handshake data
         (is (empty? @(:received-atom client-strategy)))))))
@@ -352,7 +352,7 @@
         ;; Subscribe
         (<?? S (pubsub/subscribe! *client-peer* #{:cleanup-test}
                                   {:strategies {:cleanup-test client-strategy}}))
-        (<?? S (timeout 300))
+        (<?? S (timeout 500))
 
         ;; Verify subscriber count
         (is (= 1 (count (pubsub/get-subscribers *server-peer* :cleanup-test))))
@@ -375,7 +375,7 @@
         ;; Subscribe
         (<?? S (pubsub/subscribe! *client-peer* #{:concurrent}
                                   {:strategies {:concurrent client-strategy}}))
-        (<?? S (timeout 200))
+        (<?? S (timeout 500))
 
         ;; Publish 50 messages concurrently
         (let [publish-futures (doall

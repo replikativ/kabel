@@ -8,7 +8,6 @@
             [org.httpkit.server :refer :all]
             [cognitect.transit :as transit]))
 
-
 (defn create-http-kit-handler!
   "Creates a server handler described by url, e.g. wss://myhost:8443/replikativ/ws.
   Returns a map to run a peer with a platform specific server handler
@@ -57,7 +56,7 @@
                                                            (str "incoming buffer for " (:remote-addr request)
                                                                 " too full:" (count in-buffer))
                                                            {:url url
-                                                            :count (count in-buffer)}))) 
+                                                            :count (count in-buffer)})))
                                                  #_(prn "hk rec" (mapv char data))
                                                  (if (string? data)
                                                    (async/put! in {:kabel/serialization :string

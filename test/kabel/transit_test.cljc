@@ -43,49 +43,48 @@
                         (is (= (<? S tin) [1 :transit "string"]))
                         (done)))))))
 
-
 (deftest transit-map-test
   (testing "Map pass through with merging."
-      (let [in (chan)
-            out (chan)
-            [_ _ [tin tout]] (transit [S nil [in out]])]
-        (put? S tout {:type :some/publication :value 42})
-        #?(:clj
-           (is (= (update (<?? S out) :kabel/payload vec)
-                  {:kabel/serialization :transit-json
-                   :kabel/payload
-                   [91 34 94 32 34 44 34 126 58 116 121 112 101 34 44 34 126 58 115 111 109
-                    101 47 112 117 98 108 105 99 97 116 105 111 110 34 44 34 126 58 118 97
-                    108 117 101 34 44 52 50 93]})))
-        (put? S in {:kabel/serialization :transit-json
-                    :kabel/host "1.2.3.4"
-                    :kabel/payload
-                    (byte-array [91 34 94 32 34 44 34 126 58 116 121 112 101 34 44 34 126 58 115 111 109
-                                 101 47 112 117 98 108 105 99 97 116 105 111 110 34 44 34 126 58 118 97
-                                 108 117 101 34 44 52 50 93])})
-        #?(:clj (is (= (<?? S tin) {:type :some/publication,
-                                    :kabel/host "1.2.3.4"
-                                    :value 42}))
-           :cljs (async done
-                        (go-try S
-                                (is (= (update (<? S out) :kabel/payload uint->vec)
-                                       {:kabel/serialization :transit-json
-                                        :kabel/payload
-                                        [91 34 94 32 34 44 34 126 58 116 121 112 101 34 44 34 126 58 115 111 109
-                                         101 47 112 117 98 108 105 99 97 116 105 111 110 34 44 34 126 58 118 97
-                                         108 117 101 34 44 52 50 93]}))
-                                (is (= (<? S tin) {:type :some/publication,
-                                                    :kabel/host "1.2.3.4"
-                                                    :value 42}))
-                                (done)))))))
+    (let [in (chan)
+          out (chan)
+          [_ _ [tin tout]] (transit [S nil [in out]])]
+      (put? S tout {:type :some/publication :value 42})
+      #?(:clj
+         (is (= (update (<?? S out) :kabel/payload vec)
+                {:kabel/serialization :transit-json
+                 :kabel/payload
+                 [91 34 94 32 34 44 34 126 58 116 121 112 101 34 44 34 126 58 115 111 109
+                  101 47 112 117 98 108 105 99 97 116 105 111 110 34 44 34 126 58 118 97
+                  108 117 101 34 44 52 50 93]})))
+      (put? S in {:kabel/serialization :transit-json
+                  :kabel/host "1.2.3.4"
+                  :kabel/payload
+                  (byte-array [91 34 94 32 34 44 34 126 58 116 121 112 101 34 44 34 126 58 115 111 109
+                               101 47 112 117 98 108 105 99 97 116 105 111 110 34 44 34 126 58 118 97
+                               108 117 101 34 44 52 50 93])})
+      #?(:clj (is (= (<?? S tin) {:type :some/publication,
+                                  :kabel/host "1.2.3.4"
+                                  :value 42}))
+         :cljs (async done
+                      (go-try S
+                              (is (= (update (<? S out) :kabel/payload uint->vec)
+                                     {:kabel/serialization :transit-json
+                                      :kabel/payload
+                                      [91 34 94 32 34 44 34 126 58 116 121 112 101 34 44 34 126 58 115 111 109
+                                       101 47 112 117 98 108 105 99 97 116 105 111 110 34 44 34 126 58 118 97
+                                       108 117 101 34 44 52 50 93]}))
+                              (is (= (<? S tin) {:type :some/publication,
+                                                 :kabel/host "1.2.3.4"
+                                                 :value 42}))
+                              (done)))))))
 
 (defn pong-middleware [[S peer [in out]]]
   (let [new-in (chan)
         new-out (chan)]
     (go-loop-try S [i (<? S in)]
-      (when i
-        (>? S out i)
-        (recur (<? S in))))
+                 (when i
+                   (>? S out i)
+                   (recur (<? S in))))
     [S peer [new-in new-out]]))
 
 #?(:clj
@@ -109,9 +108,7 @@
          (<?? S (peer/start speer))
          (<?? S (peer/connect S cpeer url))
          (<?? S (timeout 1000))
-         (<?? S (peer/stop speer)))))
-   )
-
+         (<?? S (peer/stop speer))))))
 
 (defn ^:export run []
   (run-tests))

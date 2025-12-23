@@ -2,7 +2,6 @@
   "Logging for Clojure."
   (:require [taoensso.telemere :as tel :include-macros true]))
 
-
 ;; support logging also in clj macroexpansion for cljs
 (defn- cljs-env?
   "Take the &env from a macro, and tell whether we are expanding into cljs."
@@ -15,11 +14,10 @@
   [then else]
   (if (cljs-env? &env) then else))
 
-
 #_(defmacro trace [& args]
-  `(if-cljs
-   (.trace js/console ~(str *ns*) (pr-str ~@args))
-   (.trace (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
+    `(if-cljs
+      (.trace js/console ~(str *ns*) (pr-str ~@args))
+      (.trace (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
 
 (defmacro trace [& args]
   `(tel/log! {:level :trace
@@ -27,13 +25,13 @@
               :msg   (pr-str ~@args)}))
 
 #_(defmacro debug [& args]
-  `(if-cljs
-   (when (.-debug js/console)
-      (.debug js/console ~(str *ns*) (pr-str ~@args))
-      (.log js/console ~(str *ns*) (pr-str ~@args)))
+    `(if-cljs
+      (when (.-debug js/console)
+        (.debug js/console ~(str *ns*) (pr-str ~@args))
+        (.log js/console ~(str *ns*) (pr-str ~@args)))
    ;; do not pr-str values eagerly (at least on the JVM)
-   (when (.isDebugEnabled (LoggerFactory/getLogger ~(str *ns*)))
-      (.debug (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
+      (when (.isDebugEnabled (LoggerFactory/getLogger ~(str *ns*)))
+        (.debug (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
 
 (defmacro debug [& args]
   `(tel/log! {:level :debug
@@ -41,10 +39,10 @@
               :msg   (pr-str ~@args)}))
 
 #_(defmacro info [& args]
-  `(if-cljs
-   (.info js/console ~(str *ns*) (pr-str ~@args))
-   (when (.isInfoEnabled (LoggerFactory/getLogger ~(str *ns*)))
-      (.info (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
+    `(if-cljs
+      (.info js/console ~(str *ns*) (pr-str ~@args))
+      (when (.isInfoEnabled (LoggerFactory/getLogger ~(str *ns*)))
+        (.info (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args)))))
 
 (defmacro info [& args]
   `(tel/log! {:level :info
@@ -52,9 +50,9 @@
               :msg   (pr-str ~@args)}))
 
 #_(defmacro warn [& args]
-  `(if-cljs
-   (.warn js/console  ~(str *ns*) (pr-str ~@args))
-   (.warn (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
+    `(if-cljs
+      (.warn js/console  ~(str *ns*) (pr-str ~@args))
+      (.warn (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
 
 (defmacro warn [& args]
   `(tel/log! {:level :warn
@@ -62,9 +60,9 @@
               :msg   (pr-str ~@args)}))
 
 #_(defmacro error [& args]
-  `(if-cljs
-   (.error js/console  ~(str *ns*) (pr-str ~@args))
-   (.error (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
+    `(if-cljs
+      (.error js/console  ~(str *ns*) (pr-str ~@args))
+      (.error (LoggerFactory/getLogger ~(str *ns*)) (pr-str ~@args))))
 
 (defmacro error [& args]
   `(tel/log! {:level :error

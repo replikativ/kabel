@@ -4,11 +4,10 @@
             #?(:clj [superv.async :refer [<? >? go-loop-try]]
                :cljs [superv.async :refer [superv-init]])
             #?(:clj [clojure.core.async :as async
-                      :refer [chan close!]]
+                     :refer [chan close!]]
                :cljs [clojure.core.async :as async :refer [chan close!]]))
   #?(:cljs (:require-macros [clojure.core.async :refer [go go-loop]]
                             [superv.async :refer [<? >? go-loop-try]])))
-
 
 (defn handler
   "Applies given callback functions to messages on [in out] channels and passes
@@ -18,17 +17,17 @@
   (let [new-in (chan)
         new-out (chan)]
     (go-loop-try S [i (<? S in)]
-      (if i
-        (do
-          (when-let [i (<? S (cb-in i))]
-            (>? S new-in i))
-          (recur (<? S in)))
-        (close! new-in)))
+                 (if i
+                   (do
+                     (when-let [i (<? S (cb-in i))]
+                       (>? S new-in i))
+                     (recur (<? S in)))
+                   (close! new-in)))
     (go-loop-try S [o (<? S new-out)]
-      (if o
-        (do
-          (when-let [o (<? S (cb-out o))]
-            (>? S out o))
-          (recur (<? S new-out)))
-        (close! out)))
+                 (if o
+                   (do
+                     (when-let [o (<? S (cb-out o))]
+                       (>? S out o))
+                     (recur (<? S new-out)))
+                   (close! out)))
     [S peer [new-in new-out]]))

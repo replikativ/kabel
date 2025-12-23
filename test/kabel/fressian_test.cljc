@@ -47,7 +47,6 @@
                         (is (= (<? S tin) [1 :fressian "string"]))
                         (done)))))))
 
-
 (deftest fressian-map-test
   (testing "Map pass through with merging."
     (let [in (chan)
@@ -75,10 +74,9 @@
                                 (is (= (:kabel/serialization result) :fressian))
                                 (is (some? (:kabel/payload result))))
                               (is (= (<? S tin) {:type :some/publication,
-                                                  :kabel/host "1.2.3.4"
-                                                  :value 42}))
+                                                 :kabel/host "1.2.3.4"
+                                                 :value 42}))
                               (done)))))))
-
 
 ;; Custom record type for testing handlers
 (defrecord CustomTestRecord [custom-type data])
@@ -150,16 +148,14 @@
                           (is (= true (:was-custom deserialized)) "Read handler should add was-custom"))
                         (done)))))))
 
-
 (defn pong-middleware [[S peer [in out]]]
   (let [new-in (chan)
         new-out (chan)]
     (go-loop-try S [i (<? S in)]
-      (when i
-        (>? S out i)
-        (recur (<? S in))))
+                 (when i
+                   (>? S out i)
+                   (recur (<? S in))))
     [S peer [new-in new-out]]))
-
 
 #?(:clj
    (deftest fressian-roundtrip-test
@@ -185,7 +181,6 @@
          (<?? S (peer/connect S cpeer url))
          (<?? S (timeout 1000))
          (<?? S (peer/stop speer))))))
-
 
 (defn ^:export run []
   (run-tests))

@@ -7,11 +7,9 @@
                      :refer [<! >! >!! <!! timeout chan alt! go put!
                              go-loop pub sub unsub close!]]
                :cljs [cljs.core.async :as async
-                     :refer [<! >! timeout chan put! pub sub unsub close!]]))
+                      :refer [<! >! timeout chan put! pub sub unsub close!]]))
   #?(:cljs (:require-macros [cljs.core.async.macros :refer (go go-loop alt!)]
                             [kabel.platform-log :refer [debug info warn error]])))
-
-
 
 (defn block-detector [type [S peer [in out]]]
   "Warns when either in or out is blocked for longer than 5 seconds and retries."

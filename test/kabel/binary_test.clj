@@ -9,7 +9,6 @@
           vec)
          [0 0 0 11 1 2 3])))
 
-
 (deftest from-binary-test
   (let [bin (to-binary {:kabel/serialization :transit-json
                         :kabel/payload (byte-array [1 2 3])})

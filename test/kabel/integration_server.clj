@@ -15,9 +15,9 @@
   (let [new-in (chan)
         new-out (chan)]
     (go-loop-try S [i (<? S in)]
-      (when i
-        (>? S out i)
-        (recur (<? S in))))
+                 (when i
+                   (>? S out i)
+                   (recur (<? S in))))
     [S peer [new-in new-out]]))
 
 (defn -main [& args]

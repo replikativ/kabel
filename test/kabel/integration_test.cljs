@@ -13,43 +13,43 @@
 (deftest ^:integration fressian-cross-platform-roundtrip
   (testing "Node.js client connecting to JVM server with fressian middleware"
     (async done
-      (go-try S
-        (let [messages (atom [])
-              client (peer/client-peer
-                      S
-                      client-id
-                      (fn [[S peer [in out]]]
-                        (let [new-in (chan)
-                              new-out (chan)]
-                          (go-try S
+           (go-try S
+                   (let [messages (atom [])
+                         client (peer/client-peer
+                                 S
+                                 client-id
+                                 (fn [[S peer [in out]]]
+                                   (let [new-in (chan)
+                                         new-out (chan)]
+                                     (go-try S
                             ;; Send test messages
-                            (>? S out {:type :ping :value "hello"})
-                            (let [response1 (<? S in)]
-                              (swap! messages conj response1)
-                              (is (= (:type response1) :ping))
-                              (is (= (:value response1) "hello")))
+                                             (>? S out {:type :ping :value "hello"})
+                                             (let [response1 (<? S in)]
+                                               (swap! messages conj response1)
+                                               (is (= (:type response1) :ping))
+                                               (is (= (:value response1) "hello")))
 
-                            (>? S out {:type :ping2 :data [1 2 3]})
-                            (let [response2 (<? S in)]
-                              (swap! messages conj response2)
-                              (is (= (:type response2) :ping2))
-                              (is (= (:data response2) [1 2 3])))
+                                             (>? S out {:type :ping2 :data [1 2 3]})
+                                             (let [response2 (<? S in)]
+                                               (swap! messages conj response2)
+                                               (is (= (:type response2) :ping2))
+                                               (is (= (:data response2) [1 2 3])))
 
                             ;; Wait a bit before cleanup
-                            (<? S (timeout 100)))
-                          [S peer [new-in new-out]]))
-                      fressian)]
+                                             (<? S (timeout 100)))
+                                     [S peer [new-in new-out]]))
+                                 fressian)]
 
           ;; Connect to server
-          (<? S (peer/connect S client url))
+                     (<? S (peer/connect S client url))
 
           ;; Wait for test to complete
-          (<? S (timeout 500))
+                     (<? S (timeout 500))
 
           ;; Verify we got responses
-          (is (= 2 (count @messages)))
+                     (is (= 2 (count @messages)))
 
-          (done))))))
+                     (done))))))
 
 (defn ^:export run []
   (cljs.test/run-tests))

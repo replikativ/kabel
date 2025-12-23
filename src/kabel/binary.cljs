@@ -5,7 +5,6 @@
             [kabel.util :refer [on-node?]]
             [goog.crypt :as crypt]))
 
-
 ;; TODO this namespace needs a refactoring once the target platforms for js are
 ;; pinned down
 
@@ -18,7 +17,6 @@
 
 (def decoding-table (into {} (map (fn [[k v]] [v k])) encoding-table))
 
-
 (defn to-binary [{:keys [kabel/serialization kabel/payload] :as m}]
   (let [payload (if-not serialization
                   (utf8 (pr-str m)) ;; fallback if no serialization middleware is present
@@ -26,7 +24,7 @@
         serialization (if-not serialization :pr-str serialization)
         header (array 0 0 0 (encoding-table serialization))
         ;; manual concat
-        wrapped (js/Uint8Array. (+ 4 (.-length payload))) 
+        wrapped (js/Uint8Array. (+ 4 (.-length payload)))
         _ (.set wrapped (js/Uint8Array. header) 0)
         _ (.set wrapped (js/Uint8Array. payload) 4)]
     (if-not (on-node?)
@@ -35,7 +33,6 @@
         ;; react native
         wrapped)
       (.from js/Buffer wrapped))))
-
 
 (defn from-binary [binary cb]
   (let [l (if (on-node?)
@@ -96,8 +93,7 @@
                 :kabel/payload payload})
              (catch js/Error e
                (ex-info "Cannot parse binary."
-                        {:error e})))))
-        ))))
+                        {:error e})))))))))
 
 
 

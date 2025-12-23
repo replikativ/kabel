@@ -8,11 +8,10 @@
             #?(:clj [clojure.data.fressian :as fress]
                :cljs [fress.api :as fress])
             [incognito.fressian :refer [incognito-read-handlers
-                                       incognito-write-handlers]])
+                                        incognito-write-handlers]])
   #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream])
      :cljs (:require-macros [superv.async :refer [go-try]]
                             [clojure.core.async :refer [go]])))
-
 
 (defn merge-read-handlers
   "Merges custom and incognito read handlers following Konserve's strategy.
@@ -25,7 +24,6 @@
                        incognito-h)
                 fress/associative-lookup)
        :cljs (merge custom-handlers incognito-h))))
-
 
 (defn merge-write-handlers
   "Merges custom and incognito write handlers following Konserve's strategy.
@@ -40,12 +38,10 @@
                 fress/inheritance-lookup)
        :cljs (merge custom-handlers incognito-h))))
 
-
 (defn fressian-read
   "Reads a value from Fressian-encoded bytes using the provided handlers."
   [bytes handlers]
   (fress/read bytes :handlers handlers))
-
 
 (defn fressian-write
   "Writes a value to Fressian-encoded bytes using the provided handlers."
@@ -55,7 +51,6 @@
             (fress/write-object writer val)
             (.toByteArray baos))
      :cljs (fress/write val :handlers handlers)))
-
 
 (defn fressian
   "Serializes all incoming and outgoing edn datastructures in Fressian format.
@@ -91,32 +86,32 @@
     [S peer [in out]]]
    (handler
      ;; Deserialize incoming messages
-     #(go-try S
-        (let [{:keys [kabel/serialization kabel/payload]} %]
-          (if (= serialization :fressian)
-            (let [handlers (merge-read-handlers
-                             @custom-read-handlers
-                             incognito-read-handlers-atom)
-                  v (fressian-read payload handlers)
+    #(go-try S
+             (let [{:keys [kabel/serialization kabel/payload]} %]
+               (if (= serialization :fressian)
+                 (let [handlers (merge-read-handlers
+                                 @custom-read-handlers
+                                 incognito-read-handlers-atom)
+                       v (fressian-read payload handlers)
                   ;; Merge any additional message metadata (like :host)
-                  merged (if (map? v)
-                           (merge v (dissoc % :kabel/serialization :kabel/payload))
-                           v)]
-              #_(debug {:event :fressian-deserialized :value merged})
-              merged)
-            %)))
+                       merged (if (map? v)
+                                (merge v (dissoc % :kabel/serialization :kabel/payload))
+                                v)]
+                   #_(debug {:event :fressian-deserialized :value merged})
+                   merged)
+                 %)))
 
      ;; Serialize outgoing messages
-     #(go-try S
-        (if (:kabel/serialization %) ; already serialized
-          %
-          (do
-            #_(debug {:event :fressian-serialize :value %})
-            {:kabel/serialization :fressian
-             :kabel/payload (fressian-write
-                              %
-                              (merge-write-handlers
-                                @custom-write-handlers
-                                incognito-write-handlers-atom))})))
+    #(go-try S
+             (if (:kabel/serialization %) ; already serialized
+               %
+               (do
+                 #_(debug {:event :fressian-serialize :value %})
+                 {:kabel/serialization :fressian
+                  :kabel/payload (fressian-write
+                                  %
+                                  (merge-write-handlers
+                                   @custom-write-handlers
+                                   incognito-write-handlers-atom))})))
 
-     [S peer [in out]])))
+    [S peer [in out]])))

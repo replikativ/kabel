@@ -24,6 +24,9 @@ jobs:
       - run:
           name: Resolve dependencies
           command: clojure -A:dev:test:build -P
+      - run:
+          name: Compile Java classes
+          command: clojure -T:build compile-java
       - save_cache:
           key: deps-{{ checksum "deps.edn" }}
           paths:

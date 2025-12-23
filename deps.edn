@@ -26,4 +26,7 @@
            :pingpong {:extra-paths ["examples"]
                       :main-opts ["-m" "kabel.examples.pingpong"]}
            :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
-                   :ns-default build}}}
+                   :ns-default build}}
+ :deps/prep-lib {:ensure "target/classes"
+                 :alias :build
+                 :fn compile-java}}

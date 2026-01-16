@@ -2,10 +2,10 @@
 
 <p align="center">
 <a href="https://clojurians.slack.com/archives/CB7GJAN0L"><img src="https://badgen.net/badge/-/slack?icon=slack&label"/></a>
-<a href="https://clojars.org/io.replikativ/kabel"><img src="https://img.shields.io/clojars/v/io.replikativ/kabel.svg"/></a>
+<a href="https://clojars.org/org.replikativ/kabel"><img src="https://img.shields.io/clojars/v/org.replikativ/kabel.svg"/></a>
 <a href="https://circleci.com/gh/replikativ/kabel"><img src="https://circleci.com/gh/replikativ/kabel.svg?style=shield"/></a>
 <a href="https://github.com/replikativ/kabel/tree/main"><img src="https://img.shields.io/github/last-commit/replikativ/kabel/main"/></a>
-<a href="https://cljdoc.org/d/io.replikativ/kabel"><img src="https://badgen.net/badge/cljdoc/kabel/blue"/></a>
+<a href="https://cljdoc.org/d/org.replikativ/kabel"><img src="https://badgen.net/badge/cljdoc/kabel/blue"/></a>
 </p>
 
 **kabel** (German for "cable/wire") is a minimal, modern connection library for building peer-to-peer applications in Clojure and ClojureScript. It models a bidirectional wire to pass Clojure values between symmetric peers over WebSockets.
@@ -32,11 +32,11 @@ kabel provides the network layer for several replikativ projects:
 
 Add to your dependencies:
 
-[![Clojars Project](http://clojars.org/io.replikativ/kabel/latest-version.svg)](http://clojars.org/io.replikativ/kabel)
+[![Clojars Project](http://clojars.org/org.replikativ/kabel/latest-version.svg)](http://clojars.org/org.replikativ/kabel)
 
 ```clojure
 ;; deps.edn
-{:deps {io.replikativ/kabel {:mvn/version "LATEST"}}}
+{:deps {org.replikativ/kabel {:mvn/version "LATEST"}}}
 ```
 
 ## Quick Start

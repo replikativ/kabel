@@ -5,11 +5,10 @@
             :refer [>! timeout chan put! pub sub unsub close!]]
       :cljs [cljs.core.async :as async
              :refer [>! timeout chan put! pub sub unsub close!]])
-   #?(:clj [kabel.platform-log :refer [debug]])
+   [replikativ.logging :as log]
    [superv.async :refer [<?? go-try S go-loop-try <? >? put?]])
   #?(:cljs (:require-macros [clojure.core.async :refer [go go-loop]]
-                            [superv.async :refer [go-try <? >? put? go-loop-try S]]
-                            [kabel.platform-log :refer [debug]])))
+                            [superv.async :refer [go-try <? >? put? go-loop-try S]])))
 
 ;; https://tools.ietf.org/html/draft-oberstet-hybi-tavendo-wamp-02
 ;; curl examples https://github.com/crossbario/crossbar-examples/tree/master/longpoll_curl
@@ -74,14 +73,12 @@
                        {:roles {:subscriber {}
                                 :publisher {}}}])
             (let [w (<? S welcome-ch)]
-              (debug {:event ::welcome
-                      :message (conv-msg w)}))
+              (log/debug ::welcome {:message (conv-msg w)}))
             (doseq [s subs]
               (>? S out [(type->int :SUBSCRIBE) 1 {} s])
               (let [[_ _ id] (<? S subed-ch)]
                 (swap! subs-map assoc id s)))
-            (debug {:event ::subscribed
-                    :subs subs}))
+            (log/debug ::subscribed {:subs subs}))
     (go-loop-try S [e (<? S event-ch)]
                  (when e
                    (event-fn e)

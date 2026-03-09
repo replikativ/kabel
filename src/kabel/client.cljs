@@ -6,8 +6,7 @@
             [goog.events :as events]
             [clojure.core.async :as async :refer (take! put! close! chan buffer timeout go) :include-macros true]
             [superv.async :refer [-error]]
-            [taoensso.telemere :as tel])
-  (:require-macros [kabel.platform-log :refer [debug info error]]))
+            [replikativ.logging :as log]))
 
 (when (on-node?)
   (.log js/console "Patching global env for: W3C WebSocket API.")
@@ -30,7 +29,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
          out (chan)
          opener (chan)
          host (.getDomain (goog.Uri. (.replace url "ws" "http")))]
-     (info {:event :connecting-to :url url})
+     (log/info :connecting-to {:url url})
      (doto channel
        (events/listen goog.net.WebSocket.EventType.MESSAGE
                       (fn [evt]
@@ -51,14 +50,14 @@ Only supports websocket at the moment, but is supposed to dispatch on
                                                        (assoc % :kabel/host host)
                                                        %))))
                             (catch js/Error e
-                              (error {:event :cannot-read-message :error e})
+                              (log/error :cannot-read-message {:error e})
                               (.close channel)
                               (close! opener)
                               (put! (-error S) e))))))
        (events/listen goog.net.WebSocket.EventType.CLOSED
                       (fn [evt]
                         (let [e (ex-info "Connection closed!" {:event evt})]
-                          (info {:event :connection-closed :url url})
+                          (log/info :connection-closed {:url url})
                           (close! in)
                           (put! (-error S) e)
                           (try (put! opener e) (catch js/Object e))
@@ -69,7 +68,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
        (events/listen goog.net.WebSocket.EventType.ERROR
                       (fn [evt]
                         (let [e (ex-info "Connection error!" {:event evt})]
-                          (error {:event :websocket-error :url url})
+                          (log/error :websocket-error {:url url})
                           (put! (-error S) e) ;; TODO needs happen first for replikativ.connect
                           (try (put! opener e) (catch js/Object e))
                           (close! opener))))
@@ -87,15 +86,14 @@ Only supports websocket at the moment, but is supposed to dispatch on
                  (if m
                    (go
                      (while (pos? (.getBufferedAmount channel))
-                       (debug {:event :output-blocked
-                               :buffered-amount (.getBufferedAmount channel)})
+                       (log/debug :output-blocked {:buffered-amount (.getBufferedAmount channel)})
                        (<! (timeout 100)))
                      (try
                        (if (= (:kabel/serialization m) :string)
                          (.send channel (:kabel/payload m))
                          (.send channel (to-binary m)))
                        (catch js/Error e
-                         (error {:event :cannot-send-transit-message :error e})
+                         (log/error :cannot-send-transit-message {:error e})
                          (put! (-error S) e)))
 
                      (sender))

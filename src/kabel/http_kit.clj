@@ -1,6 +1,6 @@
 (ns kabel.http-kit
   "http-kit specific IO operations."
-  (:require [kabel.platform-log :refer [debug info warn error]]
+  (:require [replikativ.logging :as log]
             [kabel.binary :refer [from-binary to-binary]]
             [superv.async :refer [<? <?? go-try -error go-loop-super]]
             [clojure.core.async :as async
@@ -29,19 +29,17 @@
                                       (if m
                                         (do
                                           (if (@channel-hub channel)
-                                            (do (debug  {:event :sending-msg})
+                                            (do (log/debug :sending-msg {})
                                                 (if (= (:kabel/serialization m) :string)
                                                   (send! channel (:kabel/payload m))
                                                   (send! channel (to-binary m))))
-                                            (warn {:event :dropping-msg-because-of-closed-channel
-                                                   :url url :message m}))
+                                            (log/warn :dropping-msg-because-of-closed-channel {:url url :message m}))
                                           (recur (<? S out)))
                                         (close channel)))
                        (on-close channel (fn [status]
                                            (let [e (ex-info "Connection closed!" {:status status})
                                                  host (:remote-addr request)]
-                                             (debug {:event :channel-closed
-                                                     :host host :status status})
+                                             (log/debug :channel-closed {:host host :status status})
                                              #_(put! (-error S) e))
                                            (swap! channel-hub dissoc channel)
                                            (go-try S (while (<! in))) ;; flush
@@ -49,7 +47,7 @@
                        (on-receive channel (fn [data]
                                              (let [host (:remote-addr request)]
                                                (try
-                                                 (debug {:event :received-byte-message})
+                                                 (log/debug :received-byte-message {})
                                                  (when (> (count in-buffer) 100)
                                                    (close channel)
                                                    (throw (ex-info

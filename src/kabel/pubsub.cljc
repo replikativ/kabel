@@ -21,15 +21,13 @@
    (publish! peer :my-topic {:data 123})
    ```"
   (:require [kabel.pubsub.protocol :as proto]
-            [taoensso.telemere :as tel]
-            #?(:clj [kabel.platform-log :refer [debug info warn error]])
+            [replikativ.logging :as log]
             #?(:clj [superv.async :refer [<? >? go-try go-loop-try go-loop-super]])
             #?(:clj [clojure.core.async :as async
                      :refer [>! <! chan put! close! timeout pub sub unsub alts!]]
                :cljs [clojure.core.async :as async
                       :refer [>! <! chan put! close! timeout pub sub alts!] :include-macros true]))
-  #?(:cljs (:require-macros [kabel.platform-log :refer [debug info warn error]]
-                            [superv.async :refer [<? >? go-try go-loop-try go-loop-super]])))
+  #?(:cljs (:require-macros [superv.async :refer [<? >? go-try go-loop-try go-loop-super]])))
 
 ;; =============================================================================
 ;; Configuration
@@ -75,7 +73,7 @@
    Returns: topic"
   [peer topic {:keys [strategy] :as opts}]
   {:pre [(some? strategy)]}
-  (info {:event :pubsub/register-topic :topic topic})
+  (log/info :pubsub/register-topic {:topic topic})
   (update-pubsub-state! peer assoc-in [:topics topic]
                         {:strategy strategy
                          :subscribers #{}
@@ -87,7 +85,7 @@
 
    Returns: topic"
   [peer topic]
-  (info {:event :pubsub/unregister-topic :topic topic})
+  (log/info :pubsub/unregister-topic {:topic topic})
   (update-pubsub-state! peer update :topics dissoc topic)
   topic)
 
@@ -146,7 +144,7 @@
               (if is-client?
           ;; Client: send to server
                 (do
-                  (debug {:event :pubsub/publish-to-server :topic topic})
+                  (log/debug :pubsub/publish-to-server {:topic topic})
                   (>? S out msg)
                   (swap! sent inc))
           ;; Server: send to local subscribers
@@ -155,9 +153,7 @@
                     (>? S transport msg)
                     (swap! sent inc)
                     (catch #?(:clj Exception :cljs js/Error) e
-                      (warn {:event :pubsub/publish-failed
-                             :topic topic
-                             :error (str e)})))))
+                      (log/warn :pubsub/publish-failed {:topic topic :error (str e)})))))
               {:ok true :sent-count @sent}))))
 
 ;; =============================================================================
@@ -194,16 +190,13 @@
                 (if (empty? items)
             ;; Done - send complete
                   (do
-                    (debug {:event :pubsub/handshake-complete :topic topic :total-sent total-sent})
+                    (log/debug :pubsub/handshake-complete {:topic topic :total-sent total-sent})
                     (>? S out (proto/handshake-complete-msg topic))
                     {:ok true})
 
             ;; Send batch
                   (do
-                    (debug {:event :pubsub/sending-batch
-                            :topic topic
-                            :batch-idx batch-idx
-                            :item-count (count items)})
+                    (log/debug :pubsub/sending-batch {:topic topic :batch-idx batch-idx :item-count (count items)})
               ;; Send each item
                     (doseq [item items]
                       (>? S out (proto/handshake-data-msg topic item)))
@@ -231,9 +224,7 @@
   (go-try S
           (let [{:keys [id topics client-states]} msg
                 successful-topics (atom #{})]
-            (debug {:event :pubsub/handle-subscription
-                    :topics topics
-                    :msg-id id})
+            (log/debug :pubsub/handle-subscription {:topics topics :msg-id id})
 
       ;; Process each topic
             (doseq [topic topics]
@@ -249,17 +240,15 @@
                   (let [result (<? S (send-handshake! S out topic handshake-ch opts pending-acks))]
                     (if (:ok result)
                       (do
-                        (info {:event :pubsub/subscription-complete :topic topic})
+                        (log/info :pubsub/subscription-complete {:topic topic})
                         (swap! successful-topics conj topic))
                       (do
-                        (warn {:event :pubsub/subscription-failed
-                               :topic topic
-                               :error (:error result)})
+                        (log/warn :pubsub/subscription-failed {:topic topic :error (:error result)})
                         (remove-subscriber! peer topic out)))))
 
           ;; Topic not registered
                 (do
-                  (warn {:event :pubsub/topic-not-found :topic topic})
+                  (log/warn :pubsub/topic-not-found {:topic topic})
                   (>? S out (proto/error-msg topic "Topic not registered")))))
 
       ;; Send subscribe-ack with successful topics
@@ -271,7 +260,7 @@
   [S peer out msg]
   (go-try S
           (let [{:keys [topics]} msg]
-            (debug {:event :pubsub/handle-unsubscription :topics topics})
+            (log/debug :pubsub/handle-unsubscription {:topics topics})
             (doseq [topic topics]
               (remove-subscriber! peer topic out))
             {:ok true})))
@@ -323,7 +312,7 @@
                                       (recur (rest topics-seq) (assoc states topic state)))
                                     states))]
         ;; Send subscribe request
-              (debug {:event :pubsub/sending-subscribe :topics topics :id id})
+              (log/debug :pubsub/sending-subscribe {:topics topics :id id})
               (>? S out (proto/subscribe-msg id topics client-states))
 
         ;; Return - actual handling happens in middleware
@@ -414,9 +403,7 @@
       ;; Handle subscribe-ack (client-side)
       (go-loop-super S [msg (<? S subscribe-ack-ch)]
                      (when msg
-                       (debug {:event :pubsub/subscribe-ack-received
-                               :topics (:topics msg)
-                               :id (:id msg)})
+                       (log/debug :pubsub/subscribe-ack-received {:topics (:topics msg) :id (:id msg)})
                        (recur (<? S subscribe-ack-ch))))
 
       ;; Handle unsubscribe (server-side)
@@ -432,7 +419,7 @@
         (go-loop-super S [msg (<? S handshake-data-ch)]
                        (when msg
                          (let [{:keys [topic data]} msg]
-                           (debug {:event :pubsub/handshake-data-received :topic topic})
+                           (log/debug :pubsub/handshake-data-received {:topic topic})
                            (swap! handshake-items update topic (fnil conj []) data))
                          (recur (<? S handshake-data-ch))))
 
@@ -450,10 +437,7 @@
                            (let [items (get @handshake-items topic [])
                                  sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
                                  strategy (:strategy sub-state)]
-                             (debug {:event :pubsub/batch-complete-received
-                                     :topic topic
-                                     :batch-idx batch-idx
-                                     :item-count (count items)})
+                             (log/debug :pubsub/batch-complete-received {:topic topic :batch-idx batch-idx :item-count (count items)})
                 ;; Apply all items
                              (when strategy
                                (doseq [item items]
@@ -468,9 +452,7 @@
       (go-loop-super S [msg (<? S handshake-ack-ch)]
                      (when msg
                        (let [{:keys [topic batch-idx]} msg]
-                         (debug {:event :pubsub/handshake-ack-received
-                                 :topic topic
-                                 :batch-idx batch-idx})
+                         (log/debug :pubsub/handshake-ack-received {:topic topic :batch-idx batch-idx})
             ;; Signal waiting send-handshake!
                          (when-let [ack-ch (get-in @pending-acks [topic batch-idx])]
                            (put! ack-ch :ack)
@@ -482,7 +464,7 @@
                      (when msg
                        (let [{:keys [topic]} msg
                              on-complete (get opts :on-handshake-complete)]
-                         (info {:event :pubsub/handshake-complete-received :topic topic})
+                         (log/info :pubsub/handshake-complete-received {:topic topic})
                          (mark-handshake-complete! peer topic)
                          (when on-complete
                            (on-complete topic)))
@@ -500,7 +482,7 @@
                              on-publish (get opts :on-publish)
                 ;; Get subscribers for forwarding (server-side only)
                              subscribers (get-subscribers peer topic)]
-                         (debug {:event :pubsub/publish-received :topic topic :subscriber-count (count subscribers)})
+                         (log/debug :pubsub/publish-received {:topic topic :subscriber-count (count subscribers)})
             ;; Apply locally
                          (when strategy
                            (<? S (proto/-apply-publish strategy payload)))
@@ -511,7 +493,7 @@
             ;; which is not in the subscribers set (subscribers are the transport channels
             ;; from connected clients, not the peer's own out channel)
                          (when (and topic-config (seq subscribers))
-                           (debug {:event :pubsub/forwarding-publish :topic topic :count (count subscribers)})
+                           (log/debug :pubsub/forwarding-publish {:topic topic :count (count subscribers)})
                            (let [fwd-msg (proto/publish-msg topic payload)]
                              (doseq [transport subscribers]
                   ;; Don't forward back to sender (sender is 'out' which is the channel
@@ -520,7 +502,7 @@
                                  (try
                                    (>? S transport fwd-msg)
                                    (catch #?(:clj Exception :cljs js/Error) e
-                                     (warn {:event :pubsub/forward-failed :topic topic :error (str e)}))))))))
+                                     (log/warn :pubsub/forward-failed {:topic topic :error (str e)}))))))))
                        (recur (<? S publish-ch))))
 
       ;; Pass through unrelated messages

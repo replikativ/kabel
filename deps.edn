@@ -10,7 +10,7 @@
         cheshire/cheshire {:mvn/version "5.13.0"}
         org.replikativ/incognito {:mvn/version "0.3.69"}
         org.replikativ/hasch {:mvn/version "0.3.96"}
-        io.replikativ/logging {:mvn/version "0.1.3"}
+        org.replikativ/logging {:mvn/version "0.1.3"}
         org.clojure/data.fressian {:mvn/version "1.0.0"}
         com.github.pkpkpk/fress {:mvn/version "0.4.312"}
         http-kit/http-kit {:mvn/version "2.8.0"}

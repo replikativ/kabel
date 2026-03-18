@@ -35,7 +35,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                       (fn [evt]
                         (let [v (.. evt -message)]
                           (try
-                            (when (> (count in-buffer) 100)
+                            (when (> (count in-buffer) 1000)
                               (.close channel)
                               (throw (ex-info
                                       (str "incoming buffer for " url

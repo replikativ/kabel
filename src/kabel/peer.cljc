@@ -1,6 +1,6 @@
 (ns kabel.peer
   "Peer 2 peer connectivity."
-  (:require #?(:clj [kabel.platform-log :refer [debug info warn error]])
+  (:require [replikativ.logging :as log]
             [clojure.set :as set]
             #?(:clj [superv.async :refer [<? <<? go-try go-loop-try alt?
                                           go-loop-super]])
@@ -13,8 +13,7 @@
                      :refer [>! timeout chan put! pub sub unsub close! alts!]]
                :cljs [clojure.core.async :as async
                       :refer [>! timeout chan put! pub sub unsub close! alts!] :include-macros true]))
-  #?(:cljs (:require-macros [kabel.platform-log :refer [debug info warn error]]
-                            [superv.async :refer [<<? <? go-try go-loop-try alt?
+  #?(:cljs (:require-macros [superv.async :refer [<<? <? go-try go-loop-try alt?
                                                   go-loop-super]])))
 
 ;; ============================================================================
@@ -117,7 +116,7 @@
             (if (:started? @peer)
               false
               (let [stop-fn (-> @peer :volatile :handler :stop-fn)]
-                (info {:event :starting-peer :id (:id @peer)})
+                (log/info :starting-peer {:id (:id @peer)})
                 (swap! peer update-in [:volatile] (get-in @peer [:volatile :start-fn]))
                 (swap! peer assoc :started? true)
                 true)))))
@@ -128,7 +127,7 @@
             (if-not (:started? @peer)
               false
               (do
-                (info {:event :stopping-peer :id (:id @peer)})
+                (log/info :stopping-peer {:id (:id @peer)})
                 (when-let [stop-fn (get-in @peer [:volatile :stop-fn])]
                   (stop-fn :timeout 1000))
                 (<? S (timeout 200))

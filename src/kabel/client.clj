@@ -1,6 +1,6 @@
 (ns kabel.client
   "tyrus client specific client IO operations."
-  (:require [kabel.platform-log :refer [debug info warn error]]
+  (:require [replikativ.logging :as log]
             [kabel.binary :refer [to-binary from-binary]]
             [superv.async :refer [<? <?? go-try -error go-loop-super S >?]]
             [clojure.core.async :as async
@@ -60,22 +60,20 @@
         http-client
         (proxy [Endpoint] []
           (onOpen [session config]
-            (info {:event :websocket-opened :url url})
+            (log/info :websocket-opened {:url url})
             (go-loop-super S [m (<? S out)] ;; ensure draining out on disconnect
                            (if m
                              (do
                                (if (@websockets session)
                                  (do
-                                   (debug {:event :client-sending-message
-                                           :url url})
+                                   (log/debug :client-sending-message {:url url})
                       ;; special case: use websocket wire-level string type 
                                    (if (= (:kabel/serialization m) :string)
                                      @(.sendText (.getAsyncRemote session) (:kabel/payload m))
                                      @(.sendBinary (.getAsyncRemote session)
                                                    (ByteBuffer/wrap (to-binary m))))
                                    #_(prn "cli send" m))
-                                 (warn {:event :dropping-msg-because-of-closed-channel
-                                        :url url :message m}))
+                                 (log/warn :dropping-msg-because-of-closed-channel {:url url :message m}))
                                (recur (<? S out)))
                              (.close session)))
             (swap! websockets conj session)
@@ -94,17 +92,14 @@
                                                          " too full: " in-count)
                                                     {:url url
                                                      :count (count in-buffer)})))
-                                          (debug {:event :received-byte-message
-                                                  :url url
-                                                  :in-buffer-count in-count}))
+                                          (log/debug :received-byte-message {:url url :in-buffer-count in-count}))
                                         (async/put! in {:kabel/serialization :string
                                                         :kabel/payload message})
                                         (catch Exception e
                                           (let [e (ex-info "Cannot receive data." {:url url
                                                                                    :data message
                                                                                    :error e})]
-                                            (error {:event :cannot-receive-message
-                                                    :error e})
+                                            (log/error :cannot-receive-message {:error e})
                                             (put! (-error S) e)
                                             (.close session)))))))
               (.addMessageHandler session
@@ -118,9 +113,7 @@
                                                          " too full: " in-count)
                                                     {:url url
                                                      :count in-count})))
-                                          (debug {:event :received-byte-message
-                                                  :url url
-                                                  :in-buffer-count (count in-buffer)}))
+                                          (log/debug :received-byte-message {:url url :in-buffer-count (count in-buffer)}))
                                         (let [m (from-binary (.array message))]
                                           (async/put! in (if (map? m)
                                                            (assoc m :kabel/host host)
@@ -129,17 +122,15 @@
                                           (let [e (ex-info "Cannot receive data." {:url url
                                                                                    :data message
                                                                                    :error e})]
-                                            (error {:event :cannot-receive-message
-                                                    :error e})
+                                            (log/error :cannot-receive-message {:error e})
                                             (put! (-error S) e)
                                             (.close session)))))))
               (catch java.io.IOException e
-                (error {:event :unexpected-ioexception :error (pr-str e)})
+                (log/error :unexpected-ioexception {:error (pr-str e)})
                 (put! (-error S) e))))
           (onClose [session reason]
             (let [e (ex-info "Connection closed!" {:reason reason})]
-              (debug {:event :closing-connection :url url
-                      :reason (pr-str reason)})
+              (log/debug :closing-connection {:url url :reason (pr-str reason)})
               (close! in)
               (go-try S (while (<! in))) ;; flush
               (swap! websockets disj session)
@@ -152,12 +143,12 @@
                               :url url
                               :error err})]
               (put! (-error S) e)
-              (error {:event :websocket-error :url url :error (pr-str err)})
+              (log/error :websocket-error {:url url :error (pr-str err)})
               (.close session))))
         cec
         (java.net.URI. url))
        (catch Exception e
-         (error {:event :client-connect-error :url url :error (pr-str e)})
+         (log/error :client-connect-error {:url url :error (pr-str e)})
          (async/put! opener (ex-info "client-connect error"
                                      {:type :websocket-connection-error
                                       :url url

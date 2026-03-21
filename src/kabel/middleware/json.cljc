@@ -1,12 +1,11 @@
 (ns kabel.middleware.json
   (:require
    [kabel.middleware.handler :refer [handler]]
-   #?(:clj [kabel.platform-log :refer [debug]])
+   [replikativ.logging :as log]
    #?(:cljs [kabel.util :refer [on-node?]])
    #?(:clj [superv.async :refer [go-try]])
    #?(:clj [cheshire.core :as json]))
-  #?(:cljs (:require-macros [superv.async :refer [go-try]]
-                            [kabel.platform-log :refer [debug]])))
+  #?(:cljs (:require-macros [superv.async :refer [go-try]])))
 
 (defn json
   "Serializes all incoming and outgoing edn datastructures in string form (with JSON).

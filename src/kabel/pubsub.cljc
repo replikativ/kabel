@@ -22,7 +22,8 @@
    ```"
   (:require [kabel.pubsub.protocol :as proto]
             [replikativ.logging :as log]
-            #?(:clj [superv.async :refer [<? >? go-try go-loop-try go-loop-super]])
+            #?(:clj [superv.async :refer [<? >? put? go-try go-loop-try go-loop-super]]
+               :cljs [superv.async :refer [put?]])
             #?(:clj [clojure.core.async :as async
                      :refer [>! <! chan put! close! timeout pub sub unsub alts!]]
                :cljs [clojure.core.async :as async
@@ -138,23 +139,28 @@
         out (:out pubsub-state)
         subscribers (get-subscribers peer topic)
         is-client? (and out (empty? subscribers))]
-    (go-try S
-            (let [msg (proto/publish-msg topic payload)
-                  sent (atom 0)]
-              (if is-client?
-          ;; Client: send to server
-                (do
-                  (log/debug :pubsub/publish-to-server {:topic topic})
-                  (>? S out msg)
-                  (swap! sent inc))
-          ;; Server: send to local subscribers
-                (doseq [transport subscribers]
-                  (try
-                    (>? S transport msg)
-                    (swap! sent inc)
-                    (catch #?(:clj Exception :cljs js/Error) e
-                      (log/warn :pubsub/publish-failed {:topic topic :error (str e)})))))
-              {:ok true :sent-count @sent}))))
+    ;; Use put? (synchronous, callable from any thread) instead of (go (>! ...)).
+    ;; With go-try + >?, multiple publish! calls from one thread spawn racing
+    ;; go-blocks whose >! puts can reach the out channel out of order. put?
+    ;; enqueues directly on the channel's pending-puts FIFO from the calling
+    ;; thread, so wire order matches call order.
+    (let [msg (proto/publish-msg topic payload)
+          sent (atom 0)
+          result-ch (chan 1)]
+      (if is-client?
+        (do
+          (log/debug :pubsub/publish-to-server {:topic topic})
+          (put? S out msg)
+          (swap! sent inc))
+        (doseq [transport subscribers]
+          (try
+            (put? S transport msg)
+            (swap! sent inc)
+            (catch #?(:clj Exception :cljs js/Error) e
+              (log/warn :pubsub/publish-failed {:topic topic :error (str e)})))))
+      (async/put! result-ch {:ok true :sent-count @sent})
+      (close! result-ch)
+      result-ch)))
 
 ;; =============================================================================
 ;; Handshake Logic

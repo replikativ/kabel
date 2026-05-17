@@ -25,16 +25,28 @@
                      (async/put! conns [in out])
                      (with-channel request channel
                        (swap! channel-hub assoc channel request)
+                       ;; Send loop: pumps server→client messages from `out`
+                       ;; to the underlying http-kit websocket. Exits on
+                       ;;   (a) `out` closed (channel returns nil), or
+                       ;;   (b) the WS channel no longer registered in
+                       ;;       `channel-hub` (the client's `on-close` ran
+                       ;;       before `out` had been closed by upstream).
+                       ;; Case (b) used to log per-message and keep
+                       ;; looping, leaking a goroutine and spamming the
+                       ;; warning until JVM exit. Now we log once and
+                       ;; close `out` so upstream `put!`s return false
+                       ;; and the broker can unsubscribe.
                        (go-loop-super S [m (<? S out)]
                                       (if m
-                                        (do
-                                          (if (@channel-hub channel)
-                                            (do (log/debug :sending-msg {})
-                                                (if (= (:kabel/serialization m) :string)
-                                                  (send! channel (:kabel/payload m))
-                                                  (send! channel (to-binary m))))
-                                            (log/warn :dropping-msg-because-of-closed-channel {:url url :message m}))
-                                          (recur (<? S out)))
+                                        (if (@channel-hub channel)
+                                          (do (log/debug :sending-msg {})
+                                              (if (= (:kabel/serialization m) :string)
+                                                (send! channel (:kabel/payload m))
+                                                (send! channel (to-binary m)))
+                                              (recur (<? S out)))
+                                          (do (log/warn :dropping-msg-because-of-closed-channel
+                                                        {:url url})
+                                              (close! out)))
                                         (close channel)))
                        (on-close channel (fn [status]
                                            (let [e (ex-info "Connection closed!" {:status status})
@@ -43,7 +55,12 @@
                                              #_(put! (-error S) e))
                                            (swap! channel-hub dissoc channel)
                                            (go-try S (while (<! in))) ;; flush
-                                           (close! in)))
+                                           (close! in)
+                                           ;; Close `out` so the send
+                                           ;; loop exits and upstream
+                                           ;; broadcasts stop landing on
+                                           ;; a dead subscription.
+                                           (close! out)))
                        (on-receive channel (fn [data]
                                              (let [host (:remote-addr request)]
                                                (try

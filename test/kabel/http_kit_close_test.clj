@@ -64,16 +64,16 @@
                                   identity)
           client-saw-ping (chan 1)
           cpeer (peer/client-peer
-                  S cid
-                  (fn [[S peer [in out]]]
-                    (let [new-in (chan)
-                          new-out (chan)]
-                      (go-try S
-                        (>! out "ping")
-                        (let [reply (<! in)]
-                          (put! client-saw-ping (or reply :nil))))
-                      [S peer [new-in new-out]]))
-                  identity)]
+                 S cid
+                 (fn [[S peer [in out]]]
+                   (let [new-in (chan)
+                         new-out (chan)]
+                     (go-try S
+                             (>! out "ping")
+                             (let [reply (<! in)]
+                               (put! client-saw-ping (or reply :nil))))
+                     [S peer [new-in new-out]]))
+                 identity)]
       (try
         (<?? S (peer/start speer))
         (<?? S (peer/connect S cpeer url))
@@ -136,16 +136,16 @@
                                   identity)
           client-saw-ping (chan 1)
           cpeer (peer/client-peer
-                  S cid
-                  (fn [[S peer [in out]]]
-                    (let [new-in (chan)
-                          new-out (chan)]
-                      (go-try S
-                        (>! out "ping")
-                        (let [reply (<! in)]
-                          (put! client-saw-ping (or reply :nil))))
-                      [S peer [new-in new-out]]))
-                  identity)]
+                 S cid
+                 (fn [[S peer [in out]]]
+                   (let [new-in (chan)
+                         new-out (chan)]
+                     (go-try S
+                             (>! out "ping")
+                             (let [reply (<! in)]
+                               (put! client-saw-ping (or reply :nil))))
+                     [S peer [new-in new-out]]))
+                 identity)]
       (try
         (<?? S (peer/start speer))
         (<?? S (peer/connect S cpeer url))

@@ -15,8 +15,13 @@
   (b/delete {:path "target"}))
 
 (defn compile-java [_]
+  ;; Pin the bytecode floor with --release so the published classes load on any
+  ;; JDK >= 11, independent of whatever JDK the CI image happens to run. Without
+  ;; this, javac targets the build JDK (the CI orb image rolled to 25 → class
+  ;; file 69 → UnsupportedClassVersionError for every consumer on an older JVM).
   (b/javac {:src-dirs ["src/main/java"]
             :class-dir class-dir
+            :javac-opts ["--release" "11"]
             :basis @basis})
   (println "Java compilation complete"))
 

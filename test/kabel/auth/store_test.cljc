@@ -1,8 +1,14 @@
 (ns kabel.auth.store-test
-  (:require [clojure.test :refer [deftest testing is]]
+  "AuthStore behaviour, exercised on both the JVM and Node/browser — the memory
+   store and its digest helpers are `.cljc`, so a ClojureScript peer can hold
+   parties and sessions identically."
+  (:require #?(:clj [clojure.test :refer [deftest testing is]]
+               :cljs [cljs.test :refer-macros [deftest testing is]])
             [kabel.auth.store.protocol :as p]
-            [kabel.auth.store.memory :refer [memory-auth-store]])
-  (:import [java.util UUID]))
+            [kabel.auth.store.memory :refer [memory-auth-store]]))
+
+(defn- now-ms [] #?(:clj (System/currentTimeMillis) :cljs (js/Date.now)))
+(defn- date [ms] #?(:clj (java.util.Date. (long ms)) :cljs (js/Date. ms)))
 
 ;; User tests
 
@@ -18,13 +24,13 @@
 
   (testing "Email is required"
     (let [store (memory-auth-store)]
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Email is required"
+      (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) #"Email is required"
                             (p/create-user! store {:party/display-name "No Email"})))))
 
   (testing "Duplicate email throws"
     (let [store (memory-auth-store)]
       (p/create-user! store {:party/email "bob@example.com"})
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Email already exists"
+      (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) #"Email already exists"
                             (p/create-user! store {:party/email "bob@example.com"}))))))
 
 (deftest find-user-test
@@ -39,7 +45,7 @@
           created (p/create-user! store {:party/email "dave@example.com"})
           user-id (:party/id created)]
       (is (= created (p/find-user-by-id store user-id)))
-      (is (nil? (p/find-user-by-id store (UUID/randomUUID)))))))
+      (is (nil? (p/find-user-by-id store (p/gen-uuid)))))))
 
 (deftest update-user-test
   (testing "Update user name"
@@ -51,8 +57,8 @@
 
   (testing "Update non-existent user throws"
     (let [store (memory-auth-store)]
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Party not found"
-                            (p/update-user! store (UUID/randomUUID) {:party/display-name "Ghost"}))))))
+      (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) #"Party not found"
+                            (p/update-user! store (p/gen-uuid) {:party/display-name "Ghost"}))))))
 
 ;; Session tests
 
@@ -61,7 +67,7 @@
     (let [store (memory-auth-store)
           user (p/create-user! store {:party/email "frank@example.com"})
           token-hash (p/hash-token "refresh-token-123")
-          expires (java.util.Date. (+ (System/currentTimeMillis) 3600000)) ;; 1 hour
+          expires (date (+ (now-ms) 3600000)) ;; 1 hour
           session (p/create-session! store {:session/party-id (:party/id user)
                                             :session/refresh-token-hash token-hash
                                             :session/expires expires})]
@@ -74,7 +80,7 @@
     (let [store (memory-auth-store)
           user (p/create-user! store {:party/email "grace@example.com"})
           token-hash (p/hash-token "my-refresh-token")
-          expires (java.util.Date. (+ (System/currentTimeMillis) 3600000))
+          expires (date (+ (now-ms) 3600000))
           created (p/create-session! store {:session/party-id (:party/id user)
                                             :session/refresh-token-hash token-hash
                                             :session/expires expires})]
@@ -85,7 +91,7 @@
     (let [store (memory-auth-store)
           user (p/create-user! store {:party/email "henry@example.com"})
           token-hash (p/hash-token "expired-token")
-          expires (java.util.Date. (- (System/currentTimeMillis) 1000)) ;; expired
+          expires (date (- (now-ms) 1000)) ;; expired
           _ (p/create-session! store {:session/party-id (:party/id user)
                                       :session/refresh-token-hash token-hash
                                       :session/expires expires})]
@@ -96,7 +102,7 @@
     (let [store (memory-auth-store)
           user (p/create-user! store {:party/email "iris@example.com"})
           token-hash (p/hash-token "delete-me-token")
-          expires (java.util.Date. (+ (System/currentTimeMillis) 3600000))
+          expires (date (+ (now-ms) 3600000))
           session (p/create-session! store {:session/party-id (:party/id user)
                                             :session/refresh-token-hash token-hash
                                             :session/expires expires})]
@@ -108,7 +114,7 @@
   (testing "Delete all sessions for a user"
     (let [store (memory-auth-store)
           user (p/create-user! store {:party/email "jake@example.com"})
-          expires (java.util.Date. (+ (System/currentTimeMillis) 3600000))
+          expires (date (+ (now-ms) 3600000))
           _ (p/create-session! store {:session/party-id (:party/id user)
                                       :session/refresh-token-hash (p/hash-token "token-1")
                                       :session/expires expires})
@@ -127,8 +133,8 @@
   (testing "Clean up expired sessions"
     (let [store (memory-auth-store)
           user (p/create-user! store {:party/email "kate@example.com"})
-          future-time (java.util.Date. (+ (System/currentTimeMillis) 3600000))
-          past-time (java.util.Date. (- (System/currentTimeMillis) 1000))
+          future-time (date (+ (now-ms) 3600000))
+          past-time (date (- (now-ms) 1000))
           _ (p/create-session! store {:session/party-id (:party/id user)
                                       :session/refresh-token-hash (p/hash-token "valid-token")
                                       :session/expires future-time})
@@ -151,4 +157,8 @@
 
   (testing "Different tokens have different hashes"
     (is (not= (p/hash-token "token-a")
-              (p/hash-token "token-b")))))
+              (p/hash-token "token-b"))))
+
+  (testing "hash is a 64-char lowercase hex SHA-256 digest (byte-identical across peers)"
+    (is (= 64 (count (p/hash-token "test-token"))))
+    (is (re-matches #"[0-9a-f]{64}" (p/hash-token "test-token")))))

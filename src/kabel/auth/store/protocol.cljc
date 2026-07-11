@@ -5,9 +5,18 @@
    be a human user. All attributes use the :party/* namespace so that simmis
    (and other apps) can build a unified party/agent identity model on top.
 
+   This namespace is `.cljc` so a ClojureScript peer (browser or Node) can
+   *implement* AuthStore and act as an identity/session holder — the precondition
+   for peers authenticating against each other. The datahike-backed store stays
+   JVM-only (datahike is a JVM database); the memory store (and any future
+   konserve-backed store) is portable. The helpers below reuse geheimnis so the
+   token digest is byte-identical on every platform.
+
    Implementations:
-   - kabel.auth.store.memory   - In-memory store for testing
-   - kabel.auth.store.datahike - Datahike-backed store")
+   - kabel.auth.store.memory   - In-memory store, portable (browser/Node/JVM)
+   - kabel.auth.store.datahike - Datahike-backed store (JVM only)"
+  (:require [org.replikativ.geheimnis.hash :as gh]
+            [org.replikativ.geheimnis.codec :as gc]))
 
 (defprotocol AuthStore
   "Abstraction over party and session storage."
@@ -54,19 +63,32 @@
     "Clean up expired sessions. Returns count of deleted sessions."))
 
 (defn now-instant
-  "Get current time as java.util.Date (compatible with Datahike :db.type/instant)."
+  "Current time as a platform-native date: java.util.Date on the JVM (compatible
+   with Datahike :db.type/instant), js/Date on ClojureScript. Only ever compared
+   against another value from the same platform, via `expired?`."
   []
-  (java.util.Date.))
+  #?(:clj (java.util.Date.) :cljs (js/Date.)))
+
+(defn gen-uuid
+  "Fresh random UUID: java.util.UUID on the JVM, cljs.core/UUID on ClojureScript."
+  []
+  #?(:clj (java.util.UUID/randomUUID) :cljs (random-uuid)))
+
+(defn- millis
+  "Epoch milliseconds of a platform-native date. `.getTime` exists on both
+   java.util.Date and js/Date, so the comparison in `expired?` is portable."
+  [d]
+  #?(:clj (.getTime ^java.util.Date d) :cljs (.getTime d)))
 
 (defn expired?
   "Check if a session is expired."
   [session]
   (when-let [expires (:session/expires session)]
-    (neg? (compare expires (now-instant)))))
+    (< (millis expires) (millis (now-instant)))))
 
 (defn hash-token
-  "SHA-256 hash a token string for storage."
+  "SHA-256 hash a token string to a lowercase hex digest, for storage. Portable
+   via geheimnis — goog.crypt on ClojureScript, MessageDigest on the JVM — so the
+   digest is byte-identical across peers."
   [token]
-  (let [md (java.security.MessageDigest/getInstance "SHA-256")
-        bytes (.digest md (.getBytes token "UTF-8"))]
-    (apply str (map #(format "%02x" %) bytes))))
+  (gc/bytes->hex (gh/sha256 (gc/str->bytes token))))

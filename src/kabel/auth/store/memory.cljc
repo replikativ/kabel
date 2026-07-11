@@ -1,10 +1,11 @@
 (ns kabel.auth.store.memory
-  "In-memory implementation of AuthStore for testing.
+  "In-memory implementation of AuthStore.
 
-   All data is stored in atoms and lost when the JVM exits.
-   Thread-safe for concurrent access."
-  (:require [kabel.auth.store.protocol :as p])
-  (:import [java.util UUID]))
+   All data is stored in atoms and lost when the process exits. Portable across
+   the JVM, Node, and the browser (`.cljc`), so a ClojureScript peer can hold
+   parties and sessions — useful for tests and for a lightweight peer that caches
+   identities it has verified. Thread-safe for concurrent access on the JVM."
+  (:require [kabel.auth.store.protocol :as p]))
 
 (defrecord MemoryAuthStore [parties-by-id parties-by-email sessions-by-id sessions-by-token-hash]
   p/AuthStore
@@ -15,7 +16,7 @@
         (throw (ex-info "Email is required" {:type :validation-error})))
       (when (get @parties-by-email email)
         (throw (ex-info "Email already exists" {:type :email-exists :email email})))
-      (let [party-id (UUID/randomUUID)
+      (let [party-id (p/gen-uuid)
             party (assoc party-data
                          :party/id party-id
                          :party/type :human
@@ -47,7 +48,7 @@
       (throw (ex-info "Party not found" {:type :party-not-found :party-id party-id}))))
 
   (create-session! [_ session-data]
-    (let [session-id (UUID/randomUUID)
+    (let [session-id (p/gen-uuid)
           token-hash (:session/refresh-token-hash session-data)
           session (assoc session-data
                          :session/id session-id

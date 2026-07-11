@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest testing is]]
             [kabel.pubsub :as pubsub]
             [kabel.pubsub.protocol :as proto]
-            [superv.async :refer [S go-try <?]]
+            #?(:clj [superv.async :refer [S go-try <? <??]]
+               :cljs [superv.async :refer [S go-try <?]])
             #?(:clj [clojure.core.async :as async :refer [go <! >! chan put! close! timeout alts!]]
                :cljs [clojure.core.async :as async :refer [chan put! close! timeout go <! >! alts!]])))
 
@@ -174,3 +175,54 @@
     ;; For now, verify middleware can be created
     (let [middleware-fn (pubsub/make-pubsub-peer-middleware {})]
       (is (fn? middleware-fn)))))
+
+;; =============================================================================
+;; Subscribe authorization gate (:authorize-fn)
+;; =============================================================================
+
+#?(:clj
+   (deftest subscribe-authorize-gate-test
+     (let [handle-subscription! @#'pubsub/handle-subscription!
+           drain (fn [out] ;; collect what handle-subscription! wrote, briefly
+                   (loop [acc []]
+                     (let [[v _] (async/alts!! [out (timeout 300)])]
+                       (if v (recur (conj acc v)) acc))))
+           sub-msg {:type :pubsub/subscribe :id :r1 :topics #{:t}
+                    :client-states {} :kabel/principal {:sub "alice"}}]
+
+       (testing "denied principal: :pubsub/error, no subscriber added, empty ack"
+         (let [peer (make-test-peer)
+               out (chan 100)]
+           (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
+           (<?? S (handle-subscription! S peer out sub-msg (atom {})
+                                        (fn [_principal _topic] false)))
+           (let [msgs (drain out)]
+             (is (some #(and (= :pubsub/error (:type %)) (= :t (:topic %))) msgs)
+                 "an error is returned for the denied topic")
+             (is (= #{} (pubsub/get-subscribers peer :t))
+                 "a denied subscriber is not added to the topic")
+             (is (some #(and (= :pubsub/subscribe-ack (:type %))
+                             (= #{} (:topics %))) msgs)
+                 "the ack lists no successful topics"))))
+
+       (testing "allowed principal: subscriber added, topic in ack"
+         (let [peer (make-test-peer)
+               out (chan 100)]
+           (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
+           (<?? S (handle-subscription! S peer out sub-msg (atom {})
+                                        (fn [_principal _topic] true)))
+           (let [msgs (drain out)]
+             (is (contains? (pubsub/get-subscribers peer :t) out)
+                 "an authorized subscriber joins the topic")
+             (is (some #(and (= :pubsub/subscribe-ack (:type %))
+                             (contains? (:topics %) :t)) msgs)
+                 "the ack reports the topic as successful"))))
+
+       (testing "the gate sees the message's :kabel/principal"
+         (let [peer (make-test-peer)
+               out (chan 100)
+               seen (atom nil)]
+           (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
+           (<?? S (handle-subscription! S peer out sub-msg (atom {})
+                                        (fn [principal _topic] (reset! seen principal) true)))
+           (is (= {:sub "alice"} @seen)))))))

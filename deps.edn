@@ -23,9 +23,7 @@
            :auth {:extra-deps {metosin/jsonista {:mvn/version "1.0.0"}
                                buddy/buddy-hashers {:mvn/version "2.0.167"}
                                ;; portable crypto (HS256 verify on JVM + CLJS).
-                               ;; co-dev overlay until geheimnis v2 releases; a
-                               ;; release swaps this for a Maven coordinate.
-                               org.replikativ/geheimnis {:local/root "../geheimnis"}}}
+                               org.replikativ/geheimnis {:mvn/version "0.2.33"}}}
            ;; The datahike-backed AuthStore (kabel.auth.store.datahike) — datahike
            ;; is the consumer's to provide; pinned to the stack's main here for tests.
            ;; datahike is the consumer's to provide. For kabel's own store tests we

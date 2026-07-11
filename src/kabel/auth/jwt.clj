@@ -128,7 +128,9 @@
   (case alg
     :HS256 (let [secret-bytes (if (bytes? key) key (.getBytes ^String (or key "") utf8))
                  expected (hmac-sha256 secret-bytes signing-input)]
-             (when-not (java.util.Arrays/equals ^bytes expected sig)
+             ;; constant-time compare (MessageDigest/isEqual, CT since JDK 6u17) —
+             ;; java.util.Arrays/equals short-circuits and leaks the HMAC via timing.
+             (when-not (java.security.MessageDigest/isEqual ^bytes expected sig)
                (throw (ex-info "Invalid signature" {}))))
     :RS256 (let [^PublicKey pub (cond
                                   (instance? PublicKey key) key

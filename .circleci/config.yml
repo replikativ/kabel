@@ -23,7 +23,7 @@ jobs:
             - deps-
       - run:
           name: Resolve dependencies
-          command: clojure -A:dev:test:build -P
+          command: clojure -A:dev:test:auth:build -P
       - run:
           name: Compile Java classes
           command: clojure -T:build compile-java
@@ -65,7 +65,7 @@ jobs:
           at: /home/circleci
       - run:
           name: Run Clojure tests
-          command: clojure -X:test
+          command: clojure -X:auth:test
           no_output_timeout: 5m
 
   test-cljs:

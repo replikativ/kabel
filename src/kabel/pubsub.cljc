@@ -154,7 +154,16 @@
           (swap! sent inc))
         (doseq [transport subscribers]
           (try
-            (put? S transport msg)
+            ;; Use put?'s callback to detect closed subscriber channels.
+            ;; `async/put!` returns false (and the callback receives false)
+            ;; when the channel is closed. We remove the dead subscriber so
+            ;; subsequent publishes don't visit it and so disconnected
+            ;; clients don't accumulate in the topic's subscriber set.
+            (put? S transport msg
+                  (fn [delivered?]
+                    (when-not delivered?
+                      (log/debug :pubsub/removing-closed-subscriber {:topic topic})
+                      (remove-subscriber! peer topic transport))))
             (swap! sent inc)
             (catch #?(:clj Exception :cljs js/Error) e
               (log/warn :pubsub/publish-failed {:topic topic :error (str e)})))))

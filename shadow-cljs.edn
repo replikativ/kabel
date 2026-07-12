@@ -1,4 +1,4 @@
-{:deps {:aliases [:dev :test]}
+{:deps {:aliases [:dev :test :auth]}
 
  :dependencies []
 

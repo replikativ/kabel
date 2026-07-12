@@ -18,6 +18,7 @@
 - **Topic-based pub/sub**: Built-in publish/subscribe with backpressure and flow control
 - **Composable middleware**: Filter, transform, and route messages through stackable middleware
 - **Erlang-style supervision**: Exception handling via [superv.async](https://github.com/replikativ/superv.async)
+- **Optional authentication**: Trusted-issuer JWT (cross-platform HS256, JWKS-backed RS256 for WorkOS/Clerk/OIDC) on the handshake, behind the `:auth` alias — see [Authentication](#authentication-optional)
 
 ## Used By
 
@@ -203,9 +204,75 @@ Middlewares are composable functions that transform the `[S peer [in out]]` chan
 - **Handler** (`kabel.middleware.handler`): Generic callback middleware for custom transforms
 - **WAMP** (`kabel.middleware.wamp`): Experimental WAMP protocol client
 
-### External Middlewares
+## Authentication (optional)
 
-- **[kabel-auth](https://github.com/replikativ/kabel-auth)**: Authentication with JWT, OAuth, and passwordless email verification
+kabel ships an optional authentication subsystem under `kabel.auth.*`, kept
+behind the `:auth` alias so the **base library pulls no JSON/JWT/crypto
+dependencies**. It provides trusted-issuer JWT validation on the WebSocket
+handshake, cross-platform (JVM + browser + Node) HS256, JWKS-backed RS256 for
+external identity providers (WorkOS, Clerk, Auth0, …), password hashing, reitit
+auth routes, and a pluggable identity/session store.
+
+> This was previously the separate `kabel-auth` library; it has been folded into
+> kabel so the transport and its auth layer version and release together. The
+> namespaces moved `kabel-auth.* → kabel.auth.*`. The old
+> [kabel-auth](https://github.com/replikativ/kabel-auth) repo is deprecated.
+
+Add the auth dependencies (mirrors kabel's `:auth` alias — only needed if you use auth):
+
+```clojure
+;; deps.edn
+{:aliases {:auth {:extra-deps {metosin/jsonista    {:mvn/version "1.0.0"}
+                               buddy/buddy-hashers  {:mvn/version "2.0.167"}
+                               org.replikativ/geheimnis {:mvn/version "0.2.33"}}}}}
+```
+
+### Validate tokens on the WebSocket handshake
+
+```clojure
+(require '[kabel.auth.jwt :as jwt]
+         '[kabel.auth.http-kit :as auth-hk]
+         '[superv.async :refer [S]])
+
+;; A validator is (fn [ring-req] -> principal-map | nil).
+(def validate! (jwt/build-bearer-validator {:alg :HS256 :secret "your-secret"}))
+
+(def handler
+  (auth-hk/create-authenticated-http-kit-handler! S url peer-id validate!))
+```
+
+Authenticated messages carry `:kabel/principal` (the JWT claims). HS256 signing
+(`jwt/sign-hs256`) and verification work identically on the JVM and in
+ClojureScript (browser/Node), so a CLJS peer can both mint and verify tokens.
+RS256 verification is JVM-only.
+
+### Trusted-issuer registry + external providers (JWKS)
+
+Register multiple issuers keyed by the token `iss`; the alg is **pinned per
+issuer** (never taken from the token header — this defeats `alg:none` and
+RS256→HS256 downgrades). A JWKS resolver fetches and caches an issuer's rotating
+public keys — the WorkOS / Clerk / OIDC path, out of the box:
+
+```clojure
+(require '[kabel.auth.jwks :as jwks])
+
+(def validate!
+  (jwt/build-bearer-validator
+   {:issuers {"simmis" {:alg :HS256 :secret secret}
+              "https://api.workos.com/user_management/CLIENT_ID"
+              {:alg :RS256 :jwks-url "https://api.workos.com/sso/jwks/CLIENT_ID"}}
+    :key-resolver (jwks/make-key-resolver)}))     ; per-url cache, refetch on kid miss
+```
+
+### Identity / session store
+
+`kabel.auth.store.protocol/AuthStore` abstracts party + session storage. A
+portable in-memory store ships for tests and lightweight peers
+(`kabel.auth.store.memory`, `.cljc` — JVM, Node and browser); a datahike-backed
+store ships for the JVM (`kabel.auth.store.datahike`, needs the consumer's
+datahike). Password hashing (`kabel.auth.password`, buddy-hashers) and reitit
+auth routes (`kabel.auth.routes`: login / register / refresh) complete a
+server-side credential flow. Auth tests run with `clojure -X:auth:test`.
 
 ## Rationale
 

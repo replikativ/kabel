@@ -9,7 +9,7 @@
         com.cognitect/transit-cljs {:mvn/version "0.8.280"}
         cheshire/cheshire {:mvn/version "5.13.0"}
         org.replikativ/incognito {:mvn/version "0.3.69"}
-        org.replikativ/hasch {:mvn/version "0.3.96"}
+        org.replikativ/hasch {:mvn/version "0.4.100"}
         org.replikativ/logging {:mvn/version "0.1.3"}
         org.clojure/data.fressian {:mvn/version "1.0.0"}
         com.github.pkpkpk/fress {:mvn/version "0.4.312"}
@@ -18,6 +18,18 @@
         org.glassfish.tyrus/tyrus-client {:mvn/version "1.13.1"}
         org.glassfish.tyrus/tyrus-container-grizzly-client {:mvn/version "1.13.1"}}
  :aliases {:dev {:extra-deps {thheller/shadow-cljs {:mvn/version "2.28.20"}}}
+           ;; Optional auth subsystem (kabel.auth.*) — kept off the base graph so
+           ;; a non-auth kabel user pulls no JSON/JWT/password deps.
+           :auth {:extra-deps {metosin/jsonista {:mvn/version "1.0.0"}
+                               buddy/buddy-hashers {:mvn/version "2.0.167"}
+                               ;; portable crypto (HS256 verify on JVM + CLJS).
+                               org.replikativ/geheimnis {:mvn/version "0.2.33"}}}
+           ;; The datahike-backed AuthStore (kabel.auth.store.datahike) — datahike
+           ;; is the consumer's to provide; pinned to the stack's main here for tests.
+           ;; datahike is the consumer's to provide. For kabel's own store tests we
+           ;; overlay the co-developed checkout (already prepped, tracks the stack's
+           ;; main); a release swaps this for a Maven datahike coordinate.
+           :auth-store-datahike {:extra-deps {org.replikativ/datahike {:local/root "../datahike"}}}
            :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}
                                io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}

@@ -154,7 +154,16 @@
           (swap! sent inc))
         (doseq [transport subscribers]
           (try
-            (put? S transport msg)
+            ;; Use put?'s callback to detect closed subscriber channels.
+            ;; `async/put!` returns false (and the callback receives false)
+            ;; when the channel is closed. We remove the dead subscriber so
+            ;; subsequent publishes don't visit it and so disconnected
+            ;; clients don't accumulate in the topic's subscriber set.
+            (put? S transport msg
+                  (fn [delivered?]
+                    (when-not delivered?
+                      (log/debug :pubsub/removing-closed-subscriber {:topic topic})
+                      (remove-subscriber! peer topic transport))))
             (swap! sent inc)
             (catch #?(:clj Exception :cljs js/Error) e
               (log/warn :pubsub/publish-failed {:topic topic :error (str e)})))))
@@ -225,17 +234,38 @@
 (defn- handle-subscription!
   "Handle a subscription request from a client.
 
+   `authorize-fn` is (fn [principal topic] -> truthy) — the join-time gate. The
+   `principal` is whatever an upstream middleware stamped on the message as
+   `:kabel/principal` (e.g. kabel-auth's annotate-msg); pubsub itself stays
+   auth-agnostic. A topic that fails the gate gets a `:pubsub/error` and no
+   subscription — so authorizing the subscribe authorizes the whole stream,
+   since publishes fan out to the subscriber set without re-checking.
+
    Returns channel yielding {:ok topics} or {:error ...}"
-  [S peer out msg pending-acks]
+  [S peer out msg pending-acks authorize-fn]
   (go-try S
           (let [{:keys [id topics client-states]} msg
+                principal (:kabel/principal msg)
                 successful-topics (atom #{})]
             (log/debug :pubsub/handle-subscription {:topics topics :msg-id id})
 
       ;; Process each topic
             (doseq [topic topics]
-              (if-let [topic-config (get-topic-config peer topic)]
-                (let [{:keys [strategy opts]} topic-config
+              (cond
+          ;; Topic not registered on this peer
+                (not (get-topic-config peer topic))
+                (do
+                  (log/warn :pubsub/topic-not-found {:topic topic})
+                  (>? S out (proto/error-msg topic "Topic not registered")))
+
+          ;; Registered, but the subject may not subscribe
+                (not (authorize-fn principal topic))
+                (do
+                  (log/warn :pubsub/subscription-denied {:topic topic})
+                  (>? S out (proto/error-msg topic "Not authorized")))
+
+                :else
+                (let [{:keys [strategy opts]} (get-topic-config peer topic)
                       client-state (get client-states topic)
                       handshake-ch (proto/-handshake-items strategy client-state)]
 
@@ -250,12 +280,7 @@
                         (swap! successful-topics conj topic))
                       (do
                         (log/warn :pubsub/subscription-failed {:topic topic :error (:error result)})
-                        (remove-subscriber! peer topic out)))))
-
-          ;; Topic not registered
-                (do
-                  (log/warn :pubsub/topic-not-found {:topic topic})
-                  (>? S out (proto/error-msg topic "Topic not registered")))))
+                        (remove-subscriber! peer topic out)))))))
 
       ;; Send subscribe-ack with successful topics
             (>? S out (proto/subscribe-ack-msg id @successful-topics))
@@ -366,7 +391,11 @@
    Stores :pubsub/out channel in peer state for client-side subscribe/unsubscribe."
   [opts]
   (fn [[S peer [in out]]]
-    (let [pass-in (chan)
+    (let [;; Join-time subscribe authorization. Default permissive so kabel
+          ;; stays a plain pub/sub substrate; an app injects a policy that reads
+          ;; the `:kabel/principal` an upstream auth middleware stamped.
+          authorize-fn (get opts :authorize-fn (fn [_principal _topic] true))
+          pass-in (chan)
           pass-out (chan)
           p (pub in msg-type-dispatch)
 
@@ -403,7 +432,7 @@
       ;; Handle subscribe requests (server-side)
       (go-loop-super S [msg (<? S subscribe-ch)]
                      (when msg
-                       (handle-subscription! S peer out msg pending-acks)
+                       (handle-subscription! S peer out msg pending-acks authorize-fn)
                        (recur (<? S subscribe-ch))))
 
       ;; Handle subscribe-ack (client-side)
@@ -535,6 +564,9 @@
    Options:
    - :on-publish - (fn [topic payload]) callback
    - :on-handshake-complete - (fn [topic]) callback
+   - :authorize-fn - (fn [principal topic] -> truthy) join-time subscribe gate;
+     `principal` is the message's `:kabel/principal` (stamped by an upstream
+     auth middleware). Default permits everything.
 
    Usage with kabel:
    ```clojure

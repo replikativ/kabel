@@ -155,6 +155,25 @@
               publishes (filter #(= :publish (:type %)) client-received)]
           (is (= 1 (count publishes)) "Client should not receive after unsubscribe"))))))
 
+(deftest subscribe-on-handshake-complete-test
+  (testing ":on-handshake-complete passed to subscribe! fires, per topic"
+    (with-peers
+      (let [completed (atom [])
+            _ (pubsub/register-topic! *server-peer* :hs-topic
+                                      {:strategy (make-stateful-strategy {:a 1 :b 2})})
+            client-strategy (make-stateful-strategy {})]
+
+        ;; The callback is registered HERE, on the subscription — it used to be
+        ;; destructured and dropped, so it never fired and a caller gating on it hung.
+        (<?? S (pubsub/subscribe! *client-peer* #{:hs-topic}
+                                  {:strategies {:hs-topic client-strategy}
+                                   :on-handshake-complete (fn [t] (swap! completed conj t))}))
+
+        (<?? S (timeout 800))
+
+        (is (= [:hs-topic] @completed)
+            "subscribe!'s :on-handshake-complete fires once with the topic")))))
+
 (deftest multiple-topics-integration-test
   (testing "Subscribe to multiple topics with different data"
     (with-peers

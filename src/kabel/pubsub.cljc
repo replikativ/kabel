@@ -302,9 +302,10 @@
 
 (defn- init-subscription-state!
   "Initialize client-side subscription state."
-  [peer topic strategy]
+  [peer topic strategy on-handshake-complete]
   (update-pubsub-state! peer assoc-in [:subscriptions topic]
                         {:strategy strategy
+                         :on-handshake-complete on-handshake-complete
                          :handshake-complete? false}))
 
 (defn- mark-handshake-complete!
@@ -333,7 +334,7 @@
     (go-try S
       ;; Initialize subscription state
             (doseq [topic topics]
-              (init-subscription-state! peer topic (get strategies topic)))
+              (init-subscription-state! peer topic (get strategies topic) on-handshake-complete))
 
       ;; Build client-states (await async init)
             (let [client-states (loop [topics-seq (seq topics)
@@ -498,7 +499,14 @@
       (go-loop-super S [msg (<? S handshake-complete-ch)]
                      (when msg
                        (let [{:keys [topic]} msg
-                             on-complete (get opts :on-handshake-complete)]
+                             ;; Prefer the PER-SUBSCRIPTION callback registered by `subscribe!`,
+                             ;; falling back to a peer-wide one from the middleware opts. Only the
+                             ;; middleware-level opt used to be read, so an :on-handshake-complete
+                             ;; passed to `subscribe!` — which its docstring advertises — was
+                             ;; destructured and silently dropped, and never fired.
+                             on-complete (or (get-in (get-pubsub-state peer)
+                                                     [:subscriptions topic :on-handshake-complete])
+                                             (get opts :on-handshake-complete))]
                          (log/info :pubsub/handshake-complete-received {:topic topic})
                          (mark-handshake-complete! peer topic)
                          (when on-complete

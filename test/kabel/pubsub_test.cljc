@@ -226,3 +226,73 @@
            (<?? S (handle-subscription! S peer out sub-msg (atom {})
                                         (fn [principal _topic] (reset! seen principal) true)))
            (is (= {:sub "alice"} @seen)))))))
+
+;; =============================================================================
+;; Publish authorization gate (:authorize-fn on the WRITE path)
+;; =============================================================================
+
+#?(:clj
+   (deftest publish-authorize-gate-test
+     ;; The gate used to be consulted on subscribe ONLY, so authorization decided
+     ;; who could READ a store while any peer that could reach a registered topic
+     ;; could `-apply-publish` into it. For konserve-sync that is a write into the
+     ;; backing store with no grant checked.
+     (let [handle-publish! @#'pubsub/handle-publish!
+           drain (fn [out]
+                   (loop [acc []]
+                     (let [[v _] (async/alts!! [out (timeout 300)])]
+                       (if v (recur (conj acc v)) acc))))
+           ;; a strategy that records what was applied, standing in for a store
+           applied (atom [])
+           ;; only -apply-publish is exercised on this path
+           recording-strategy (reify proto/PSyncStrategy
+                                (-apply-publish [_ payload]
+                                  (go-try S (swap! applied conj payload) true)))
+           pub-msg {:type :pubsub/publish :topic :t :payload {:k :v}
+                    :kabel/principal {:sub "mallory"}}]
+
+       (testing "denied principal: nothing applied, :pubsub/error returned"
+         (reset! applied [])
+         (let [peer (make-test-peer)
+               out (chan 100)]
+           (pubsub/register-topic! peer :t {:strategy recording-strategy})
+           (<?? S (handle-publish! S peer out pub-msg nil
+                                   (fn [_principal _topic] false)))
+           (is (= [] @applied)
+               "a denied publish must not reach the topic's strategy")
+           (is (some #(and (= :pubsub/error (:type %))
+                           (= :pubsub/unauthorized (:error %))) (drain out))
+               "the sender is told the publish was refused")))
+
+       (testing "allowed principal: the publish still applies"
+         (reset! applied [])
+         (let [peer (make-test-peer)
+               out (chan 100)]
+           (pubsub/register-topic! peer :t {:strategy recording-strategy})
+           (<?? S (handle-publish! S peer out pub-msg nil
+                                   (fn [_principal _topic] true)))
+           (is (= [{:k :v}] @applied)
+               "an authorized publish is applied unchanged")))
+
+       (testing "the gate sees the message's :kabel/principal and topic"
+         (reset! applied [])
+         (let [peer (make-test-peer)
+               out (chan 100)
+               seen (atom nil)]
+           (pubsub/register-topic! peer :t {:strategy recording-strategy})
+           (<?? S (handle-publish! S peer out pub-msg nil
+                                   (fn [principal topic]
+                                     (reset! seen [principal topic]) true)))
+           (is (= [{:sub "mallory"} :t] @seen))))
+
+       (testing "a denied publish is not forwarded to other subscribers"
+         (reset! applied [])
+         (let [peer (make-test-peer)
+               out (chan 100)
+               other (chan 100)]
+           (pubsub/register-topic! peer :t {:strategy recording-strategy})
+           (@#'pubsub/add-subscriber! peer :t other)
+           (<?? S (handle-publish! S peer out pub-msg nil
+                                   (fn [_principal _topic] false)))
+           (is (empty? (drain other))
+               "refusing a write must also stop it reaching readers"))))))

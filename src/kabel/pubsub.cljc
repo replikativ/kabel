@@ -231,6 +231,54 @@
                           {:error (ex-info "Handshake batch ack timeout"
                                            {:topic topic :batch-idx batch-idx})}))))))))))
 
+(defn- handle-publish!
+  "Apply an inbound `:pubsub/publish` and forward it to the topic's other
+   subscribers.
+
+   `authorize-fn` is (fn [principal topic] -> truthy) — the SAME gate
+   `handle-subscription!` applies at join time, applied here to the WRITE. It
+   was previously consulted on subscribe only, so a peer that could reach a
+   registered topic could `-apply-publish` into its store without holding any
+   grant on it: authorization decided who could READ a store while anyone could
+   WRITE one. A denied publish is dropped and answered with `:pubsub/error`; it
+   is neither applied locally nor forwarded, so a refused write cannot reach
+   other subscribers either."
+  [S peer out msg on-publish authorize-fn]
+  (go-try S
+          (let [{:keys [topic payload]} msg
+                principal (:kabel/principal msg)
+          ;; Server-side (topic registered) / client-side (subscribed).
+                topic-config (get-topic-config peer topic)
+                sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
+                strategy (or (:strategy topic-config) (:strategy sub-state))
+                subscribers (get-subscribers peer topic)]
+            (if-not (authorize-fn principal topic)
+              (do
+                (log/warn :pubsub/publish-denied {:topic topic})
+                (>? S out {:type :pubsub/error
+                           :topic topic
+                           :error :pubsub/unauthorized
+                           :message "not authorized to publish to this topic"}))
+              (do
+                (log/debug :pubsub/publish-received {:topic topic :subscriber-count (count subscribers)})
+          ;; Apply locally
+                (when strategy
+                  (<? S (proto/-apply-publish strategy payload)))
+                (when on-publish
+                  (on-publish topic payload))
+          ;; Server-side: forward to other subscribers (except the sender).
+          ;; Subscribers are the transport channels from connected clients, not
+          ;; the peer's own out channel, so `out` identifies the sender.
+                (when (and topic-config (seq subscribers))
+                  (log/debug :pubsub/forwarding-publish {:topic topic :count (count subscribers)})
+                  (let [fwd-msg (proto/publish-msg topic payload)]
+                    (doseq [transport subscribers]
+                      (when (not= transport out)
+                        (try
+                          (>? S transport fwd-msg)
+                          (catch #?(:clj Exception :cljs js/Error) e
+                            (log/warn :pubsub/forward-failed {:topic topic :error (str e)}))))))))))))
+
 (defn- handle-subscription!
   "Handle a subscription request from a client.
 
@@ -396,6 +444,7 @@
           ;; stays a plain pub/sub substrate; an app injects a policy that reads
           ;; the `:kabel/principal` an upstream auth middleware stamped.
           authorize-fn (get opts :authorize-fn (fn [_principal _topic] true))
+          on-publish (get opts :on-publish)
           pass-in (chan)
           pass-out (chan)
           p (pub in msg-type-dispatch)
@@ -516,36 +565,7 @@
       ;; Handle publish (both sides)
       (go-loop-super S [msg (<? S publish-ch)]
                      (when msg
-                       (let [{:keys [topic payload]} msg
-                ;; Check server-side (topic registered)
-                             topic-config (get-topic-config peer topic)
-                ;; Check client-side (subscribed)
-                             sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
-                             strategy (or (:strategy topic-config) (:strategy sub-state))
-                             on-publish (get opts :on-publish)
-                ;; Get subscribers for forwarding (server-side only)
-                             subscribers (get-subscribers peer topic)]
-                         (log/debug :pubsub/publish-received {:topic topic :subscriber-count (count subscribers)})
-            ;; Apply locally
-                         (when strategy
-                           (<? S (proto/-apply-publish strategy payload)))
-                         (when on-publish
-                           (on-publish topic payload))
-            ;; Server-side: forward to other subscribers (except the sender)
-            ;; Note: We forward to all subscribers since the sender is the out channel
-            ;; which is not in the subscribers set (subscribers are the transport channels
-            ;; from connected clients, not the peer's own out channel)
-                         (when (and topic-config (seq subscribers))
-                           (log/debug :pubsub/forwarding-publish {:topic topic :count (count subscribers)})
-                           (let [fwd-msg (proto/publish-msg topic payload)]
-                             (doseq [transport subscribers]
-                  ;; Don't forward back to sender (sender is 'out' which is the channel
-                  ;; that received this message, so we compare with subscriber transports)
-                               (when (not= transport out)
-                                 (try
-                                   (>? S transport fwd-msg)
-                                   (catch #?(:clj Exception :cljs js/Error) e
-                                     (log/warn :pubsub/forward-failed {:topic topic :error (str e)}))))))))
+                       (<? S (handle-publish! S peer out msg on-publish authorize-fn))
                        (recur (<? S publish-ch))))
 
       ;; Pass through unrelated messages

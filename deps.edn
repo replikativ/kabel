@@ -3,7 +3,7 @@
                  :fn compile-java
                  :ensure "target/classes"}
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        org.replikativ/boring {:mvn/version "0.1.17"}
+        org.replikativ/boring {:mvn/version "0.1.19"}
         org.clojure/clojurescript {:mvn/version "1.11.132"}
         org.replikativ/superv.async {:mvn/version "0.3.50"}
         com.cognitect/transit-clj {:mvn/version "1.0.333"}

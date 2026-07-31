@@ -9,15 +9,15 @@
           vec)
          [0 0 0 11 1 2 3])))
 
-(deftest boring-frame-test
+(deftest cbor-frame-test
   (is (= [0 0 0 14 1 2 3]
-         (vec (to-binary {:kabel/serialization :boring
+         (vec (to-binary {:kabel/serialization :cbor
                           :kabel/payload (byte-array [1 2 3])})))))
 
 (deftest older-peers-keep-working-test
   (testing "a frame built by HAND, not by to-binary, must still decode as
             :fressian. Round-tripping our own writer would not prove this --
-            the point is that bytes from a peer that predates :boring are
+            the point is that bytes from a peer that predates :cbor are
             unaffected by adding it."
     (let [frame (byte-array [0 0 0 13 1 2 3])
           {:keys [kabel/serialization kabel/payload]} (from-binary frame)]

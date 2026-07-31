@@ -15,15 +15,15 @@
             :transit-json    11
             :transit-msgpack 12
             :fressian        13
-            :boring          14}
+            :cbor            14}
            table/encoding-table))))
 
 (deftest boring-is-additive
-  (testing "adding :boring must not have disturbed any existing id"
+  (testing "adding :cbor must not have disturbed any existing id"
     (is (= 13 (get table/encoding-table :fressian)))
     (is (= :fressian (get table/decoding-table 13)))
-    (is (= 14 (get table/encoding-table :boring)))
-    (is (= :boring (get table/decoding-table 14)))))
+    (is (= 14 (get table/encoding-table :cbor)))
+    (is (= :cbor (get table/decoding-table 14)))))
 
 (deftest decoding-table-is-a-bijection
   (testing "two keywords sharing an id would make decoding ambiguous"
@@ -44,7 +44,7 @@
       (is (= 99 (:id (ex-data e))) "the id is in the data, not only the message"))
     (testing "and known ids still resolve"
       (is (= :fressian (table/decoding-for 13)))
-      (is (= :boring (table/decoding-for 14)))
+      (is (= :cbor (table/decoding-for 14)))
       (is (= :binary (table/decoding-for 0)) "including 0, which is falsy-adjacent"))))
 
 (deftest unknown-serialization-throws-on-both-platforms
@@ -58,4 +58,4 @@
                  (table/encoding-for nil)))
     (testing "and known ones still resolve"
       (is (= 13 (table/encoding-for :fressian)))
-      (is (= 14 (table/encoding-for :boring))))))
+      (is (= 14 (table/encoding-for :cbor))))))

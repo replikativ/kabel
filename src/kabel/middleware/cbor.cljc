@@ -1,5 +1,9 @@
-(ns kabel.middleware.boring
-  "boring (CBOR) serialization middleware for kabel.
+(ns kabel.middleware.cbor
+  "CBOR serialization middleware for kabel, implemented with org.replikativ/boring.
+
+  Named for the FORMAT, like `kabel.middleware.fressian` and
+  `kabel.middleware.transit`: what goes on the wire is CBOR, and which library
+  writes it is an implementation detail a peer never sees.
 
   Frame id **14**, strictly additive to `:fressian` 13 — see
   `kabel.binary.table`.
@@ -34,8 +38,8 @@
 
     1. deploy EVERY peer on `dual-read-fressian-write` — understands 14, still
        writes 13, so the wire does not change;
-    2. once no peer predates step 1, switch writers to `dual-read-boring-write`;
-    3. optionally, much later, drop to plain `boring`.
+    2. once no peer predates step 1, switch writers to `dual-read-cbor-write`;
+    3. optionally, much later, drop to plain `cbor`.
 
   There is no way to skip step 1."
   (:require [boring.core :as boring]
@@ -45,7 +49,7 @@
   #?(:cljs (:require-macros [superv.async :refer [go-try]]
                             [clojure.core.async :refer [go]])))
 
-(def ^:const serialization-key :boring)
+(def ^:const serialization-key :cbor)
 
 (defn record-registry
   "Fold incognito-style record handlers into `registry`. Returns a NEW registry.
@@ -76,15 +80,15 @@
       (:reg c)
       (:reg (reset! cache {:src h :reg (record-registry base h)})))))
 
-(defn boring
+(defn cbor
   "Serialize all incoming and outgoing values as CBOR via boring.
 
   Arities mirror `kabel.middleware.fressian/fressian`:
 
-    (boring peer-config)
-    (boring registry-atom ignored-write-handlers peer-config)
-    (boring registry-atom ignored-write-handlers
-            incognito-read-atom incognito-write-atom peer-config)
+    (cbor peer-config)
+    (cbor registry-atom ignored-write-handlers peer-config)
+    (cbor registry-atom ignored-write-handlers
+          incognito-read-atom incognito-write-atom peer-config)
 
   `registry-atom` holds a boring registry VALUE (see `boring.core/tag-registry`,
   `register-tag`, `register-record`) used for both directions. The
@@ -99,9 +103,9 @@
     homogeneous ARRAYS of maps; on nested or scattered maps it measures +0.0%.
     Turning it on globally would be cargo cult."
   ([peer-config]
-   (boring (atom (boring/tag-registry)) (atom {}) (atom {}) (atom {}) peer-config))
+   (cbor (atom (boring/tag-registry)) (atom {}) (atom {}) (atom {}) peer-config))
   ([registry-atom ignored-write-handlers peer-config]
-   (boring registry-atom ignored-write-handlers (atom {}) (atom {}) peer-config))
+   (cbor registry-atom ignored-write-handlers (atom {}) (atom {}) peer-config))
   ([registry-atom _ignored-write-handlers
     incognito-read-handlers-atom _incognito-write-handlers-atom
     [S peer [in out]]]
@@ -142,14 +146,14 @@
 ;; the cost is two extra channels and two go-loops per connection.
 ;; ---------------------------------------------------------------------------
 
-(defn dual-read-boring-write
+(defn dual-read-cbor-write
   "Reads frames 13 and 14; writes 14. **Step 2** of the rollout — deploy only
   once no peer predates `dual-read-fressian-write`."
   [peer-config]
-  (boring (fressian-mw/fressian peer-config)))
+  (cbor (fressian-mw/fressian peer-config)))
 
 (defn dual-read-fressian-write
   "Reads frames 13 and 14; writes 13. **Step 1** of the rollout — safe to
   deploy anywhere, because it does not change the wire."
   [peer-config]
-  (fressian-mw/fressian (boring peer-config)))
+  (fressian-mw/fressian (cbor peer-config)))

@@ -22,11 +22,12 @@
    :transit-json    11
    :transit-msgpack 12
    :fressian        13
-   ;; boring (CBOR). Strictly additive: 13 keeps its slot forever. A peer that
-   ;; does not know 14 will NOT error on it -- `decoding-table` returns nil and
-   ;; the raw payload is passed through -- so both ends must understand 14
-   ;; before either starts writing it. See kabel.middleware.boring.
-   :boring          14})
+   ;; CBOR. Named for the FORMAT, like every other entry here -- a frame id
+   ;; declares what the bytes ARE, not which library produced them. (The
+   ;; implementation is org.replikativ/boring.) Strictly additive: 13 keeps its
+   ;; slot forever, and `decoding-for` makes an unknown id a loud error rather
+   ;; than a silent pass-through. See kabel.middleware.cbor.
+   :cbor            14})
 
 (def decoding-table (into {} (map (fn [[k v]] [v k])) encoding-table))
 

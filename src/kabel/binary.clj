@@ -26,7 +26,7 @@
 (defn from-binary [binary]
   (let [bais (ByteArrayInputStream. binary)
         dis (DataInputStream. bais)
-        encoding (decoding-table (.readInt dis))
+        encoding (table/decoding-for (.readInt dis))
         payload (byte-array (- (count binary) 4))]
     (.readFully dis payload)
     (if (= encoding :pr-str)

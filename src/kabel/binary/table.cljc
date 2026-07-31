@@ -30,6 +30,29 @@
 
 (def decoding-table (into {} (map (fn [[k v]] [v k])) encoding-table))
 
+(defn decoding-for
+  "The serialization keyword for a frame header's `id`, or throw.
+
+  An unknown id used to yield nil, and nil then flowed onward: every
+  serialization middleware guards its in-branch on a match, so the frame fell
+  through all of them and the RAW payload map reached application code as if it
+  were a decoded value. That is silent corruption, and it is the failure a peer
+  hits when it meets a codec added after it was built.
+
+  Failing loudly costs a dead connection instead. That is strictly better: a
+  connection that stops with a typed error naming the id is diagnosable, and a
+  peer quietly acting on undecoded bytes is not.
+
+  Note this does NOT remove the need to deploy read support before anyone
+  writes a new id -- it only converts the symptom from silence to an error.
+  Removing the need is what capability negotiation would do."
+  [id]
+  (or (get decoding-table id)
+      (throw (ex-info "kabel: unknown serialization id in frame header"
+                      {:type :kabel/unknown-serialization-id
+                       :id id
+                       :known (set (keys decoding-table))}))))
+
 (defn encoding-for
   "The int for `serialization`, or throw.
 

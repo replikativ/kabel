@@ -39,6 +39,20 @@
         wrapped)
       (.from js/Buffer wrapped))))
 
+(defn- header-id
+  "The frame's 4-byte BIG-ENDIAN header id, from a Uint8Array of its first four
+  bytes.
+
+  Extracted because all three platform branches below need it and only one of
+  them had it right: the Blob and react-native branches read `(aget 3)`, the low
+  byte alone, which agrees with the JVM's `.writeInt` only for ids <= 255 and
+  silently decodes a frame with id 256 as :binary (0). Latent rather than broken
+  today -- every id in the table is small -- but it is the same defect that was
+  fixed in the node branch, in the two branches that were missed."
+  [hdr]
+  (+ (* (aget hdr 0) 0x1000000) (* (aget hdr 1) 0x10000)
+     (* (aget hdr 2) 0x100) (aget hdr 3)))
+
 (defn from-binary [binary cb]
   (let [l (if (on-node?)
             (.-length binary) ;; Buffer
@@ -49,16 +63,14 @@
     (if (on-node?)
       (cb
        (let [hdr (js/Uint8Array. (.slice binary 0 4))
-             ;; Read all four header bytes, not just the last: reading (aget 3)
-             ;; alone silently accepts a frame whose real id is > 255.
-             encoding (decoding-table
-                       (+ (* (aget hdr 0) 0x1000000) (* (aget hdr 1) 0x10000)
-                          (* (aget hdr 2) 0x100) (aget hdr 3)))
              payload (.slice binary 4 l)]
          (try
-           (if (= encoding :pr-str)
+           ;; Inside the try: an unknown id now throws rather than yielding nil,
+           ;; and the caller learns about it as an ex-info value the same way it
+           ;; learns about a parse failure.
+           (if (= (table/decoding-for (header-id hdr)) :pr-str)
              (-> (.toString (.from js/Buffer payload) "utf8") read-string)
-             {:kabel/serialization encoding
+             {:kabel/serialization (table/decoding-for (header-id hdr))
               :kabel/payload (.from js/Buffer payload)})
            (catch js/Error e
              (ex-info "Cannot parse binary." {:error e})))))
@@ -66,18 +78,15 @@
         (let [fr (js/FileReader.)]
           (set! (.-onload fr)
                 #(let [b (.. % -target -result)
-                       encoding (-> (.slice b 0 4)
-                                    (js/Uint8Array.)
-                                    (aget 3)
-                                    decoding-table)
+                       hdr (js/Uint8Array. (.slice b 0 4))
                        payload (js/Uint8Array. (.slice b 4 l))]
                    (cb
                     (try
-                      (if (= encoding :pr-str)
+                      (if (= (table/decoding-for (header-id hdr)) :pr-str)
                         (-> payload
                             crypt/utf8ByteArrayToString
                             read-string)
-                        {:kabel/serialization encoding
+                        {:kabel/serialization (table/decoding-for (header-id hdr))
                          :kabel/payload payload})
                       (catch js/Error e
                         (ex-info "Cannot parse binary."
@@ -85,18 +94,15 @@
           (.readAsArrayBuffer fr binary))
         ;; react native as array buffer
         (let [b binary
-              encoding (-> (.slice b 0 4)
-                           (js/Uint8Array.)
-                           (aget 3)
-                           decoding-table)
+              hdr (js/Uint8Array. (.slice b 0 4))
               payload (js/Uint8Array. (.slice b 4 l))]
           (cb
            (try
-             (if (= encoding :pr-str)
+             (if (= (table/decoding-for (header-id hdr)) :pr-str)
                (-> payload
                    crypt/utf8ByteArrayToString
                    read-string)
-               {:kabel/serialization encoding
+               {:kabel/serialization (table/decoding-for (header-id hdr))
                 :kabel/payload payload})
              (catch js/Error e
                (ex-info "Cannot parse binary."

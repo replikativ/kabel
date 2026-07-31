@@ -29,6 +29,24 @@
   (testing "two keywords sharing an id would make decoding ambiguous"
     (is (= (count table/encoding-table) (count table/decoding-table)))))
 
+(deftest an-unknown-frame-id-fails-loudly
+  (testing "an unknown id used to decode to nil, and nil flowed onward: every
+            serialization middleware guards its in-branch on a match, so the
+            frame fell through all of them and the RAW payload reached
+            application code as though it were a decoded value.
+
+            That is the failure a peer hits when it meets a codec added after it
+            was built, and silence is the worst possible shape for it. A dead
+            connection carrying a typed error naming the id is diagnosable."
+    (let [e (try (table/decoding-for 99)
+                 (catch #?(:clj clojure.lang.ExceptionInfo :cljs cljs.core/ExceptionInfo) e e))]
+      (is (= :kabel/unknown-serialization-id (:type (ex-data e))))
+      (is (= 99 (:id (ex-data e))) "the id is in the data, not only the message"))
+    (testing "and known ids still resolve"
+      (is (= :fressian (table/decoding-for 13)))
+      (is (= :boring (table/decoding-for 14)))
+      (is (= :binary (table/decoding-for 0)) "including 0, which is falsy-adjacent"))))
+
 (deftest unknown-serialization-throws-on-both-platforms
   (testing "this used to diverge: the JVM threw an NPE from (int nil) while
             ClojureScript silently wrote 0 — which is :binary — because

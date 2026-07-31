@@ -4,7 +4,6 @@
                  :ensure "target/classes"}
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         org.replikativ/boring {:mvn/version "0.1.19"}
-        org.clojure/clojurescript {:mvn/version "1.11.132"}
         org.replikativ/superv.async {:mvn/version "0.3.50"}
         com.cognitect/transit-clj {:mvn/version "1.0.333"}
         com.cognitect/transit-cljs {:mvn/version "0.8.280"}
@@ -18,7 +17,12 @@
         org.glassfish.tyrus/tyrus-core {:mvn/version "1.13.1"}
         org.glassfish.tyrus/tyrus-client {:mvn/version "1.13.1"}
         org.glassfish.tyrus/tyrus-container-grizzly-client {:mvn/version "1.13.1"}}
- :aliases {:dev {:extra-deps {thheller/shadow-cljs {:mvn/version "2.28.20"}}}
+ ;; ClojureScript lives in :dev, NOT in :deps. It is a compile-time tool, and as
+ ;; a top-level dependency kabel imposed its version on every consumer -- which is
+ ;; how konserve-sync ended up with closure-library 0.0-20250515 against an older
+ ;; closure-compiler, a pairing that compiles cleanly and then dies at runtime.
+ :aliases {:dev {:extra-deps {org.clojure/clojurescript {:mvn/version "1.12.145"}
+                              thheller/shadow-cljs {:mvn/version "3.4.11"}}}
            ;; Optional auth subsystem (kabel.auth.*) — kept off the base graph so
            ;; a non-auth kabel user pulls no JSON/JWT/password deps.
            :auth {:extra-deps {metosin/jsonista {:mvn/version "1.0.0"}

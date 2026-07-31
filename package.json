@@ -6,7 +6,7 @@
     "websocket": "^1.0.34"
   },
   "devDependencies": {
-    "shadow-cljs": "^2.28.20"
+    "shadow-cljs": "^3.4.11"
   },
   "license": "EPL-1.0"
 }

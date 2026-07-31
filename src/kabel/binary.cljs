@@ -1,6 +1,7 @@
 (ns kabel.binary
   "This namespace provides a minimal binary encoding for all connection types."
   (:require [cljs.reader :refer [read-string]]
+            [kabel.binary.table :as table]
             [hasch.platform :refer [utf8]]
             [kabel.util :refer [on-node?]]
             [goog.crypt :as crypt]))
@@ -8,21 +9,25 @@
 ;; TODO this namespace needs a refactoring once the target platforms for js are
 ;; pinned down
 
-(def encoding-table {:binary          0
-                     :string          1
-                     :pr-str          2
-                     :transit-json    11
-                     :transit-msgpack 12
-                     :fressian        13})
-
-(def decoding-table (into {} (map (fn [[k v]] [v k])) encoding-table))
+;; Re-exported from kabel.binary.table so existing consumers keep working; the
+;; table itself lives there because this ns is platform-split and the JVM and
+;; ClojureScript copies used to drift.
+(def encoding-table table/encoding-table)
+(def decoding-table table/decoding-table)
 
 (defn to-binary [{:keys [kabel/serialization kabel/payload] :as m}]
   (let [payload (if-not serialization
                   (utf8 (pr-str m)) ;; fallback if no serialization middleware is present
                   payload)
         serialization (if-not serialization :pr-str serialization)
-        header (array 0 0 0 (encoding-table serialization))
+        ;; The header is a 4-byte BIG-ENDIAN int, matching the JVM's
+        ;; .writeInt. Writing only the low byte -- as this did -- agrees with
+        ;; the JVM only for ids <= 255 and silently truncates above.
+        e (table/encoding-for serialization)
+        header (array (bit-and (bit-shift-right e 24) 0xff)
+                      (bit-and (bit-shift-right e 16) 0xff)
+                      (bit-and (bit-shift-right e 8) 0xff)
+                      (bit-and e 0xff))
         ;; manual concat
         wrapped (js/Uint8Array. (+ 4 (.-length payload)))
         _ (.set wrapped (js/Uint8Array. header) 0)
@@ -43,10 +48,12 @@
               ))]
     (if (on-node?)
       (cb
-       (let [encoding (-> (.slice binary 0 4)
-                          (js/Uint8Array.)
-                          (aget 3)
-                          decoding-table)
+       (let [hdr (js/Uint8Array. (.slice binary 0 4))
+             ;; Read all four header bytes, not just the last: reading (aget 3)
+             ;; alone silently accepts a frame whose real id is > 255.
+             encoding (decoding-table
+                       (+ (* (aget hdr 0) 0x1000000) (* (aget hdr 1) 0x10000)
+                          (* (aget hdr 2) 0x100) (aget hdr 3)))
              payload (.slice binary 4 l)]
          (try
            (if (= encoding :pr-str)

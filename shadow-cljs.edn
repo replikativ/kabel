@@ -1,4 +1,4 @@
-{:deps {:aliases [:dev :test :auth]}
+{:deps {:aliases [:dev :test :auth :bench]}
 
  :dependencies []
 
@@ -33,4 +33,14 @@
   :integration
   {:target :node-test
    :output-to "target/integration-test.js"
-   :ns-regexp "integration-test$"}}}
+   :ns-regexp "integration-test$"}
+
+  ;; Bundle-size probes. Each pulls in exactly one codec, so the :advanced
+  ;; output measures what a consumer of that codec ships. :baseline is
+  ;; cljs.core alone and is subtracted to get the codec's own cost.
+  :bundle-baseline {:target :node-script :main kabelbench.baseline/main
+                    :output-to "target/bundle-baseline.js"}
+  :bundle-cbor     {:target :node-script :main kabelbench.cbor-only/main
+                    :output-to "target/bundle-cbor.js"}
+  :bundle-fressian {:target :node-script :main kabelbench.fressian-only/main
+                    :output-to "target/bundle-fressian.js"}}}

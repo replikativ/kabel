@@ -23,6 +23,9 @@
  ;; closure-compiler, a pairing that compiles cleanly and then dies at runtime.
  :aliases {:dev {:extra-deps {org.clojure/clojurescript {:mvn/version "1.12.145"}
                               thheller/shadow-cljs {:mvn/version "3.4.11"}}}
+           ;; Bundle-size probes: one entry point per codec, so an :advanced
+           ;; build measures what a consumer of THAT codec actually ships.
+           :bench {:extra-paths ["bench/src"]}
            ;; Optional auth subsystem (kabel.auth.*) — kept off the base graph so
            ;; a non-auth kabel user pulls no JSON/JWT/password deps.
            :auth {:extra-deps {metosin/jsonista {:mvn/version "1.0.0"}

@@ -3,7 +3,12 @@
                  :fn compile-java
                  :ensure "target/classes"}
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        org.replikativ/boring {:mvn/version "0.1.19"}
+        ;; :local/root while boring is pre-release, matching konserve and
+        ;; datahike. Pinned to a published 0.1.19 it silently kept an old
+        ;; build: kabel's tests passed against a boring several wire fixes
+        ;; behind the one konserve and datahike were using, which is the worst
+        ;; case -- green CI on a version nothing else in the stack runs.
+        org.replikativ/boring {:local/root "../boring"}
         org.replikativ/superv.async {:mvn/version "0.3.50"}
         com.cognitect/transit-clj {:mvn/version "1.0.333"}
         com.cognitect/transit-cljs {:mvn/version "0.8.280"}

@@ -44,28 +44,31 @@
            ;; overlay the co-developed checkout (already prepped, tracks the stack's
            ;; main); a release swaps this for a Maven datahike coordinate.
            :auth-store-datahike {:extra-deps {org.replikativ/datahike {:local/root "../datahike"}}}
-           ;; The DEFAULT http-kit dependency stays the release. Only the test
-           ;; alias overrides it, to the commit carrying permessage-deflate
-           ;; (http-kit/http-kit#617, not yet released). The client extension is
-           ;; ours and the server half is http-kit's; running them against each
-           ;; other is the only way to learn whether we agree about the wire
-           ;; format rather than merely agreeing with ourselves -- and it
-           ;; immediately found an RFC 7692 7.2.3.6 violation both of them had.
+           ;; The permessage-deflate cross-implementation tests need an
+           ;; http-kit that HAS the extension, which is an unreleased PR
+           ;; (http-kit/http-kit#617). That is a GIT dep, and http-kit is a lein
+           ;; project, so using it requires
            ;;
-           ;; http-kit is a lein project, so its git dep must be prepped before
-           ;; the classpath will build -- and it has to name the alias, because
-           ;; the override lives in one:
+           ;;   clojure -X:deps prep :aliases '[:pmd]'
            ;;
-           ;;   clojure -X:deps prep :aliases '[:test]'      (needs lein)
+           ;; It lives in its own alias for exactly that reason. Putting the
+           ;; override in :test turned CI red: `clojure -X:auth:test` and
+           ;; `shadow-cljs compile :node-test` both failed with "The following
+           ;; libs must be prepared before use", because our CI persists .m2
+           ;; and .npm to the workspace but not .gitlibs, and cannot prep a lein
+           ;; project anyway.
            ;;
-           ;; The tests skip with a message rather than passing vacuously if
-           ;; the class is absent. Drop this override once a release carries
-           ;; the extension.
-           :test {:extra-paths ["test"]
-                  :override-deps
-                  {http-kit/http-kit
-                   {:git/url "https://github.com/whilo/http-kit"
-                    :git/sha "694a8a62fcd4dbba31f21eb65ef710d81dd17f55"}}
+           ;; Without :pmd the tests SKIP with a message rather than passing
+           ;; vacuously -- they check for the class. Fold this away once
+           ;; http-kit releases the extension.
+           ;;
+           ;;   clojure -X:auth:test:pmd
+           :pmd {:override-deps
+                 {http-kit/http-kit
+                  {:git/url "https://github.com/whilo/http-kit"
+                   :git/sha "694a8a62fcd4dbba31f21eb65ef710d81dd17f55"}}}
+
+   :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}
                                io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
                   :exec-fn cognitect.test-runner.api/test

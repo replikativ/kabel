@@ -1,5 +1,23 @@
 # Change Log
 
+## Unreleased
+ - **CBOR wire format** (`kabel.middleware.cbor`, serialization id 14) backed by
+   [boring](https://github.com/replikativ/boring). Unlike fressian it runs on
+   ClojureScript from the same implementation, and unlike every other option
+   here the bytes are an IETF standard that a non-Clojure peer can read with
+   its own library.
+ - stringref (CBOR tags 25/256) defaults to **off** on this wire. It is a
+   schmorp extension most CBOR libraries do not implement, and it buys 0.3% on
+   a deflated socket — deflate already finds the repetition stringref encodes.
+ - `kabel.middleware.dual` for migrating a live fressian deployment in two
+   deploys rather than one flag day: read both formats first, switch writers
+   second.
+ - `decoding-for` now throws on an unknown serialization id instead of
+   returning nil. Every serialization middleware guards its in-branch on a
+   match, so a nil fell through all of them and the RAW payload map reached
+   application code as though it were a decoded value — silent corruption, and
+   exactly what a peer hits when it meets a codec added after it was built.
+
 ## 0.2.2
  - move to timbre for logging
  - only readable log messages

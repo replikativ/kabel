@@ -182,21 +182,42 @@ Middlewares are composable functions that transform the `[S peer [in out]]` chan
 
 ### Serialization Middlewares
 
-| Middleware | Description |
-|------------|-------------|
-| `kabel.middleware.transit/transit` | Efficient binary (JSON/MessagePack) with custom type support |
-| `kabel.middleware.fressian/fressian` | Clojure-optimized binary format |
-| `kabel.middleware.json/json` | Plain JSON for non-Clojure interop |
-| `identity` | EDN via pr-str/read-string (default) |
+| Middleware | id | Description |
+|------------|---:|-------------|
+| `kabel.middleware.cbor/cbor` | 14 | [boring][] — RFC 8949 CBOR. Fast, JVM **and** ClojureScript, and readable by any language |
+| `kabel.middleware.transit/transit` | | Efficient binary (JSON/MessagePack) with custom type support |
+| `kabel.middleware.fressian/fressian` | | Clojure-optimized binary format, JVM only |
+| `kabel.middleware.json/json` | | Plain JSON for non-Clojure interop |
+| `identity` | | EDN via pr-str/read-string (default) |
 
 ```clojure
-(require '[kabel.middleware.transit :refer [transit]])
+(require '[kabel.middleware.cbor :refer [cbor]])
 
 (def server
   (peer/server-peer S handler server-id
     my-middleware
-    transit)) ;; Use transit serialization
+    cbor)) ;; RFC 8949 CBOR on the wire
 ```
+
+**stringref is off by default here**, unlike boring's own default. Tags 25/256
+are a schmorp extension that most CBOR libraries do not implement, so leaving
+it on would make every frame unreadable to exactly the non-Clojure peers the
+format exists to reach. It buys almost nothing on this wire anyway once
+permessage-deflate is in play — on one 500-message capture, 95 624 raw bytes
+became 10 816 deflated with stringref on and 10 787 with it off, a 0.3%
+difference, because deflate finds the same repetition stringref does.
+
+### Migrating an existing fressian deployment
+
+A frame's leading 4 bytes are the serialization id, so a peer that receives an
+id it does not know cannot decode the frame. Switching every peer at once is
+not usually possible, so `kabel.middleware.dual` makes it two deploys:
+
+1. deploy every peer on `dual-read-fressian-write` — it *understands* CBOR
+   while still writing fressian, so old peers keep working;
+2. once no peer predates step 1, switch writers to `dual-read-cbor-write`.
+
+[boring]: https://github.com/replikativ/boring
 
 ### Utility Middlewares
 

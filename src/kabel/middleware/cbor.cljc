@@ -70,14 +70,20 @@
   most a handful of times in a connection's life, so an `identical?` check on
   the deref'd persistent map is both exact and free."
   []
-  (atom {:src ::none :reg nil}))
+  (atom {:base ::none :src ::none :reg nil}))
 
 (defn- registry-for [cache base handlers-atom]
   (let [h (if handlers-atom @handlers-atom {})
         c @cache]
-    (if (identical? (:src c) h)
+    ;; Keyed on BOTH the base registry and the handler map. Keying on the
+    ;; handlers alone meant that registering a new tag into `registry-atom`
+    ;; took effect for encoding immediately -- the write side derefs it per
+    ;; frame -- while decoding kept serving the registry cached before the
+    ;; change, for the life of the connection. Values written with the new tag
+    ;; then came back inert or failed to decode, in one direction only.
+    (if (and (identical? (:base c) base) (identical? (:src c) h))
       (:reg c)
-      (:reg (reset! cache {:src h :reg (record-registry base h)})))))
+      (:reg (reset! cache {:base base :src h :reg (record-registry base h)})))))
 
 (defn cbor
   "Serialize all incoming and outgoing values as CBOR via boring.

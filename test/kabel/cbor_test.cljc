@@ -134,3 +134,30 @@
              (put? S in {:kabel/serialization :cbor
                          :kabel/payload (boring/encode {:a 1})})
              (is (= {:a 1} (<?? S tin)))))))))
+
+#?(:clj
+   (deftest registry-changes-reach-the-decoder
+     (testing "registering a tag AFTER the middleware is built must take effect
+               in BOTH directions.
+
+               The decoder memoises its registry, and the cache used to be keyed
+               on the incognito handler map alone. Since the encoder derefs
+               registry-atom per frame, a new registration took effect for
+               writing immediately and for reading never -- for the life of the
+               connection, in one direction only, with no error. Keyed on the
+               base registry too."
+       (let [reg-atom (atom (boring/tag-registry))
+             {:keys [in tin]} (mw #(cbor reg-atom nil %))]
+         ;; Decode once to populate the cache.
+         (put? S in {:kabel/serialization :cbor :kabel/payload (boring/encode {:a 1})})
+         (is (= {:a 1} (<?? S tin)) "warm the registry cache")
+
+         ;; Register a record constructor, then decode a value that needs it.
+         (swap! reg-atom boring/register-record
+                "kabel.cbor_test.WirePoint" map->WirePoint)
+         (put? S in {:kabel/serialization :cbor
+                     :kabel/payload (boring/encode
+                                     (bdata/unknown-record "kabel.cbor_test.WirePoint"
+                                                           {:x 3 :y 4}))})
+         (is (= (->WirePoint 3 4) (<?? S tin))
+             "the decoder sees the registration, not the registry it cached")))))

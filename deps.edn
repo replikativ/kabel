@@ -19,6 +19,15 @@
         org.replikativ/logging {:mvn/version "0.1.3"}
         org.clojure/data.fressian {:mvn/version "1.0.0"}
         com.github.pkpkpk/fress {:mvn/version "0.4.312"}
+        ;; The WebSocket protocols ONLY -- 3.8 KB, and its only dependency is
+        ;; Clojure at test scope. Not ring/ring-core, which would drag in
+        ;; commons-io, commons-fileupload and two crypto libraries for an
+        ;; interface kabel implements in one namespace.
+        ;;
+        ;; This is what makes the server an adapter rather than a constant:
+        ;; kabel.ring-ws is written against these, and http-kit implements them
+        ;; (2.8.0+), as do both Jetty adapters.
+        org.ring-clojure/ring-websocket-protocols {:mvn/version "1.15.5"}
         http-kit/http-kit {:mvn/version "2.8.0"}
         org.glassfish.tyrus/tyrus-core {:mvn/version "1.13.1"}
         org.glassfish.tyrus/tyrus-client {:mvn/version "1.13.1"}
@@ -63,6 +72,17 @@
            ;; http-kit releases the extension.
            ;;
            ;;   clojure -X:auth:test:pmd
+           ;; Jetty, to prove kabel.ring-ws is an abstraction rather than a
+           ;; rename. An interface with one implementation agrees with itself
+           ;; no matter what it does; two implementations is what makes the
+           ;; Ring contract load-bearing. Test scope only -- http-kit remains
+           ;; the default and the only runtime server dependency.
+           ;;
+           ;; ring-jetty9-adapter, not ring/ring-jetty-adapter: the official one
+           ;; routes through Jetty's ee9 legacy servlet environment and is
+           ;; HTTP/1.1-only, while this tracks Jetty 12 core directly.
+           :jetty {:extra-deps {info.sunng/ring-jetty9-adapter {:mvn/version "0.40.2"}}}
+
            :pmd {:override-deps
                  {http-kit/http-kit
                   {:git/url "https://github.com/whilo/http-kit"

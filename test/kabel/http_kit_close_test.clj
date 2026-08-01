@@ -21,7 +21,16 @@
             [superv.async :refer [<?? go-try S]]
             [clojure.core.async :as async
              :refer [<! >! go timeout chan close! alts!! put!]]
-            [org.httpkit.server :refer [close]]))
+            ;; Closing through the Ring protocol, not http-kit's Channel: the
+            ;; channel-hub key is now whatever the adapter's wsp/Socket is, so
+            ;; a test that reached for org.httpkit.server/close only worked
+            ;; while the server was hardcoded.
+            [ring.websocket.protocols :as wsp]))
+
+(defn- close-socket!
+  "Close a channel-hub key, whichever adapter produced it."
+  [socket]
+  (wsp/-close socket 1000 "test"))
 
 (defn- capture-middleware
   "Middleware that copies the inbound (server-side) `[in out]` pair
@@ -102,7 +111,7 @@
           ;; the underlying WebSocket.)
           (let [[ch _] (first @channel-hub)]
             (is (some? ch) "client WS registered in channel-hub")
-            (close ch))
+            (close-socket! ch))
 
           ;; Give http-kit's on-close a moment to fire and the fix to
           ;; close `out`.
@@ -153,7 +162,7 @@
         (let [out (:out @captured)
               channel-hub (:channel-hub handler)
               [ch _] (first @channel-hub)]
-          (close ch)
+          (close-socket! ch)
           (<?? S (timeout 300))
 
           ;; Hammer 100 broadcasts onto the now-closed out. Each put

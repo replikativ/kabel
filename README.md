@@ -14,7 +14,9 @@
 
 - **Cross-platform**: Works on JVM, browser, Node.js, and React-Native
 - **Symmetric peers**: Server and client use identical patterns, enabling true P2P architectures
-- **Pluggable serialization**: Transit, Fressian, JSON, or EDN out of the box
+- **Pluggable serialization**: CBOR, Transit, Fressian, JSON, or EDN out of the box
+- **Pluggable server**: http-kit by default or Jetty 12, behind one Ring-based
+  interface — see [Server adapters](#server-adapters)
 - **Topic-based pub/sub**: Built-in publish/subscribe with backpressure and flow control
 - **Composable middleware**: Filter, transform, and route messages through stackable middleware
 - **Erlang-style supervision**: Exception handling via [superv.async](https://github.com/replikativ/superv.async)
@@ -182,21 +184,42 @@ Middlewares are composable functions that transform the `[S peer [in out]]` chan
 
 ### Serialization Middlewares
 
-| Middleware | Description |
-|------------|-------------|
-| `kabel.middleware.transit/transit` | Efficient binary (JSON/MessagePack) with custom type support |
-| `kabel.middleware.fressian/fressian` | Clojure-optimized binary format |
-| `kabel.middleware.json/json` | Plain JSON for non-Clojure interop |
-| `identity` | EDN via pr-str/read-string (default) |
+| Middleware | id | Description |
+|------------|---:|-------------|
+| `kabel.middleware.cbor/cbor` | 14 | [boring][] — RFC 8949 CBOR. Fast, JVM **and** ClojureScript, and readable by any language |
+| `kabel.middleware.transit/transit` | | Efficient binary (JSON/MessagePack) with custom type support |
+| `kabel.middleware.fressian/fressian` | | Clojure-optimized binary format, JVM only |
+| `kabel.middleware.json/json` | | Plain JSON for non-Clojure interop |
+| `identity` | | EDN via pr-str/read-string (default) |
 
 ```clojure
-(require '[kabel.middleware.transit :refer [transit]])
+(require '[kabel.middleware.cbor :refer [cbor]])
 
 (def server
   (peer/server-peer S handler server-id
     my-middleware
-    transit)) ;; Use transit serialization
+    cbor)) ;; RFC 8949 CBOR on the wire
 ```
+
+**stringref is off by default here**, unlike boring's own default. Tags 25/256
+are a schmorp extension that most CBOR libraries do not implement, so leaving
+it on would make every frame unreadable to exactly the non-Clojure peers the
+format exists to reach. It buys almost nothing on this wire anyway once
+permessage-deflate is in play — on one 500-message capture, 95 624 raw bytes
+became 10 816 deflated with stringref on and 10 787 with it off, a 0.3%
+difference, because deflate finds the same repetition stringref does.
+
+### Migrating an existing fressian deployment
+
+A frame's leading 4 bytes are the serialization id, so a peer that receives an
+id it does not know cannot decode the frame. Switching every peer at once is
+not usually possible, so `kabel.middleware.dual` makes it two deploys:
+
+1. deploy every peer on `dual-read-fressian-write` — it *understands* CBOR
+   while still writing fressian, so old peers keep working;
+2. once no peer predates step 1, switch writers to `dual-read-cbor-write`.
+
+[boring]: https://github.com/replikativ/boring
 
 ### Utility Middlewares
 
@@ -324,8 +347,16 @@ clj -M:ffix
 ## Testing
 
 ```bash
-# JVM tests
-clj -X:test
+# JVM tests (:auth is required — kabel.auth.jwt will not load without it)
+clj -X:auth:test
+
+# ...plus the Jetty half of the adapter parity test, which is what CI runs.
+# Without :jetty that half prints SKIPPED instead of running.
+clj -X:auth:test:jetty
+
+# ...plus permessage-deflate against an http-kit that has it (see :pmd in
+# deps.edn; needs a one-off `clojure -X:deps prep :aliases '[:pmd]'`)
+clj -X:auth:test:jetty:pmd
 
 # ClojureScript (Node.js)
 npx shadow-cljs compile node-test && node target/node-tests.js
@@ -341,14 +372,56 @@ npx shadow-cljs watch test
 ## Connectivity
 
 Currently kabel supports WebSockets via:
-- **Server**: [http-kit](https://github.com/http-kit/http-kit)
+- **Server**: [http-kit](https://github.com/http-kit/http-kit) (default) or
+  [Jetty 12](https://eclipse.dev/jetty/), see below
 - **JVM Client**: [Tyrus](https://projects.eclipse.org/projects/ee4j.tyrus) (chosen for GraalVM native compilation support)
 - **JS Client**: Native WebSocket API / w3c-websocket (Node.js)
+
+### Server adapters
+
+Server IO lives in `kabel.ring-ws`, written against
+[`ring.websocket.protocols`](https://github.com/ring-clojure/ring/tree/master/ring-websocket-protocols)
+rather than any one server. `kabel.http-kit` and `kabel.jetty` are thin
+namespaces that supply theirs; both take the same arguments and return the same
+map, so switching is one line:
+
+```clojure
+(:require [kabel.jetty :as jetty])          ;; instead of kabel.http-kit
+
+(peer/server-peer S
+  (jetty/create-jetty-handler! S url server-id)   ;; instead of create-http-kit-handler!
+  server-id middleware identity)
+```
+
+**http-kit is the default** and stays kabel's only declared server dependency:
+207 KB with no transitive runtime dependencies, virtual-threaded by default on
+JDK 21+, and native-image tested across nine platform combinations.
+
+**Reach for Jetty** when you want what http-kit does not offer: in-process TLS
+termination, HTTP/2, connection caps, idle timeouts, request-rate limiting, or
+metrics. It is a *provided* dependency — add it yourself:
+
+```clojure
+info.sunng/ring-jetty9-adapter {:mvn/version "0.40.2"}
+```
+
+That adapter rather than `ring/ring-jetty-adapter`: the official one routes
+through Jetty's ee9 legacy servlet environment and hardcodes HTTP/1.1, while
+this one tracks Jetty 12 core and exposes HTTP/2 and HTTP/3 as options. Options
+under `:server-opts` reach Jetty directly, so `:ssl?`, `:h2?`, `:max-idle-time`
+and `:thread-pool` work by naming them.
+
+One difference worth knowing: **Jetty negotiates
+[permessage-deflate](https://datatracker.ietf.org/doc/html/rfc7692) out of the
+box**, http-kit does not yet
+([http-kit#617](https://github.com/http-kit/http-kit/pull/617)). On a
+fressian/CBOR wire that is a large saving. kabel's Tyrus client offers the
+extension via `org.replikativ.kabel.PerMessageDeflateExtension`, so a JVM client
+gets compression against a Jetty-backed peer today.
 
 ## TODO
 
 ### Transport Alternatives
-- Investigate [Jetty](https://eclipse.dev/jetty/) or other server stacks as alternatives to http-kit
 - WebRTC data channels for true peer-to-peer without relay servers
 - [WebTransport](https://web.dev/webtransport/) (HTTP/3-based, multiple streams)
 - Server-Sent Events + HTTP POST for firewall-friendly scenarios

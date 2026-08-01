@@ -3,11 +3,15 @@
   (:require [clojure.set :as set]
             #?(:clj [superv.async :refer [<? >? go-loop-try]]
                :cljs [superv.async :refer [superv-init]])
-            #?(:clj [clojure.core.async :as async
-                     :refer [chan close!]]
-               :cljs [clojure.core.async :as async :refer [chan close!]]))
-  #?(:cljs (:require-macros [clojure.core.async :refer [go go-loop]]
-                            [superv.async :refer [<? >? go-loop-try]])))
+            ;; Both arms of the old reader conditional here were identical.
+            [clojure.core.async :as async :refer [chan close!]])
+  ;; No `(:require-macros [clojure.core.async :refer [go go-loop]])`: this
+  ;; namespace uses neither macro -- only go-loop-try, from superv.async -- and
+  ;; that unused require made the ns form INVALID under standard ClojureScript
+  ;; tooling ("`:as` alias must be unique", because clojure.core.async is
+  ;; rewritten to cljs.core.async and aliased twice). shadow-cljs tolerates it,
+  ;; so it never surfaced in kabel's own builds; `cljs.main` refuses to compile.
+  #?(:cljs (:require-macros [superv.async :refer [<? >? go-loop-try]])))
 
 (defn handler
   "Applies given callback functions to messages on [in out] channels and passes

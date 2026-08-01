@@ -3,7 +3,13 @@
                  :fn compile-java
                  :ensure "target/classes"}
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        org.clojure/clojurescript {:mvn/version "1.11.132"}
+        ;; A released coordinate now that boring is on Clojars. This was
+        ;; :local/root because an earlier pin silently kept a stale locally
+        ;; installed build -- kabel's tests passed against a boring several
+        ;; wire fixes behind the one konserve and datahike ran, which is the
+        ;; worst case: green CI on a version nothing else in the stack uses.
+        ;; A Clojars coordinate cannot drift that way.
+        org.replikativ/boring {:mvn/version "0.1.6"}
         org.replikativ/superv.async {:mvn/version "0.3.50"}
         com.cognitect/transit-clj {:mvn/version "1.0.333"}
         com.cognitect/transit-cljs {:mvn/version "0.8.280"}
@@ -13,11 +19,28 @@
         org.replikativ/logging {:mvn/version "0.1.3"}
         org.clojure/data.fressian {:mvn/version "1.0.0"}
         com.github.pkpkpk/fress {:mvn/version "0.4.312"}
+        ;; The WebSocket protocols ONLY -- 3.8 KB, and its only dependency is
+        ;; Clojure at test scope. Not ring/ring-core, which would drag in
+        ;; commons-io, commons-fileupload and two crypto libraries for an
+        ;; interface kabel implements in one namespace.
+        ;;
+        ;; This is what makes the server an adapter rather than a constant:
+        ;; kabel.ring-ws is written against these, and http-kit implements them
+        ;; (2.8.0+), as do both Jetty adapters.
+        org.ring-clojure/ring-websocket-protocols {:mvn/version "1.15.5"}
         http-kit/http-kit {:mvn/version "2.8.0"}
         org.glassfish.tyrus/tyrus-core {:mvn/version "1.13.1"}
         org.glassfish.tyrus/tyrus-client {:mvn/version "1.13.1"}
         org.glassfish.tyrus/tyrus-container-grizzly-client {:mvn/version "1.13.1"}}
- :aliases {:dev {:extra-deps {thheller/shadow-cljs {:mvn/version "2.28.20"}}}
+ ;; ClojureScript lives in :dev, NOT in :deps. It is a compile-time tool, and as
+ ;; a top-level dependency kabel imposed its version on every consumer -- which is
+ ;; how konserve-sync ended up with closure-library 0.0-20250515 against an older
+ ;; closure-compiler, a pairing that compiles cleanly and then dies at runtime.
+ :aliases {:dev {:extra-deps {org.clojure/clojurescript {:mvn/version "1.12.145"}
+                              thheller/shadow-cljs {:mvn/version "3.4.11"}}}
+           ;; Bundle-size probes: one entry point per codec, so an :advanced
+           ;; build measures what a consumer of THAT codec actually ships.
+           :bench {:extra-paths ["bench/src"]}
            ;; Optional auth subsystem (kabel.auth.*) — kept off the base graph so
            ;; a non-auth kabel user pulls no JSON/JWT/password deps.
            :auth {:extra-deps {metosin/jsonista {:mvn/version "1.0.0"}
@@ -30,7 +53,42 @@
            ;; overlay the co-developed checkout (already prepped, tracks the stack's
            ;; main); a release swaps this for a Maven datahike coordinate.
            :auth-store-datahike {:extra-deps {org.replikativ/datahike {:local/root "../datahike"}}}
-           :test {:extra-paths ["test"]
+           ;; The permessage-deflate cross-implementation tests need an
+           ;; http-kit that HAS the extension, which is an unreleased PR
+           ;; (http-kit/http-kit#617). That is a GIT dep, and http-kit is a lein
+           ;; project, so using it requires
+           ;;
+           ;;   clojure -X:deps prep :aliases '[:pmd]'
+           ;;
+           ;; It lives in its own alias for exactly that reason. Putting the
+           ;; override in :test turned CI red: `clojure -X:auth:test` and
+           ;; `shadow-cljs compile :node-test` both failed with "The following
+           ;; libs must be prepared before use", because our CI persists .m2
+           ;; and .npm to the workspace but not .gitlibs, and cannot prep a lein
+           ;; project anyway.
+           ;;
+           ;; Without :pmd the tests SKIP with a message rather than passing
+           ;; vacuously -- they check for the class. Fold this away once
+           ;; http-kit releases the extension.
+           ;;
+           ;;   clojure -X:auth:test:pmd
+           ;; Jetty, to prove kabel.ring-ws is an abstraction rather than a
+           ;; rename. An interface with one implementation agrees with itself
+           ;; no matter what it does; two implementations is what makes the
+           ;; Ring contract load-bearing. Test scope only -- http-kit remains
+           ;; the default and the only runtime server dependency.
+           ;;
+           ;; ring-jetty9-adapter, not ring/ring-jetty-adapter: the official one
+           ;; routes through Jetty's ee9 legacy servlet environment and is
+           ;; HTTP/1.1-only, while this tracks Jetty 12 core directly.
+           :jetty {:extra-deps {info.sunng/ring-jetty9-adapter {:mvn/version "0.40.2"}}}
+
+           :pmd {:override-deps
+                 {http-kit/http-kit
+                  {:git/url "https://github.com/whilo/http-kit"
+                   :git/sha "694a8a62fcd4dbba31f21eb65ef710d81dd17f55"}}}
+
+   :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}
                                io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
                   :exec-fn cognitect.test-runner.api/test

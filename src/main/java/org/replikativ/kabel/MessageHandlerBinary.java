@@ -1,4 +1,4 @@
-package io.replikativ.kabel;
+package org.replikativ.kabel;
 
 import javax.websocket.MessageHandler;
 import java.nio.ByteBuffer;

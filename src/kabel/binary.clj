@@ -1,17 +1,15 @@
 (ns kabel.binary
   "This namespace provides a minimal binary encoding for all connection types."
-  (:require [clojure.edn :as edn])
+  (:require [clojure.edn :as edn]
+            [kabel.binary.table :as table])
   (:import [java.io ByteArrayOutputStream DataOutputStream
             ByteArrayInputStream DataInputStream]))
 
-(def encoding-table {:binary          0
-                     :string          1
-                     :pr-str          2
-                     :transit-json    11
-                     :transit-msgpack 12
-                     :fressian        13})
-
-(def decoding-table (into {} (map (fn [[k v]] [v k])) encoding-table))
+;; Re-exported from kabel.binary.table so existing consumers keep working; the
+;; table itself lives there because this ns is platform-split and the JVM and
+;; ClojureScript copies used to drift.
+(def encoding-table table/encoding-table)
+(def decoding-table table/decoding-table)
 
 (defn to-binary [{:keys [kabel/serialization kabel/payload] :as m}]
   (let [payload (if-not serialization
@@ -20,7 +18,7 @@
         serialization (if-not serialization :pr-str serialization)
         baos (ByteArrayOutputStream.)
         dos (DataOutputStream. baos)]
-    (.writeInt dos (int (encoding-table serialization)))
+    (.writeInt dos (int (table/encoding-for serialization)))
     (.flush dos)
     (.write baos payload)
     (.toByteArray baos)))
@@ -28,7 +26,7 @@
 (defn from-binary [binary]
   (let [bais (ByteArrayInputStream. binary)
         dis (DataInputStream. bais)
-        encoding (decoding-table (.readInt dis))
+        encoding (table/decoding-for (.readInt dis))
         payload (byte-array (- (count binary) 4))]
     (.readFully dis payload)
     (if (= encoding :pr-str)

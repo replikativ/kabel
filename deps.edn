@@ -3,12 +3,13 @@
                  :fn compile-java
                  :ensure "target/classes"}
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        ;; :local/root while boring is pre-release, matching konserve and
-        ;; datahike. Pinned to a published 0.1.19 it silently kept an old
-        ;; build: kabel's tests passed against a boring several wire fixes
-        ;; behind the one konserve and datahike were using, which is the worst
-        ;; case -- green CI on a version nothing else in the stack runs.
-        org.replikativ/boring {:local/root "../boring"}
+        ;; A released coordinate now that boring is on Clojars. This was
+        ;; :local/root because an earlier pin silently kept a stale locally
+        ;; installed build -- kabel's tests passed against a boring several
+        ;; wire fixes behind the one konserve and datahike ran, which is the
+        ;; worst case: green CI on a version nothing else in the stack uses.
+        ;; A Clojars coordinate cannot drift that way.
+        org.replikativ/boring {:mvn/version "0.1.4"}
         org.replikativ/superv.async {:mvn/version "0.3.50"}
         com.cognitect/transit-clj {:mvn/version "1.0.333"}
         com.cognitect/transit-cljs {:mvn/version "0.8.280"}
@@ -43,7 +44,28 @@
            ;; overlay the co-developed checkout (already prepped, tracks the stack's
            ;; main); a release swaps this for a Maven datahike coordinate.
            :auth-store-datahike {:extra-deps {org.replikativ/datahike {:local/root "../datahike"}}}
+           ;; The DEFAULT http-kit dependency stays the release. Only the test
+           ;; alias overrides it, to the commit carrying permessage-deflate
+           ;; (http-kit/http-kit#617, not yet released). The client extension is
+           ;; ours and the server half is http-kit's; running them against each
+           ;; other is the only way to learn whether we agree about the wire
+           ;; format rather than merely agreeing with ourselves -- and it
+           ;; immediately found an RFC 7692 7.2.3.6 violation both of them had.
+           ;;
+           ;; http-kit is a lein project, so its git dep must be prepped before
+           ;; the classpath will build -- and it has to name the alias, because
+           ;; the override lives in one:
+           ;;
+           ;;   clojure -X:deps prep :aliases '[:test]'      (needs lein)
+           ;;
+           ;; The tests skip with a message rather than passing vacuously if
+           ;; the class is absent. Drop this override once a release carries
+           ;; the extension.
            :test {:extra-paths ["test"]
+                  :override-deps
+                  {http-kit/http-kit
+                   {:git/url "https://github.com/whilo/http-kit"
+                    :git/sha "1b9924edea5a29cc692031bf1e52ff87385d0aaa"}}
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}
                                io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
                   :exec-fn cognitect.test-runner.api/test

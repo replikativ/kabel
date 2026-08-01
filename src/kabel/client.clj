@@ -11,11 +11,30 @@
            ;; we need this to signal String and Binary dispatch to tyrus
            ;; this is because of type erasure of the JVM and a lack of being able
            ;; to communicate generics to tyrus
-           [io.replikativ.kabel MessageHandlerString MessageHandlerBinary]
+           [org.replikativ.kabel MessageHandlerString MessageHandlerBinary
+            PerMessageDeflateExtension]
            [org.glassfish.tyrus.client ClientManager]
            [java.nio ByteBuffer]))
 
 ;; Example taken from https://tyrus.java.net/documentation/1.13.1/index/getting-started.html
+
+(def ^:dynamic *compression?*
+  "Whether to offer RFC 7692 `permessage-deflate` on outgoing connections.
+
+  On by default. kabel's traffic is a stream of structurally similar messages
+  over a long-lived connection, which is the shape the extension's context
+  takeover exists for -- message N is compressed against messages 1..N-1.
+
+  Tyrus ships no implementation of the extension, so this is
+  `PerMessageDeflateExtension`, ours. The peer decides: a server that does not
+  accept the offer leaves the connection uncompressed, and nothing else
+  changes. http-kit accepts it from 2.9.0 (http-kit/http-kit#617); browsers
+  offer it to us in the other direction automatically.
+
+  Bind to false when payloads are already compressed, or when per-connection
+  memory matters more than bandwidth -- context takeover keeps a deflate and an
+  inflate window alive for the life of each connection."
+  true)
 
 ;; TODO make header configurable
 (def cec
@@ -30,6 +49,8 @@
                          (prn "after response" (.getHeaders handshake-response))))
         config-builder (ClientEndpointConfig$Builder/create)]
     (.configurator config-builder configurator)
+    (when *compression?*
+      (.extensions config-builder (PerMessageDeflateExtension/offer)))
     (.build config-builder)))
 
 (def ^:dynamic *max-buffer-size* 10000)

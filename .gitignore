@@ -12,3 +12,17 @@ pom.xml.asc
 *.iml
 .cpcache
 .shadow*
+# Editor and tooling state
+.calva/
+.lsp/
+.clj-kondo/.cache/
+.claude/
+CLAUDE.md
+
+# npm
+node_modules/
+
+# shadow-cljs compiled output. `.shadow*` above catches the cache dir but not
+# what it emits; a `git add -A` put 1100 generated files into a PR once.
+/resources/public/js/
+/resources/private/js/

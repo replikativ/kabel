@@ -65,7 +65,7 @@
                   :override-deps
                   {http-kit/http-kit
                    {:git/url "https://github.com/whilo/http-kit"
-                    :git/sha "1b9924edea5a29cc692031bf1e52ff87385d0aaa"}}
+                    :git/sha "694a8a62fcd4dbba31f21eb65ef710d81dd17f55"}}
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}
                                io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
                   :exec-fn cognitect.test-runner.api/test

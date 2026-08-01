@@ -10,9 +10,15 @@
   Deliberately the SAME shape as `kabel.core-test/roundtrip-test`, so a failure
   here is about the adapter and not about a hand-rolled peer.
 
-  Jetty is a TEST dependency. http-kit stays kabel's only runtime server."
+  Jetty is an OPTIONAL test dependency, behind the `:jetty` alias -- kabel does
+  not declare `ring-jetty9-adapter` and http-kit stays its only runtime server.
+  So `kabel.jetty` is resolved dynamically: a static `:require` would make a
+  plain `clj -X:test` fail to LOAD this namespace, turning an absent optional
+  dependency into a broken test suite for anyone who just cloned the repo.
+  Without the alias the Jetty half skips with a message rather than passing
+  vacuously -- the same bargain `kabel.permessage-deflate-test` makes. CI runs
+  `clj -X:auth:test:jetty`, so parity is genuinely exercised there."
   (:require [clojure.test :refer [deftest testing is]]
-            [kabel.client :as cli]
             [kabel.peer :as peer]
             [kabel.ring-ws :as ring-ws]
             [superv.async :refer [<?? go-try S <? put?]]
@@ -20,8 +26,19 @@
             ;; The real adapters, not copies of them: a parity test that
             ;; reimplements the thing it is testing proves nothing.
             [org.httpkit.server :as http-kit]
-            [kabel.jetty :as kabel-jetty :refer [jetty-run-server]]
             [kabel.http-kit :as kabel-http-kit]))
+
+(def ^:private jetty
+  "`kabel.jetty`'s two public fns, or nil when the adapter is absent."
+  (try
+    (require 'kabel.jetty)
+    {:run-server @(resolve 'kabel.jetty/jetty-run-server)
+     :create-handler! @(resolve 'kabel.jetty/create-jetty-handler!)}
+    (catch Exception _ nil)))
+
+(defn- skip! [what]
+  (println "SKIPPED" what "— no ring-jetty9-adapter on the classpath"
+           "(run with the :jetty alias)"))
 
 (defn- pong-middleware [[S peer [in out]]]
   (let [new-in (chan) new-out (chan)]
@@ -60,17 +77,21 @@
     (testing "http-kit"
       (is (= "ping" (roundtrip-over 47411 http-kit/run-server))))
     (testing "Jetty 12"
-      (is (= "ping" (roundtrip-over 47412 jetty-run-server))))))
+      (if-not jetty
+        (skip! "ring-ws-works-on-both-adapters/Jetty 12")
+        (is (= "ping" (roundtrip-over 47412 (:run-server jetty))))))))
 
 (deftest create-handler-entry-points-agree
   (testing "the two namespaces a user actually calls, not just the run-server
             they wrap. create-jetty-handler! and create-http-kit-handler! take
             the same arguments and return the same map shape, so switching
             servers is a one-line change."
-    (doseq [[nm port create!] [["kabel.http-kit" 47415
-                                kabel-http-kit/create-http-kit-handler!]
-                               ["kabel.jetty" 47416
-                                kabel-jetty/create-jetty-handler!]]]
+    (when-not jetty
+      (skip! "create-handler-entry-points-agree/kabel.jetty"))
+    (doseq [[nm port create!] (cond-> [["kabel.http-kit" 47415
+                                        kabel-http-kit/create-http-kit-handler!]]
+                                jetty (conj ["kabel.jetty" 47416
+                                             (:create-handler! jetty)]))]
       (testing nm
         (let [sid (java.util.UUID/randomUUID)
               cid (java.util.UUID/randomUUID)

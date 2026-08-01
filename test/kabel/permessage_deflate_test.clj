@@ -122,17 +122,50 @@
 (deftest fragmented-and-control-frames
   (if-not server-has-pmd?
     (println "SKIPPED fragmented-and-control-frames")
-    (testing "a payload large enough to fragment, with a ping interleaved.
-              RSV1 rides only on the FIRST frame of a message; a continuation
-              that re-read it would decide wrongly"
+    (testing "REAL fragmentation, via partial sends.
+
+              The previous version of this test sent a 2 MB string with
+              `sendText(String)` and claimed it exercised fragmentation. It does
+              not: Tyrus emits that as ONE frame regardless of size, so the test
+              asserted a property it never touched — and the implementation
+              underneath it was wrong in both directions. A fragmented
+              compressed message is one deflate stream split across frames, and
+              compressing/inflating each fragment independently fails on the
+              RFC's own example.
+
+              `sendText(part, false)` + `sendText(last, true)` is what actually
+              produces continuation frames."
       (let [[stop! port] (echo-server)]
         (try
           (let [[^Session session inbox] (connect! (str "ws://localhost:" port) true)]
             (try
-              (let [big (apply str (repeat 200000 "abcdefghij"))]
-                (.sendPing (.getAsyncRemote session) (java.nio.ByteBuffer/allocate 0))
-                (.sendText (.getBasicRemote session) big)
-                (is (= big (take! inbox)) "2 MB message survives fragmentation"))
+              (let [parts ["the quick brown fox " "jumps over " "the lazy dog"]
+                    whole (apply str parts)
+                    ^javax.websocket.RemoteEndpoint$Basic remote (.getBasicRemote session)]
+                (.sendText remote (first parts) false)
+                (.sendText remote (second parts) false)
+                (.sendText remote (last parts) true)
+                (is (= whole (take! inbox)) "three-fragment message reassembles"))
+
+              (testing "and again, so the second message sees the compression
+                        history the first left behind"
+                (let [^javax.websocket.RemoteEndpoint$Basic remote (.getBasicRemote session)]
+                  (.sendText remote "the quick brown fox " false)
+                  (.sendText remote "jumps again" true)
+                  (is (= "the quick brown fox jumps again" (take! inbox)))))
+
+              (testing "a ping interleaved into a fragmented message does not
+                        disturb it — control frames are never compressed"
+                (let [^javax.websocket.RemoteEndpoint$Basic remote (.getBasicRemote session)]
+                  (.sendText remote "before-ping " false)
+                  (.sendPing (.getAsyncRemote session) (java.nio.ByteBuffer/allocate 0))
+                  (.sendText remote "after-ping" true)
+                  (is (= "before-ping after-ping" (take! inbox)))))
+
+              (testing "a single large message still works"
+                (let [big (apply str (repeat 200000 "abcdefghij"))]
+                  (.sendText (.getBasicRemote session) big)
+                  (is (= big (take! inbox)) "2 MB message round-trips")))
               (finally (.close session))))
           (finally (stop!)))))))
 

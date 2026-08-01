@@ -68,6 +68,8 @@ public class PerMessageDeflateExtension implements ExtendedExtension {
 
     private static final String STATE = "kabel.permessage-deflate.state";
 
+    private static final byte[] EMPTY = new byte[0];
+
     /** Bound on a message's size AFTER inflation. A small compressed frame can
      *  expand enormously, and the frame-length limit says nothing about that. */
     private final int maxSize;
@@ -87,12 +89,29 @@ public class PerMessageDeflateExtension implements ExtendedExtension {
         boolean negotiated;              // did the server accept the extension?
         boolean noContextTakeoverOut;    // client_no_context_takeover
         boolean noContextTakeoverIn;     // server_no_context_takeover
-        /** Set while a fragmented message is in flight: RSV1 rides only on the
-         *  FIRST frame of a message, so continuations must inherit it. */
+        boolean ended;                   // destroy() ran; zlib released
+
+        /** RSV1 rides only on the FIRST frame of a message, so continuations
+         *  inherit the decision rather than re-reading a bit that is not
+         *  there. */
         boolean continuationCompressed;
         boolean inContinuation;
+
+        /** Inbound fragments of the CURRENT message, still compressed.
+         *
+         *  A fragmented compressed message is ONE deflate stream split at
+         *  arbitrary octets -- the split need not land on a block boundary.
+         *  Inflating each fragment separately, with the 00 00 FF FF tail
+         *  appended to each, is therefore wrong and fails on real traffic:
+         *  the RFC's own fragmented "Hello" example decodes its first
+         *  fragment as "Hel" and then throws "invalid stored block lengths".
+         *  Fragments are concatenated and inflated once, on FIN. */
+        ByteArrayOutputStream inbound;
     }
 
+    /** Synchronized with processIncoming/processOutgoing/destroy: Tyrus hands
+     *  frames to IO threads and closes from whichever thread closed the
+     *  session, and the properties map is a plain HashMap. */
     private State state(ExtensionContext ctx) {
         Map<String, Object> props = ctx.getProperties();
         State s = (State) props.get(STATE);
@@ -152,9 +171,15 @@ public class PerMessageDeflateExtension implements ExtendedExtension {
     }
 
     @Override
-    public void destroy(ExtensionContext ctx) {
-        State s = (State) ctx.getProperties().remove(STATE);
-        if (s != null) {
+    public synchronized void destroy(ExtensionContext ctx) {
+        State s = (State) ctx.getProperties().get(STATE);
+        if (s != null && !s.ended) {
+            // Marked rather than removed. Removing it let a frame still in
+            // flight call state() and build a FRESH Deflater/Inflater pair
+            // that would never see another destroy() -- turning a teardown
+            // into a leak.
+            s.ended = true;
+            s.inbound = null;
             s.deflater.end();
             s.inflater.end();
         }
@@ -173,41 +198,74 @@ public class PerMessageDeflateExtension implements ExtendedExtension {
     }
 
     @Override
-    public Frame processOutgoing(ExtensionContext ctx, Frame frame) {
+    public synchronized Frame processOutgoing(ExtensionContext ctx, Frame frame) {
         State s = state(ctx);
-        if (!s.negotiated || isControl(frame.getOpcode())) return frame;
-        // RSV1 goes on the first frame of a message only.
-        if (isContinuation(frame.getOpcode())) return frame;
+        if (!s.negotiated || s.ended || isControl(frame.getOpcode())) return frame;
 
-        byte[] payload = frame.getPayloadData();
-        byte[] compressed = compress(s, payload);
+        boolean first = !isContinuation(frame.getOpcode());
+        // A fragmented message is ONE deflate stream split across frames, so
+        // only the FINAL frame flushes. An earlier version returned
+        // continuations unchanged, which put raw application bytes inside an
+        // RSV1-marked compressed message -- the peer inflated garbage.
+        byte[] compressed = compress(s, frame.getPayloadData(), frame.isFin());
         return Frame.builder(frame)
                 .payloadData(compressed)
                 .payloadLength(compressed.length)
-                .rsv1(true)
+                .rsv1(first)                 // RSV1 on the first frame only
                 .build();
     }
 
     @Override
-    public Frame processIncoming(ExtensionContext ctx, Frame frame) {
+    public synchronized Frame processIncoming(ExtensionContext ctx, Frame frame) {
         State s = state(ctx);
-        if (!s.negotiated || isControl(frame.getOpcode())) return frame;
+        // Control frames are never compressed and may be interleaved into a
+        // fragmented data message, so they must not disturb its state.
+        if (!s.negotiated || s.ended || isControl(frame.getOpcode())) return frame;
 
         boolean compressed;
         if (isContinuation(frame.getOpcode())) {
-            // A continuation carries no RSV1 of its own; whether it is
-            // compressed was decided by the frame that opened the message.
             compressed = s.inContinuation && s.continuationCompressed;
         } else {
             compressed = frame.isRsv1();
             s.continuationCompressed = compressed;
             s.inContinuation = true;
+            s.inbound = null;
         }
-        if (frame.isFin()) s.inContinuation = false;
+        if (!compressed) {
+            if (frame.isFin()) { s.inContinuation = false; s.inbound = null; }
+            return frame;
+        }
 
-        if (!compressed) return frame;
+        byte[] part = frame.getPayloadData();
+        if (!frame.isFin()) {
+            // Accumulate. Bounded across the WHOLE message: a per-frame bound
+            // lets a peer split one message into many frames, each under the
+            // limit, and inflate far past it in total.
+            if (s.inbound == null) s.inbound = new ByteArrayOutputStream(Math.max(64, part.length));
+            if (s.inbound.size() + part.length > maxSize) {
+                throw new IllegalStateException(
+                        "Max payload length " + maxSize + " exceeded while reassembling");
+            }
+            s.inbound.write(part, 0, part.length);
+            // A zero-length, non-final frame keeps the message open.
+            return Frame.builder(frame).payloadData(EMPTY).payloadLength(0).rsv1(false).build();
+        }
 
-        byte[] inflated = decompress(s, frame.getPayloadData());
+        byte[] whole;
+        if (s.inbound == null) {
+            whole = part;
+        } else {
+            if (s.inbound.size() + part.length > maxSize) {
+                throw new IllegalStateException(
+                        "Max payload length " + maxSize + " exceeded while reassembling");
+            }
+            s.inbound.write(part, 0, part.length);
+            whole = s.inbound.toByteArray();
+        }
+        s.inbound = null;
+        s.inContinuation = false;
+
+        byte[] inflated = decompress(s, whole);
         return Frame.builder(frame)
                 .payloadData(inflated)
                 .payloadLength(inflated.length)
@@ -221,21 +279,27 @@ public class PerMessageDeflateExtension implements ExtendedExtension {
      * RFC 7692 7.2.1: deflate with SYNC_FLUSH, then drop the 4-octet
      * {@code 00 00 FF FF} tail the flush appends.
      */
-    private byte[] compress(State s, byte[] data) {
+    private byte[] compress(State s, byte[] data, boolean fin) {
         s.deflater.setInput(data);
         ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(64, data.length));
         byte[] buf = new byte[4096];
         int n;
-        // SYNC_FLUSH, not finish(): finishing would end the deflate stream and
-        // discard the very history context takeover exists to keep.
-        while ((n = s.deflater.deflate(buf, 0, buf.length, Deflater.SYNC_FLUSH)) > 0) {
+        // SYNC_FLUSH only on the FINAL fragment. A fragmented message is one
+        // deflate stream split across frames; flushing every fragment would
+        // emit a tail mid-message, and finish() would end the stream entirely
+        // and discard the history context takeover exists to keep.
+        int flush = fin ? Deflater.SYNC_FLUSH : Deflater.NO_FLUSH;
+        while ((n = s.deflater.deflate(buf, 0, buf.length, flush)) > 0) {
             out.write(buf, 0, n);
-            if (n < buf.length) break;
+            if (n < buf.length && flush == Deflater.SYNC_FLUSH) break;
         }
-        if (s.noContextTakeoverOut) s.deflater.reset();
+        // Only after the message is complete, or the next fragment would be
+        // compressed against a reset window the peer is not resetting.
+        if (fin && s.noContextTakeoverOut) s.deflater.reset();
 
         byte[] bs = out.toByteArray();
         int len = bs.length;
+        if (!fin) return bs;                 // no tail to strip mid-message
         if (len >= TAIL.length && endsWithTail(bs, len)) len -= TAIL.length;
         // RFC 7692 7.2.3.6: when the compressor produces nothing -- an empty
         // message, or one whose entire content was already flushed -- the
@@ -274,6 +338,8 @@ public class PerMessageDeflateExtension implements ExtendedExtension {
             throw new IllegalStateException("Invalid permessage-deflate payload: "
                     + e.getMessage(), e);
         }
+        // After the whole message, not after each fragment: a continuation
+        // refers back to data in earlier fragments.
         if (s.noContextTakeoverIn) s.inflater.reset();
         return out.toByteArray();
     }

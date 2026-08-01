@@ -49,9 +49,21 @@
                          (prn "after response" (.getHeaders handshake-response))))
         config-builder (ClientEndpointConfig$Builder/create)]
     (.configurator config-builder configurator)
-    (when *compression?*
-      (.extensions config-builder (PerMessageDeflateExtension/offer)))
     (.build config-builder)))
+
+(defn- client-endpoint-config
+  "Build the endpoint config for one connection.
+
+  Built per connect, not once at namespace load: `cec` is a `def`, so it
+  captured `*compression?*` at load time and binding the var around
+  `client-connect!` -- exactly what its docstring tells you to do -- had no
+  effect whatsoever."
+  []
+  (let [b (ClientEndpointConfig$Builder/create)]
+    (.configurator b (.getConfigurator ^ClientEndpointConfig cec))
+    (when *compression?*
+      (.extensions b (PerMessageDeflateExtension/offer)))
+    (.build b)))
 
 (def ^:dynamic *max-buffer-size* 10000)
 
@@ -166,7 +178,7 @@
               (put! (-error S) e)
               (log/error :websocket-error {:url url :error (pr-str err)})
               (.close session))))
-        cec
+        (client-endpoint-config)
         (java.net.URI. url))
        (catch Exception e
          (log/error :client-connect-error {:url url :error (pr-str e)})

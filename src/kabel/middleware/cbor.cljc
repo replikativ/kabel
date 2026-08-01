@@ -93,8 +93,27 @@
   `register-tag`, `register-record`) used for both directions. The
   write-handlers argument is accepted and ignored — see the ns docstring.
 
+  ## stringref is OFF by default here
+
+  boring's own default enables stringref (tags 25/256), a schmorp extension
+  that Python's cbor2 implements but cbor-x, fxamacker/cbor and ciborium do
+  NOT. With it on, a JavaScript peer using cbor-x cannot read our frames at
+  all; with it off, cbor-x reads them natively -- sets arrive as real JS Sets --
+  and keywords need a two-line `addExtension` for tag 39.
+
+  It costs nothing to turn off. Measured over 500 kabel-sized messages with
+  permessage-deflate active, which is the deployed configuration:
+
+      stringref ON    95 624 raw -> 10 816 deflated
+      stringref OFF   94 124 raw -> 10 787 deflated   (-0.3%)
+
+  Off is SMALLER, because stringref's back-references are less compressible
+  than the repeated strings deflate would have deduplicated anyway. A wire is
+  the one place where the extension has a cost and no benefit, so the default
+  here differs from boring's own.
+
   `opts` may be supplied via the registry atom's metadata under `:boring/opts`;
-  they are boring encode options. Deliberately NOT defaulted:
+  they are boring encode options and override this. Deliberately NOT defaulted:
 
   - `:canonical` must never be used on a wire — it does not preserve float
     width.
@@ -109,7 +128,7 @@
     incognito-read-handlers-atom _incognito-write-handlers-atom
     [S peer [in out]]]
    (let [cache (registry-cache)
-         opts (or (:boring/opts (meta registry-atom)) {})]
+         opts (merge {:stringref false} (:boring/opts (meta registry-atom)))]
      (handler
       ;; Deserialize incoming
       #(go-try S

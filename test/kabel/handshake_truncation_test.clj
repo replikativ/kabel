@@ -59,9 +59,10 @@
       (recur))
     (producer-fn handshake-ch)
     (let [result-ch (send-handshake! S out :t handshake-ch opts pending-acks)
-          _         (alts!! [result-ch (timeout 8000)])
+          [result _] (alts!! [result-ch (timeout 8000)])
           msgs      (drain-out out 300)]
       {:msgs msgs
+       :result result
        :complete? (boolean (some #(= :pubsub/handshake-complete (:type %)) msgs))
        :data-count (count (filter #(= :pubsub/handshake-data (:type %)) msgs))})))
 
@@ -101,6 +102,52 @@
           (str "expected 51 items, got " (:data-count res)))
       (is (some #(= :db (get-in % [:data :key])) (:msgs res))
           "the branch head must survive — its loss is what makes the replica unusable"))))
+
+(deftest slow-but-progressing-transfer-outlives-the-liveness-bound
+  ;; The slow-wifi / big-store case. `:handshake-timeout-ms` catches a producer
+  ;; that has STOPPED. A transfer that simply takes longer than the bound while
+  ;; still delivering batches has not stopped, and must not be killed for being
+  ;; big. (Measured from the handshake's START, this errors out mid-stream.)
+  ;; NOTE ON THE GAP: the stall check only runs when a collect round comes back
+  ;; EMPTY, and a round starts right after the previous flush — which itself
+  ;; happened one item-timeout after the last item. So an empty round needs a
+  ;; gap of more than 2x :item-timeout-ms. At 150ms/100ms every round catches an
+  ;; item before timing out, the check never executes, and the test passes
+  ;; against the broken measurement too. 300ms is what makes it a real test.
+  (testing "progress resets the stall bound"
+    (let [res (run-handshake
+               (fn [ch]
+                 (async/go
+                   (dotimes [i 8]
+                     (async/<! (timeout 300))     ; > 2x item-timeout, < the bound
+                     (async/>! ch {:key i :value i}))
+                   (close! ch)))
+               (assoc pubsub/default-opts
+                      :item-timeout-ms 100
+                      ;; total run ~2.5s, well past this bound; no single gap is
+                      :handshake-timeout-ms 500))]
+      (is (:complete? res)
+          "a transfer that keeps making progress must finish, however long it runs")
+      (is (nil? (:error (:result res)))
+          (str "must not report a stall: "
+               (some-> res :result :error ex-message)))
+      (is (= 8 (:data-count res))))))
+
+(deftest a-producer-that-stops-is-still-caught
+  ;; The other half: the bound must still fire when progress genuinely ceases,
+  ;; and must report failure rather than a completed handshake.
+  (testing "silence past the bound is an error, never a completion"
+    (let [res (run-handshake
+               (fn [ch]
+                 (async/go
+                   (async/>! ch {:key 0 :value 0})
+                   (async/>! ch {:key 1 :value 1})))   ; never closes, never continues
+               (assoc pubsub/default-opts
+                      :item-timeout-ms 100
+                      :handshake-timeout-ms 400))]
+      (is (not (:complete? res))
+          "a stalled producer must never yield handshake-complete")
+      (is (some? (:error (:result res))) "the stall must be reported as an error"))))
 
 (deftest closed-channel-still-completes-promptly
   ;; The guard against over-correcting: a producer that closes immediately

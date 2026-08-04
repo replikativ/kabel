@@ -43,10 +43,15 @@
    ;; producer CLOSING the item channel, and nothing else. (It used to end the
    ;; handshake, which turned any slow producer into silent truncation.)
    :item-timeout-ms 100
-   ;; Liveness bound on the whole handshake. A producer that never closes is a
-   ;; FAILURE and is reported as one — never as a completed handshake. Generous
-   ;; on purpose: a large store legitimately takes a while, and the cost of
-   ;; being wrong here is a broken replica.
+   ;; Liveness bound: how long the handshake may go WITHOUT PROGRESS before it
+   ;; is declared stalled. A producer that never closes is a FAILURE and is
+   ;; reported as one — never as a completed handshake.
+   ;;
+   ;; This is a gap between batches, not a bound on total duration. A large
+   ;; store over a slow link takes as long as it takes, and capping the total
+   ;; would kill healthy transfers for being big rather than for being stuck.
+   ;; Generous on purpose either way: the cost of being wrong is a broken
+   ;; replica.
    :handshake-timeout-ms 300000})
 
 (defn- now-ms []
@@ -197,8 +202,12 @@
   (let [{:keys [batch-size batch-timeout-ms item-timeout-ms handshake-timeout-ms]} opts
         started-ms (now-ms)]
     (go-try S
+            ;; `last-progress-ms` is when this handshake last MOVED, not when it
+            ;; began. The liveness bound below measures a stall, and a transfer
+            ;; that is slow but progressing is not a stall — see there.
             (loop [batch-idx 0
-                   total-sent 0]
+                   total-sent 0
+                   last-progress-ms started-ms]
         ;; Collect up to batch-size items
               (let [{:keys [items closed?]}
                     (loop [items []
@@ -247,17 +256,27 @@
             ;; without its head is unusable.
                   (and (not closed?) (empty? items))
                   (if (and handshake-timeout-ms
-                           (> (- (now-ms) started-ms) handshake-timeout-ms))
+                           (> (- (now-ms) last-progress-ms) handshake-timeout-ms))
               ;; Liveness bound: a peer that never finishes is a FAILURE, and
               ;; must be reported as one. Never completed silently.
+              ;;
+              ;; Measured from the last batch we sent, NOT from the start of the
+              ;; handshake. A big store over a slow link legitimately takes
+              ;; longer than any fixed total, and against `started-ms` such a
+              ;; transfer would sail along healthily and then die on its first
+              ;; ordinary quiet gap once the clock ran out. What we want to
+              ;; catch is a producer that has STOPPED, and that is a gap since
+              ;; progress — a quantity no amount of slow wifi inflates.
                     (do
                       (log/warn :pubsub/handshake-timeout
                                 {:topic topic :total-sent total-sent
+                                 :stalled-ms (- (now-ms) last-progress-ms)
                                  :elapsed-ms (- (now-ms) started-ms)})
                       {:error (ex-info "Handshake producer stalled"
                                        {:topic topic :total-sent total-sent
+                                        :stalled-ms (- (now-ms) last-progress-ms)
                                         :handshake-timeout-ms handshake-timeout-ms})})
-                    (recur batch-idx total-sent))
+                    (recur batch-idx total-sent last-progress-ms))
 
                   :else
 
@@ -279,7 +298,7 @@
                       (let [[result ch] (alts! [ack-ch (timeout batch-timeout-ms)])]
                         (swap! pending-acks update topic dissoc batch-idx)
                         (if (= ch ack-ch)
-                          (recur (inc batch-idx) (+ total-sent (count items)))
+                          (recur (inc batch-idx) (+ total-sent (count items)) (now-ms))
                           {:error (ex-info "Handshake batch ack timeout"
                                            {:topic topic :batch-idx batch-idx})}))))))))))
 

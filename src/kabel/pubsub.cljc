@@ -37,7 +37,21 @@
 (def default-opts
   {:batch-size 20
    :batch-timeout-ms 30000
-   :item-timeout-ms 100})
+   ;; How long to wait for the NEXT item before flushing the batch we have.
+   ;; This is a batching hint ONLY — it decides when to send a partial batch,
+   ;; never whether the producer is finished. Finished is signalled by the
+   ;; producer CLOSING the item channel, and nothing else. (It used to end the
+   ;; handshake, which turned any slow producer into silent truncation.)
+   :item-timeout-ms 100
+   ;; Liveness bound on the whole handshake. A producer that never closes is a
+   ;; FAILURE and is reported as one — never as a completed handshake. Generous
+   ;; on purpose: a large store legitimately takes a while, and the cost of
+   ;; being wrong here is a broken replica.
+   :handshake-timeout-ms 300000})
+
+(defn- now-ms []
+  #?(:clj (System/currentTimeMillis)
+     :cljs (.getTime (js/Date.))))
 
 ;; =============================================================================
 ;; State Management
@@ -180,34 +194,72 @@
 
    Returns channel yielding {:ok true} or {:error ...}"
   [S out topic handshake-ch opts pending-acks]
-  (let [{:keys [batch-size batch-timeout-ms item-timeout-ms]} opts]
+  (let [{:keys [batch-size batch-timeout-ms item-timeout-ms handshake-timeout-ms]} opts
+        started-ms (now-ms)]
     (go-try S
             (loop [batch-idx 0
                    total-sent 0]
         ;; Collect up to batch-size items
-              (let [items (loop [items []
-                                 remaining batch-size]
-                            (if (zero? remaining)
-                              items
-                              (let [[item ch] (alts! [handshake-ch (timeout item-timeout-ms)])]
-                                (cond
+              (let [{:keys [items closed?]}
+                    (loop [items []
+                           remaining batch-size]
+                      (if (zero? remaining)
+                        {:items items :closed? false}
+                        (let [[item ch] (alts! [handshake-ch (timeout item-timeout-ms)])]
+                          (cond
                            ;; Got an item
-                                  (and (= ch handshake-ch) (some? item))
-                                  (recur (conj items item) (dec remaining))
+                            (and (= ch handshake-ch) (some? item))
+                            (recur (conj items item) (dec remaining))
 
-                           ;; Channel closed
-                                  (and (= ch handshake-ch) (nil? item))
-                                  items
+                           ;; Channel CLOSED — the producer is finished. This is
+                           ;; the ONLY thing that ends a handshake.
+                            (and (= ch handshake-ch) (nil? item))
+                            {:items items :closed? true}
 
-                           ;; Timeout - return what we have
-                                  :else
-                                  items))))]
-                (if (empty? items)
-            ;; Done - send complete
+                           ;; Quiet — the producer is SLOW, not finished. Hand
+                           ;; back what we have and let the caller decide; it
+                           ;; must not be mistaken for the case above.
+                            :else
+                            {:items items :closed? false}))))]
+                (cond
+            ;; Producer finished and nothing left - send complete
+                  (and closed? (empty? items))
                   (do
                     (log/debug :pubsub/handshake-complete {:topic topic :total-sent total-sent})
                     (>? S out (proto/handshake-complete-msg topic))
                     {:ok true})
+
+            ;; QUIET, not finished. Keep waiting.
+            ;;
+            ;; This used to send `handshake-complete` here, which is how a slow
+            ;; producer became SILENT DATA LOSS: the subscriber was told the
+            ;; handshake finished, so it treated the prefix it had received as
+            ;; the whole store. A producer that computes before it streams —
+            ;; konserve-sync's `-handshake-items` walks a store and reads
+            ;; metadata per key before emitting anything — is quiet for entirely
+            ;; ordinary reasons, and it CLOSES the channel when actually done.
+            ;; That signal is exact; a quiet period is a guess, and no value of
+            ;; `:item-timeout-ms` turns a guess into the answer.
+            ;;
+            ;; Worst affected is the tail: a walker that emits mutable branch
+            ;; pointers LAST (datahike's does, so a head is applied only after
+            ;; the nodes it references) loses exactly the head, and a replica
+            ;; without its head is unusable.
+                  (and (not closed?) (empty? items))
+                  (if (and handshake-timeout-ms
+                           (> (- (now-ms) started-ms) handshake-timeout-ms))
+              ;; Liveness bound: a peer that never finishes is a FAILURE, and
+              ;; must be reported as one. Never completed silently.
+                    (do
+                      (log/warn :pubsub/handshake-timeout
+                                {:topic topic :total-sent total-sent
+                                 :elapsed-ms (- (now-ms) started-ms)})
+                      {:error (ex-info "Handshake producer stalled"
+                                       {:topic topic :total-sent total-sent
+                                        :handshake-timeout-ms handshake-timeout-ms})})
+                    (recur batch-idx total-sent))
+
+                  :else
 
             ;; Send batch
                   (do

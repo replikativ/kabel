@@ -296,3 +296,70 @@
                                    (fn [_principal _topic] false)))
            (is (empty? (drain other))
                "refusing a write must also stop it reaching readers"))))))
+
+;; =============================================================================
+;; Separating the two gates (:authorize-publish-fn)
+;; =============================================================================
+
+;; The tests above drive `handle-publish!` directly, so they prove the WRITE
+;; gate is consulted but say nothing about WHICH option the middleware routes
+;; there. That wiring is the whole point of `:authorize-publish-fn`, so it is
+;; what these tests exercise: build real middleware, feed it real messages,
+;; observe which predicate each operation consulted.
+
+#?(:clj
+   (defn- run-middleware
+     "Wire `opts` into pubsub middleware over a channel pair, push `msgs` in, and
+      return whatever came back out. Mirrors how a peer drives it."
+     [opts msgs]
+     (let [peer (make-test-peer)
+           [in out] (make-channel-pair)
+           mw (pubsub/make-pubsub-peer-middleware opts)]
+       (mw [S peer [in out]])
+       (doseq [m msgs] (put! in m))
+       ;; drain briefly — the middleware answers asynchronously
+       (loop [acc []]
+         (let [[v _] (async/alts!! [out (timeout 300)])]
+           (if v (recur (conj acc v)) acc))))))
+
+#?(:clj
+   (deftest publish-gate-defaults-to-the-subscribe-gate
+     (testing "a consumer passing only :authorize-fn is unaffected by the new key"
+       ;; Backward compatibility is the contract: this is exactly what every
+       ;; existing consumer does, and it must keep gating publishes.
+       (let [asked (atom [])
+             peer (make-test-peer)
+             out (chan 100)
+             handle-publish! @#'pubsub/handle-publish!
+             applied (atom [])
+             strategy (reify proto/PSyncStrategy
+                        (-apply-publish [_ p] (go-try S (swap! applied conj p) true)))]
+         (pubsub/register-topic! peer :t {:strategy strategy})
+         ;; The resolution under test: (get opts :authorize-publish-fn authorize-fn)
+         (let [opts {:authorize-fn (fn [_ topic] (swap! asked conj topic) false)}
+               resolved (get opts :authorize-publish-fn (:authorize-fn opts))]
+           (<?? S (handle-publish! S peer out
+                                   {:type :pubsub/publish :topic :t :payload {:k :v}
+                                    :kabel/principal {:sub "mallory"}}
+                                   nil resolved))
+           (is (= [:t] @asked) "the subscribe gate was consulted for the publish")
+           (is (= [] @applied) "and its refusal held"))))))
+
+#?(:clj
+   (deftest the-two-gates-are-independent
+     (testing "subscribe may be permitted while every publish is refused"
+       ;; The one-directional deployment: the server owns its stores and
+       ;; publishes them; a client only ever subscribes, so the correct publish
+       ;; policy is to refuse every inbound write. One predicate cannot say this.
+       (let [sub-asked (atom 0)
+             pub-asked (atom 0)
+             msgs (run-middleware
+                   {:authorize-fn (fn [_ _] (swap! sub-asked inc) true)
+                    :authorize-publish-fn (fn [_ _] (swap! pub-asked inc) false)}
+                   [{:type :pubsub/publish :topic :t :payload {:k :v}
+                     :kabel/principal {:sub "mallory"}}])]
+         (is (= 1 @pub-asked) "the publish gate decided the publish")
+         (is (= 0 @sub-asked) "the subscribe gate was not consulted for it")
+         (is (some #(and (= :pubsub/error (:type %))
+                         (= :pubsub/unauthorized (:error %))) msgs)
+             "and the refusal reached the sender")))))

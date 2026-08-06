@@ -306,15 +306,22 @@
   "Apply an inbound `:pubsub/publish` and forward it to the topic's other
    subscribers.
 
-   `authorize-fn` is (fn [principal topic] -> truthy) — the SAME gate
-   `handle-subscription!` applies at join time, applied here to the WRITE. It
-   was previously consulted on subscribe only, so a peer that could reach a
+   `authorize-publish-fn` is (fn [principal topic] -> truthy) — the WRITE gate.
+   It was previously consulted on subscribe only, so a peer that could reach a
    registered topic could `-apply-publish` into its store without holding any
    grant on it: authorization decided who could READ a store while anyone could
    WRITE one. A denied publish is dropped and answered with `:pubsub/error`; it
    is neither applied locally nor forwarded, so a refused write cannot reach
-   other subscribers either."
-  [S peer out msg on-publish authorize-fn]
+   other subscribers either.
+
+   It DEFAULTS to `:authorize-fn`, the join-time subscribe gate, which is what
+   this argument used to be unconditionally. Reusing one predicate for both
+   operations means a consumer cannot say \"subscribe yes, publish no\" — and
+   for a one-directional deployment (a server that owns its stores and whose
+   clients only ever subscribe) the correct publish policy is to refuse every
+   inbound write, which the read gate cannot express. Pass
+   `:authorize-publish-fn` to separate them."
+  [S peer out msg on-publish authorize-publish-fn]
   (go-try S
           (let [{:keys [topic payload]} msg
                 principal (:kabel/principal msg)
@@ -323,7 +330,7 @@
                 sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
                 strategy (or (:strategy topic-config) (:strategy sub-state))
                 subscribers (get-subscribers peer topic)]
-            (if-not (authorize-fn principal topic)
+            (if-not (authorize-publish-fn principal topic)
               (do
                 (log/warn :pubsub/publish-denied {:topic topic})
                 (>? S out {:type :pubsub/error
@@ -515,6 +522,9 @@
           ;; stays a plain pub/sub substrate; an app injects a policy that reads
           ;; the `:kabel/principal` an upstream auth middleware stamped.
           authorize-fn (get opts :authorize-fn (fn [_principal _topic] true))
+          ;; Defaults to the subscribe gate, so an existing consumer that passes
+          ;; only :authorize-fn behaves exactly as before.
+          authorize-publish-fn (get opts :authorize-publish-fn authorize-fn)
           on-publish (get opts :on-publish)
           pass-in (chan)
           pass-out (chan)
@@ -636,7 +646,7 @@
       ;; Handle publish (both sides)
       (go-loop-super S [msg (<? S publish-ch)]
                      (when msg
-                       (<? S (handle-publish! S peer out msg on-publish authorize-fn))
+                       (<? S (handle-publish! S peer out msg on-publish authorize-publish-fn))
                        (recur (<? S publish-ch))))
 
       ;; Pass through unrelated messages
@@ -663,9 +673,14 @@
    Options:
    - :on-publish - (fn [topic payload]) callback
    - :on-handshake-complete - (fn [topic]) callback
-   - :authorize-fn - (fn [principal topic] -> truthy) join-time subscribe gate;
+   - :authorize-fn - (fn [principal topic] -> truthy) join-time SUBSCRIBE gate;
      `principal` is the message's `:kabel/principal` (stamped by an upstream
      auth middleware). Default permits everything.
+   - :authorize-publish-fn - (fn [principal topic] -> truthy) gate on inbound
+     PUBLISHES. Defaults to `:authorize-fn`, so passing only the latter keeps
+     today's behaviour. Separate them when read and write authority differ —
+     notably a one-directional deployment, where every inbound publish should
+     be refused (`(constantly false)`) because only the server publishes.
 
    Usage with kabel:
    ```clojure

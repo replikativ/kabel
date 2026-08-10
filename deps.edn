@@ -9,7 +9,7 @@
         ;; wire fixes behind the one konserve and datahike ran, which is the
         ;; worst case: green CI on a version nothing else in the stack uses.
         ;; A Clojars coordinate cannot drift that way.
-        org.replikativ/boring {:mvn/version "0.1.6"}
+        org.replikativ/boring {:mvn/version "0.1.17"}
         org.replikativ/superv.async {:mvn/version "0.3.50"}
         com.cognitect/transit-clj {:mvn/version "1.0.333"}
         com.cognitect/transit-cljs {:mvn/version "0.8.280"}

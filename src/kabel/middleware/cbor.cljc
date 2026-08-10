@@ -43,6 +43,7 @@
   that only ever wanted CBOR. A codec namespace should cost what its codec
   costs."
   (:require [boring.core :as boring]
+            [clojure.string :as str]
             [kabel.middleware.handler :refer [handler]]
             #?(:clj [superv.async :refer [go-try]]))
   #?(:cljs (:require-macros [superv.async :refer [go-try]]
@@ -50,15 +51,50 @@
 
 (def ^:const serialization-key :cbor)
 
+(defn- boring-wire-name
+  "incognito's munged key as boring >= 0.1.11 spells it, or nil if it is already
+  in that form.
+
+  `my_ns.core.MyRecord` -> `my-ns.core/MyRecord`: the LAST dot becomes the
+  namespace/name separator, and underscores in the namespace part become
+  hyphens. A key already containing `/` is left alone -- it is either boring's
+  own spelling or a hand-picked name, and neither wants munging.
+
+  incognito keys its handlers by `(-> r type pr-str normalize-ns symbol)`, which
+  USED to be exactly boring's wire name for a record, so folding them in was a
+  straight rename. boring changed the spelling in 0.1.11 and this middleware was
+  pinned to 0.1.6, so it never saw the change: a registered record decoded to an
+  inert `UnknownRecord` carrying the right name and fields, and the caller's
+  constructor was never reached. `konserve.serializers` carries the same bridge
+  for the same reason."
+  [k]
+  (let [s (str k)]
+    (when-not (str/includes? s "/")
+      (let [i (str/last-index-of s ".")]
+        (when (and i (pos? i))
+          (str (str/replace (subs s 0 i) "_" "-")
+               "/" (subs s (inc i))))))))
+
 (defn record-registry
   "Fold incognito-style record handlers into `registry`. Returns a NEW registry.
 
   Only the READ direction needs anything: boring carries the type name on the
   wire itself, and an unregistered record still decodes to an inert value with
-  the same name and fields rather than being lost."
+  the same name and fields rather than being lost.
+
+  EACH HANDLER IS REGISTERED UNDER BOTH SPELLINGS -- incognito's own key and
+  boring's wire name where they differ -- so a peer running either side of the
+  0.1.11 rename is understood. Registering the original key second would be
+  wrong only if the two collided, and they cannot: boring's form contains a
+  slash and incognito's never does."
   [registry handlers]
   (if (seq handlers)
-    (reduce-kv (fn [reg tag ctor] (boring/register-record reg (str tag) ctor))
+    (reduce-kv (fn [reg tag ctor]
+                 (let [k (str tag)
+                       reg (if-let [wire (boring-wire-name k)]
+                             (boring/register-record reg wire ctor)
+                             reg)]
+                   (boring/register-record reg k ctor)))
                registry handlers)
     registry))
 

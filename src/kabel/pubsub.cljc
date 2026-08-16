@@ -479,14 +479,50 @@
 (defn unsubscribe!
   "Unsubscribe from topics.
 
-   Returns channel yielding {:ok true}"
+   Returns channel yielding {:ok true}
+
+   The local subscription state is dropped unconditionally; telling the server
+   is best-effort. See below for why it cannot be anything else."
   [peer topics]
   (let [{{S :supervisor} :volatile} @peer
         out (get-in (get-pubsub-state peer) [:out])]
     (go-try S
             (doseq [topic topics]
               (update-pubsub-state! peer update :subscriptions dissoc topic))
-            (>? S out (proto/unsubscribe-msg topics))
+            ;; `out` is the CLIENT side of the protocol; a server peer has
+            ;; none. Calling this there used to reach `put!` with a nil port
+            ;; and throw "No implementation of method: :put! ... for class:
+            ;; nil". `publish!` is already nil-safe by construction (its
+            ;; `is-client?` tests `out` for truthiness), so this only brings
+            ;; unsubscribe into line.
+            (when out
+              ;; `put?`, not `>?`, and this is the fix rather than a tidy-up.
+              ;;
+              ;; `>?` parks the go block until the value is accepted. During
+              ;; teardown the consumer of `out` is frequently already gone --
+              ;; the socket closed, the send loop finished -- and the put then
+              ;; parks FOREVER, taking the caller's `unsubscribe!` with it.
+              ;;
+              ;; Found downstream in urd, whose consensus teardown stops the
+              ;; server peer first and then closes each client. Roughly one run
+              ;; in six hung: whether a given client parked depended on whether
+              ;; its out-channel buffer still had room. A thread dump showed no
+              ;; thread holding the hang -- all core.async dispatch threads
+              ;; merely parked -- and step tracing put it here, on the first
+              ;; topic of the first client whose connection had already gone.
+              ;;
+              ;; `publish!` already draws this distinction deliberately
+              ;; (see its comment on `put?`'s callback and
+              ;; `remove-subscriber!`): it must not park on a subscriber that
+              ;; has gone away. Unsubscribe has exactly the same exposure and
+              ;; strictly less reason to wait -- an unsubscribe nobody receives
+              ;; costs a stale subscriber entry, which the server drops anyway
+              ;; when its next publish to that transport fails.
+              (put? S out (proto/unsubscribe-msg topics)
+                    (fn [delivered?]
+                      (when-not delivered?
+                        (log/debug :pubsub/unsubscribe-not-delivered
+                                   {:topics topics})))))
             {:ok true})))
 
 ;; =============================================================================

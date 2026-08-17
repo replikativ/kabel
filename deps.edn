@@ -47,6 +47,16 @@
                                buddy/buddy-hashers {:mvn/version "2.0.167"}
                                ;; portable crypto (HS256 verify on JVM + CLJS).
                                org.replikativ/geheimnis {:mvn/version "0.2.33"}}}
+           ;; konserve-backed PPeerStore (kabel.store.konserve) — durable overlay
+           ;; identity and address book. konserve is the consumer's to provide;
+           ;; kabel's base library keeps no storage dependency, exactly as it
+           ;; keeps no JWT/crypto one. Same argument as :auth.
+           ;; The test lives on its own path so the DEFAULT suite never tries to
+           ;; load it — konserve is not on the base classpath, and a test-runner
+           ;; that scans `test` would fail to require the namespace outright.
+           ;;   clojure -X:auth:konserve:test :dirs '["test" "test-konserve"]'
+           :konserve {:extra-paths ["test-konserve"]
+                      :extra-deps {org.replikativ/konserve {:local/root "../konserve"}}}
            ;; The datahike-backed AuthStore (kabel.auth.store.datahike) — datahike
            ;; is the consumer's to provide; pinned to the stack's main here for tests.
            ;; datahike is the consumer's to provide. For kabel's own store tests we

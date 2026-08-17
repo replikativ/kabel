@@ -20,7 +20,8 @@
    ;; Either side: Publish
    (publish! peer :my-topic {:data 123})
    ```"
-  (:require [kabel.pubsub.protocol :as proto]
+  (:require [kabel.authorize :as authz]
+            [kabel.pubsub.protocol :as proto]
             [replikativ.logging :as log]
             #?(:clj [superv.async :refer [<? >? put? go-try go-loop-try go-loop-super]]
                :cljs [superv.async :refer [put?]])
@@ -330,7 +331,8 @@
                 sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
                 strategy (or (:strategy topic-config) (:strategy sub-state))
                 subscribers (get-subscribers peer topic)]
-            (if-not (authorize-publish-fn principal topic)
+            (if-not (authorize-publish-fn {:principal principal :topic topic
+                                           :payload payload})
               (do
                 (log/warn :pubsub/publish-denied {:topic topic})
                 (>? S out {:type :pubsub/error
@@ -385,7 +387,7 @@
                   (>? S out (proto/error-msg topic "Topic not registered")))
 
           ;; Registered, but the subject may not subscribe
-                (not (authorize-fn principal topic))
+                (not (authorize-fn {:principal principal :topic topic}))
                 (do
                   (log/warn :pubsub/subscription-denied {:topic topic})
                   (>? S out (proto/error-msg topic "Not authorized")))
@@ -557,10 +559,17 @@
     (let [;; Join-time subscribe authorization. Default permissive so kabel
           ;; stays a plain pub/sub substrate; an app injects a policy that reads
           ;; the `:kabel/principal` an upstream auth middleware stamped.
-          authorize-fn (get opts :authorize-fn (fn [_principal _topic] true))
+          ;; Resolved once, here, so the two gates cannot drift apart again.
+          authorize-fn (authz/gate opts {:op :subscribe
+                                         :legacy-keys [:authorize-fn]
+                                         :legacy-adapter authz/pubsub-legacy})
           ;; Defaults to the subscribe gate, so an existing consumer that passes
           ;; only :authorize-fn behaves exactly as before.
-          authorize-publish-fn (get opts :authorize-publish-fn authorize-fn)
+          authorize-publish-fn (authz/gate opts
+                                           {:op :publish
+                                            :legacy-keys [:authorize-publish-fn
+                                                          :authorize-fn]
+                                            :legacy-adapter authz/pubsub-legacy})
           on-publish (get opts :on-publish)
           pass-in (chan)
           pass-out (chan)

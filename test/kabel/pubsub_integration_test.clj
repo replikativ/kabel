@@ -16,8 +16,20 @@
 (def ^:dynamic *client-peer* nil)
 (def ^:dynamic *server-url* nil)
 
-(defn unique-port []
-  (+ 47300 (rand-int 1000)))
+(def ^:private port-counter (atom 47300))
+
+(defn unique-port
+  "Ports from a monotone counter, not `rand-int`.
+
+  Random ports collide, and a collision here is not merely a bind failure: a
+  peer whose server was stopped may still be retrying its dials, so a later
+  test landing on that port inherits a stranger's connection attempts. A
+  counter removes the race rather than making it rarer.
+
+  Uses a disjoint range from `kabel.overlay.integration-test` (48300+) so the
+  two suites cannot collide with each other either."
+  []
+  (swap! port-counter inc))
 
 (defmacro with-peers
   "Execute body with server and client peers set up."

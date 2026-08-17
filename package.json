@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Kabel WebSocket connection library",
   "dependencies": {
+    "@noble/ed25519": "^2.3.0",
     "websocket": "^1.0.34"
   },
   "devDependencies": {

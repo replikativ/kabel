@@ -6,7 +6,7 @@
 
   An identity here costs one key generation, so bans are structurally
   unenforceable and every identity-based moderation technique fails (see
-  `doc/design/MODERATION.md`). What remains is judgment other people can choose
+  `doc/MODERATION.md`). What remains is judgment other people can choose
   to accept.
 
   Taken from AT Protocol's labelers, deliberately including the part that looks

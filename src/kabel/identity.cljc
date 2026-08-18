@@ -42,7 +42,7 @@
   Byte operations work on byte arrays / `Uint8Array`, never on numbers.
   ClojureScript coerces bit operations to 32-bit signed integers, so a 256-bit
   identifier manipulated as numbers is silently wrong on exactly one platform —
-  see `doc/design/DHT_DESIGN.md` §5."
+  see `.internal/DHT_DESIGN.md` §5."
   (:require [hasch.core :refer [edn-hash]]
             [org.replikativ.geheimnis.codec :as codec]
             [org.replikativ.geheimnis.core :as gcore]

@@ -6,7 +6,7 @@ impossibility is structural rather than unfinished.
 
 Written after reading Mastodon's and Synapse's moderation code, AT Protocol's
 labeler design, and the documented failures of all three
-(`.internal/reference/moderation.md`).
+(internal review notes).
 
 ---
 

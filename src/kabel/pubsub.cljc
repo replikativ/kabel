@@ -504,9 +504,16 @@
     (direct-subscribe! peer topics opts)))
 
 (defn- direct-subscribe!
-  [peer topics {:keys [strategies on-publish on-handshake-complete] :as opts}]
+  [peer topics {:keys [strategies on-publish on-handshake-complete out] :as opts}]
   (let [{{S :supervisor} :volatile} @peer
-        out (get-in (get-pubsub-state peer) [:out])
+        ;; `[:pubsub :out]` is ONE slot written by per-connection middleware, so
+        ;; on a peer with several connections it is whichever was accepted last.
+        ;; Harmless for a client with a single connection -- the case pub/sub
+        ;; was built for -- and wrong for anything on a mesh, where "handshake
+        ;; with the peer that has the state" is the whole point. So a caller
+        ;; that knows which connection it means passes `:out`; the fallback is
+        ;; the historical behaviour.
+        out (or out (get-in (get-pubsub-state peer) [:out]))
         id #?(:clj (java.util.UUID/randomUUID)
               :cljs (random-uuid))]
     (go-try S

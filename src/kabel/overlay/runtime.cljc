@@ -257,6 +257,14 @@
   [peer]
   (set (keys (:by-id @(registry peer)))))
 
+(defn connection-out
+  "The channel that reaches `peer-id`, or nil if we hold no connection to it.
+
+  This is what makes \"sync with the peer that told me\" expressible. Without it
+  a caller can only reach whichever connection wrote `[:pubsub :out]` last."
+  [peer peer-id]
+  (get-in @(registry peer) [:by-id peer-id]))
+
 (defn- register!
   "Bind `peer-id` to `out`, and flush anything queued for it.
 

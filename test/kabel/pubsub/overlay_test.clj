@@ -245,7 +245,9 @@
         ;; them — a re-handshake must reproduce the ORIGINAL subscription.
         (let [subs (atom {:t {:strategies {:t strategy}
                               :on-handshake-complete (fn [_] (swap! completes inc))}})]
-          (pso/re-handshake! S client subs))
+          ;; nil `from`: no overlay registry in this direct-only fixture, so it
+          ;; falls back to [:pubsub :out] -- the historical path.
+          (pso/re-handshake! S client subs nil))
         (is (wait-for 5000 #(= 2 @inits))
             "a horizon gap must re-run the SAME differential sync the join used")
         (is (wait-for 5000 #(pos? @completes))
@@ -254,3 +256,64 @@
         ;; them would silently stop applying anything afterwards.
         (is (= #{:t} (set (keys (get-in @client [:pubsub :subscriptions]))))))
       (finally (<?? S (peer/stop server))))))
+
+
+;; =============================================================================
+;; A publish must not overtake the handshake it depends on
+;; =============================================================================
+
+(deftest publishes-are-held-until-the-handshake-completes
+  ;; The handshake is point-to-point and publishes are disseminated, so they
+  ;; arrive over different paths -- in a mesh, from different peers -- with no
+  ;; ordering relation. A strategy whose -apply-publish is a DELTA on handshake
+  ;; state (datahike tx-broadcast, spindel -apply-delta, konserve-sync key
+  ;; writes) is silently wrong if a publish lands first.
+  (let [applied (atom [])
+        peer (atom {:pubsub {:subscriptions
+                             {:t {:strategy (recording-strategy applied)
+                                  :handshake-complete? false}}}})
+        subs (atom {:t {}})
+        pending (atom {})]
+    (pso/deliver-to-strategy! S peer subs pending :t {:n 1})
+    (pso/deliver-to-strategy! S peer subs pending :t {:n 2})
+    (<?? S (timeout 200))
+    (is (empty? @applied)
+        "nothing may be applied before the base state exists")
+    (is (= 2 (count (get @pending :t))) "both must be held, not dropped")
+
+    ;; Handshake completes.
+    (swap! peer assoc-in [:pubsub :subscriptions :t :handshake-complete?] true)
+    (<?? S (pso/drain-pending! S peer subs pending :t))
+    (<?? S (timeout 200))
+    (is (= [{:n 1} {:n 2}] @applied)
+        "the buffer must drain in ARRIVAL order")
+
+    (testing "and afterwards delivery is immediate"
+      (pso/deliver-to-strategy! S peer subs pending :t {:n 3})
+      (<?? S (timeout 200))
+      (is (= [{:n 1} {:n 2} {:n 3}] @applied)))))
+
+(deftest the-pre-handshake-buffer-is-bounded
+  ;; The sender controls the rate, so the buffer is attacker-influenced.
+  ;; Dropping the oldest is survivable -- dissemination repairs gaps -- where
+  ;; unbounded growth during a slow handshake is not.
+  (let [applied (atom [])
+        peer (atom {:pubsub {:subscriptions
+                             {:t {:strategy (recording-strategy applied)
+                                  :handshake-complete? false}}}})
+        subs (atom {:t {}})
+        pending (atom {})]
+    (dotimes [i 10]
+      (pso/deliver-to-strategy! S peer subs pending :t {:n i} {:max-pending 4}))
+    (is (= 4 (count (get @pending :t))))
+    (is (= [{:n 6} {:n 7} {:n 8} {:n 9}] (vec (get @pending :t)))
+        "the oldest are dropped, so the newest state survives")))
+
+(deftest a-topic-owner-is-not-made-to-wait
+  ;; A peer that REGISTERED a topic has no subscription and so no handshake to
+  ;; wait for. Buffering there would stall a publisher forever.
+  (let [applied (atom [])
+        peer (atom {:pubsub {:topics {:t {:strategy (recording-strategy applied)}}}})]
+    (pso/deliver-to-strategy! S peer (atom {}) (atom {}) :t {:n 1})
+    (<?? S (timeout 200))
+    (is (= [{:n 1}] @applied))))

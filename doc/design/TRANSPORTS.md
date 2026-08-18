@@ -416,6 +416,38 @@ For a backgrounded mobile client, neither transport survives Android Doze or
 iOS suspension, and the correct answer is FCM/APNs. That is the *measured*
 version of what the SSE spec was gesturing at.
 
+## 4e. Two orderings the overlay transport has to provide
+
+Worth recording because both were found by review rather than by testing, and
+both are invisible until a mesh exists.
+
+**A publish must not overtake the handshake it depends on.** The handshake is
+point-to-point and publishes are disseminated, so they arrive over different
+paths — in a mesh, from different peers entirely — with no ordering relation of
+any kind. For a strategy whose `-apply-publish` is a *delta* on handshake state
+(datahike's tx-broadcast, spindel's `-apply-delta`, konserve-sync's key writes)
+applying a publish first is a lost update, silently. So a payload for a topic
+whose handshake has not completed is held in arrival order and released when it
+has. `:handshake-complete?` already existed on the subscription; nothing read
+it. The buffer is bounded — the sender controls the rate — and drops oldest,
+which dissemination can repair.
+
+Draining has to *await* each application. A `doseq` that merely starts the
+go-blocks applies the buffer in whatever order the scheduler finishes, which is
+precisely the defect the buffer exists to prevent. The first version did that
+and the test caught it.
+
+**State sync must target the peer that has the state.** `[:pubsub :out]` is one
+slot written by per-connection middleware, so on a peer with several
+connections it is whichever was accepted last — fine for a client with one
+connection, wrong for anything on a mesh. `[:state-sync from …]` carries `from`
+precisely because the peer reporting the horizon is one that *has* what we are
+missing, so `re-handshake!` now resolves it via `runtime/connection-out` and
+passes it explicitly. Until then, "state sync becomes multi-source" was
+aspirational.
+
+---
+
 ## 5. The transport fix (prerequisite #1)
 
 ### The measurement

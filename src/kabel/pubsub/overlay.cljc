@@ -57,20 +57,13 @@
 (defn- ok [v]
   (let [ch (chan 1)] (put! ch v) (close! ch) ch))
 
-(defn deliver-to-strategy!
-  "Hand a disseminated payload to the topic's strategy, and to `:on-publish`.
+(defn- handshake-complete? [peer topic]
+  (let [sub (get-in (or (:pubsub @peer) {}) [:subscriptions topic])]
+    ;; No subscription at all means this peer is a topic OWNER rather than a
+    ;; subscriber -- nothing to wait for.
+    (or (nil? sub) (boolean (:handshake-complete? sub)))))
 
-  Installed by `install!` as the runtime's delivery function: dissemination
-  emits a `[:deliver topic payload]` action rather than calling anything, so
-  the state machine stays pure and the runtime decides what delivery means.
-  Here it means what a one-hop publish has always meant — `-apply-publish`
-  followed by the `:on-publish` callback, in that order, exactly as
-  `kabel.pubsub/handle-publish!` does on the direct path.
-
-  Calling `:on-publish` matters for the PR's central claim: a strategy is not
-  supposed to be able to tell which transport carried it, and neither is the
-  application. `subs` carries the opts the subscription was made with, because
-  `:on-publish` is not kept in the peer's subscription state."
+(defn- apply-one!
   [S peer subs topic payload]
   (let [sub (get-in (or (:pubsub @peer) {}) [:subscriptions topic])
         topic-cfg (get-in (or (:pubsub @peer) {}) [:topics topic])
@@ -82,6 +75,61 @@
             (when on-publish
               (on-publish topic payload)))))
 
+(defn drain-pending!
+  "Apply anything buffered for `topic`, in arrival order.
+
+  Called when the handshake completes, and again on every delivery, so a
+  payload can never overtake the state it was meant to be applied on top of."
+  [S peer subs pending topic]
+  (let [queued (get @pending topic)]
+    (swap! pending dissoc topic)
+    ;; Sequentially, awaiting each: `apply-one!` returns a go-block, so a
+    ;; `doseq` that merely STARTS them applies the buffer in whatever order
+    ;; the scheduler happens to finish — which is the exact defect this
+    ;; buffer exists to prevent. Always returns a channel so callers can
+    ;; chain on it.
+    (go-try S
+            (doseq [p queued]
+              (<? S (apply-one! S peer subs topic p)))
+            (count queued))))
+
+(defn deliver-to-strategy!
+  "Hand a disseminated payload to the topic's strategy, and to `:on-publish`.
+
+  Installed by `install!` as the runtime's delivery function: dissemination
+  emits a `[:deliver topic payload]` action rather than calling anything, so
+  the state machine stays pure and the runtime decides what delivery means.
+  Here it means what a one-hop publish has always meant — `-apply-publish`
+  followed by `:on-publish`, in that order, exactly as
+  `kabel.pubsub/handle-publish!` does on the direct path.
+
+  ## Why this buffers
+
+  The handshake is point-to-point and publishes are disseminated, so the two
+  arrive over different paths — in a mesh, from different peers entirely —
+  with no ordering relation of any kind. For a strategy whose `-apply-publish`
+  is a DELTA on handshake state (datahike's tx-broadcast, spindel's
+  `-apply-delta`, konserve-sync's key writes) applying a publish before the
+  base state it depends on is a lost update or an error, and a silent one.
+
+  So a payload for a topic whose handshake has not completed is held, in
+  arrival order, and released when it has. `:handshake-complete?` already
+  existed on the subscription; nothing was reading it.
+
+  Bounded, because the sender controls the rate: past `max-pending` the OLDEST
+  is dropped. Dropping is survivable — dissemination will repair a gap — where
+  unbounded growth during a slow handshake is not."
+  [S peer subs pending topic payload & [{:keys [max-pending] :or {max-pending 1024}}]]
+  (if-not (handshake-complete? peer topic)
+    (swap! pending update topic
+           (fn [q] (let [q (conj (vec q) payload)]
+                     (if (> (count q) max-pending) (subvec q 1) q))))
+    ;; Drain first, and AWAIT it, so a payload arriving just after the
+    ;; handshake completed cannot overtake the buffer it was queued behind.
+    (go-try S
+            (<? S (drain-pending! S peer subs pending topic))
+            (<? S (apply-one! S peer subs topic payload)))))
+
 (defn transport
   "A `kabel.pubsub` transport backed by `running` (from
   `kabel.overlay.runtime/start!`).
@@ -91,8 +139,8 @@
 
   `subs` is an atom of `{topic opts}`, remembered so that a horizon-triggered
   `re-handshake!` can reproduce the ORIGINAL subscription rather than a
-  stripped-down one."
-  [S peer running subs]
+  stripped-down one. `pending` is the pre-handshake buffer."
+  [S peer running subs pending]
   {:publish!
    (fn [_peer topic payload]
      ;; `submit!` returns false when the runtime's event queue is full, and its
@@ -108,13 +156,20 @@
      (go-try S
              ;; Interest FIRST. It is what makes dissemination forward these
              ;; topics to us at all; without it the handshake could complete
-             ;; and no live publish would ever arrive.
+             ;; and no live publish would ever arrive. Anything that lands
+             ;; before the handshake finishes is buffered rather than applied.
              (if-not (rt/subscribe-topics! running topics)
                ;; Refused means the interest was never registered, so this peer
                ;; would be permanently invisible to the mesh for these topics.
                ;; Reporting success here is the worst of the options.
                {:error :kabel/overloaded :transport :overlay}
-               (do
+               (let [;; Release the buffer as soon as the handshake says so,
+                     ;; rather than waiting for the next publish to notice.
+                     opts (update opts :on-handshake-complete
+                                  (fn [f]
+                                    (fn [t]
+                                      (drain-pending! S peer subs pending t)
+                                      (when f (f t)))))]
                  (doseq [t topics] (swap! subs assoc t opts))
                  ;; Then the ordinary point-to-point handshake — the SAME code
                  ;; the direct transport runs. A handshake is a bulk,
@@ -127,7 +182,7 @@
 
 (defn re-handshake!
   "Answer a horizon gap by re-running the handshake for everything this peer
-  subscribes to.
+  subscribes to, against the peer that reported the gap.
 
   Deliberately not a bespoke \"state request\" message. `PSyncStrategy` already
   has exactly one differential state sync — `-init-client-state` →
@@ -137,25 +192,30 @@
   Reusing the subscribe path means the recovery route is the same code the
   join route is, so it cannot rot separately.
 
+  `from` is used rather than discarded: the peer that reported the horizon is
+  by construction one that HAS the state we are missing, and on a mesh
+  `[:pubsub :out]` would otherwise send this to whichever connection was
+  accepted last. That is what makes state sync multi-source rather than
+  nominally so.
+
   Reuses the ORIGINAL opts per topic. Passing only `{:strategies …}` would be
   the same code with a different argument: `init-subscription-state!` replaces
   the whole subscription map, so `:on-handshake-complete` would be silently
-  dropped and never fire again.
-
-  Point-to-point on purpose. This is a bulk, acknowledged, backpressured
-  transfer between two peers, and disseminating it would flood everyone with
-  one peer's catch-up — the opposite of what a horizon gap calls for."
-  [S peer subs]
+  dropped and never fire again."
+  [S peer subs from]
   (let [held (get-in (or (:pubsub @peer) {}) [:subscriptions])
-        topics (into #{} (filter #(get-in held [% :strategy]) (keys held)))]
+        topics (into #{} (filter #(get-in held [% :strategy]) (keys held)))
+        out (when from (rt/connection-out peer from))]
     (when (seq topics)
       ;; One call per distinct opts map, so each topic is restored with the
       ;; callbacks it was subscribed with.
       (doseq [[opts ts] (group-by #(get @subs %) topics)]
         (#'pubsub/direct-subscribe!
          peer (set ts)
-         (or opts {:strategies (into {} (for [t ts]
-                                          [t (get-in held [t :strategy])]))}))))))
+         (cond-> (or opts
+                     {:strategies (into {} (for [t ts]
+                                             [t (get-in held [t :strategy])]))})
+           out (assoc :out out)))))))
 
 (defn install!
   "Wire `peer`'s pub/sub onto `running`, and route disseminated payloads into
@@ -166,10 +226,13 @@
   (let [;; The opts each topic was subscribed with. `kabel.pubsub` keeps
         ;; `:strategy` and `:on-handshake-complete` on the peer but not
         ;; `:on-publish`, and a re-handshake needs all of them.
-        subs (atom {})]
+        subs (atom {})
+        ;; Publishes that arrived before their topic's handshake finished.
+        pending (atom {})]
     (rt/set-deliver! running (fn [topic payload]
-                               (deliver-to-strategy! S peer subs topic payload)))
-    (rt/set-state-sync! running (fn [_from _stranded]
-                                  (re-handshake! S peer subs)))
-    (pubsub/set-transport! peer (transport S peer running subs))
+                               (deliver-to-strategy! S peer subs pending
+                                                     topic payload)))
+    (rt/set-state-sync! running (fn [from _stranded]
+                                  (re-handshake! S peer subs from)))
+    (pubsub/set-transport! peer (transport S peer running subs pending))
     peer))

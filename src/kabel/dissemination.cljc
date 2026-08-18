@@ -94,6 +94,30 @@
    ;; Cap on messages served for a single :want, so a repair request cannot be
    ;; used as an amplifier.
    :max-want 32
+   ;; Cap on the SPAN of a requested range, and on how many ranges one :want
+   ;; may contain.
+   ;;
+   ;; Serving a want costs O(span), not O(messages served) — the lookup walks
+   ;; the requested sequence numbers. Unclamped, a single small message naming
+   ;; {:lo 0 :hi 20000000} bought ~2.9 seconds of CPU, measured: remote
+   ;; exhaustion at about 10^7 : 1 amplification, from a peer that has to send
+   ;; nothing but one map. A :want is attacker-supplied like everything else on
+   ;; the wire, and was the one place we forgot it.
+   ;;
+   ;; Clamped rather than refused, so an honest peer with a genuinely large gap
+   ;; still makes progress — it just takes several rounds.
+   :max-want-span 1024
+   :max-want-ranges 16
+   ;; Ranges retained per (origin, epoch) in the seen set.
+   ;;
+   ;; The claim that interval sets cost O(gaps) rather than O(messages) is true
+   ;; and incomplete: the gaps are chosen by the PUBLISHER. Measured, a peer
+   ;; emitting only even sequence numbers produces one range per message —
+   ;; 10 000 messages, 10 000 ranges. Capping restores the bound; the lowest
+   ;; range is evicted, so recent contiguity survives and the cost of an
+   ;; evicted range is that very old messages may be accepted twice, which is
+   ;; harmless for idempotent payloads.
+   :max-seen-ranges 64
    ;; Cap on origins described in one :have digest.
    :max-summary-origins 64
    ;; Bound on the retained delivery log. Real integrations hand off to the
@@ -197,7 +221,14 @@
 
 (defn mark-seen
   [state origin epoch seq-no]
-  (update-in state [:seen origin epoch] (fnil is*/add is*/empty) seq-no))
+  (let [{:keys [max-seen-ranges]} (:opts state)
+        updated (is*/add (get-in state [:seen origin epoch] is*/empty) seq-no)
+        ;; A sparse publisher fragments the set one range per message. Evict
+        ;; the lowest, which keeps the recent end contiguous.
+        trimmed (if (and max-seen-ranges (> (is*/count-ranges updated) max-seen-ranges))
+                  (vec (drop (- (is*/count-ranges updated) max-seen-ranges) updated))
+                  updated)]
+    (assoc-in state [:seen origin epoch] trimmed)))
 
 (defn summary
   "A digest of what we hold: `{origin {epoch interval-set}}`, capped.
@@ -244,13 +275,23 @@
       state)))
 
 (defn stored
-  "Messages held for `range`, capped at `:max-want`."
+  "Messages held for `range`, capped at `:max-want` served and
+  `:max-want-span` examined.
+
+  Both caps are load-bearing. `:max-want` bounds what we send; `:max-want-span`
+  bounds what we LOOK AT, and without it the lookup walks every sequence number
+  named — so an empty range of ten million costs ten million probes and sends
+  nothing."
   [state {:keys [origin epoch lo hi]}]
-  (let [{:keys [max-want]} (:opts state)]
-    (->> (range lo (inc hi))
-         (keep #(get-in state [:store [origin epoch %]]))
-         (take max-want)
-         vec)))
+  (let [{:keys [max-want max-want-span]} (:opts state)
+        lo (max 0 (or lo 0))
+        hi (min (or hi lo) (+ lo (dec max-want-span)))]
+    (if (< hi lo)
+      []
+      (->> (range lo (inc hi))
+           (keep #(get-in state [:store [origin epoch %]]))
+           (take max-want)
+           vec))))
 
 ;; =============================================================================
 ;; Peers and interest
@@ -461,7 +502,9 @@
                       [])})
 
         :want
-        (let [msgs (mapcat #(stored state %) (:ranges payload))]
+        (let [{:keys [max-want-ranges]} (:opts state)
+              msgs (mapcat #(stored state %)
+                           (take max-want-ranges (:ranges payload)))]
           {:state (update-in state [:stats :want-served] + (count msgs))
            :actions (vec (for [m msgs]
                            [:send from (assoc m :hops 0 :repair? true)]))})

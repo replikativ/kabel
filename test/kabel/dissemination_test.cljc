@@ -442,3 +442,61 @@
       (is (= #{} (:carries (nth (first (interests-of crossing)) 2)))
           "announced coverage it no longer provides")
       (is (empty? (interests-of after)) "re-announced on every tick"))))
+
+;; =============================================================================
+;; Resource bounds under attack
+;; =============================================================================
+
+(deftest serving-a-want-costs-what-it-sends-not-what-it-is-asked
+  ;; The vulnerability this closes: serving a :want walked every sequence
+  ;; number named, so one small message claiming {:lo 0 :hi 20000000} bought
+  ;; ~2.9 seconds of CPU and sent nothing back — remote exhaustion at roughly
+  ;; 10^7 : 1, from a peer that spends one map.
+  (let [s (d/make-state :me #{:t} {:max-want-span 1024})]
+    (testing "an enormous empty range is cheap"
+      (let [t0 #?(:clj (System/currentTimeMillis) :cljs (.getTime (js/Date.)))]
+        (is (empty? (d/stored s {:origin :x :epoch 0 :lo 0 :hi 50000000})))
+        (let [ms (- #?(:clj (System/currentTimeMillis) :cljs (.getTime (js/Date.))) t0)]
+          (is (< ms 250) (str "took " ms " ms — the span clamp is not holding")))))
+
+    (testing "and a legitimate request still works"
+      (let [[s' _] (d/publish s :t "a")
+            [s' _] (d/publish s' :t "b")]
+        (is (= 2 (count (d/stored s' {:origin :me :epoch 0 :lo 0 :hi 10}))))))
+
+    (testing "nonsense bounds are refused rather than computed"
+      (is (empty? (d/stored s {:origin :x :epoch 0 :lo 100 :hi 1})))))
+
+  (testing "the number of ranges in one :want is capped too"
+    ;; Otherwise the span clamp is defeated by sending a thousand ranges.
+    (let [s (-> (d/make-state :me #{:t} {:max-want-ranges 4 :max-want 100})
+                (as-> st (reduce (fn [a i] (first (d/publish a :t i))) st (range 50))))
+          many (vec (for [i (range 50)] {:origin :me :epoch 0 :lo i :hi i}))
+          {acts :actions} (d/handler s {:type :message :from :p
+                                        :payload {:type :want :ranges many}}
+                                     {:now 0})]
+      (is (<= (count acts) 4) (str "served " (count acts) " ranges past the cap")))))
+
+(deftest the-seen-set-cannot-be-fragmented-without-bound
+  ;; "O(gaps), not O(messages)" is true and incomplete: the gaps are chosen by
+  ;; the PUBLISHER. A peer emitting only even sequence numbers produced one
+  ;; range per message — 10 000 messages, 10 000 ranges.
+  (testing "an honest contiguous stream still costs one range"
+    (let [s (reduce (fn [st i] (d/mark-seen st :honest 0 i))
+                    (d/make-state :me) (range 5000))]
+      (is (= 1 (is*/count-ranges (get-in s [:seen :honest 0]))))))
+
+  (testing "and a deliberately sparse one is capped"
+    (let [s (reduce (fn [st i] (d/mark-seen st :attacker 0 (* 2 i)))
+                    (d/make-state :me #{} {:max-seen-ranges 64})
+                    (range 5000))]
+      (is (= 64 (is*/count-ranges (get-in s [:seen :attacker 0]))))))
+
+  (testing "eviction keeps the RECENT end, because that is what repair needs"
+    (let [s (reduce (fn [st i] (d/mark-seen st :a 0 (* 2 i)))
+                    (d/make-state :me #{} {:max-seen-ranges 8})
+                    (range 100))
+          iset (get-in s [:seen :a 0])]
+      (is (d/seen? s :a 0 198) "the newest message was forgotten")
+      (is (not (d/seen? s :a 0 0)) "the oldest should have been evicted")
+      (is (= 8 (is*/count-ranges iset))))))

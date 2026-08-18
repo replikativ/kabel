@@ -79,6 +79,42 @@
 ;; Server-Side API
 ;; =============================================================================
 
+;; =============================================================================
+;; Transport
+;; =============================================================================
+;; Where a publish GOES, and what a subscription MEANS, are the only two things
+;; that differ between running pub/sub over one connection and running it over
+;; a peer-to-peer overlay. Everything else — topics, strategies, the batched
+;; ack-driven handshake, backpressure — is identical, so it lives here once and
+;; the difference is a pair of injected functions.
+;;
+;;   :direct   (default, and today's behaviour) a server fans out to the
+;;             subscriber channels it holds; a client sends to its server.
+;;   :overlay  a publish is disseminated multi-hop, signed at origin and
+;;             verified at every hop; a subscription is topic interest.
+;;
+;; `PSyncStrategy` does not change, and neither does any consumer. That is the
+;; point: konserve-sync, datahike's tx-broadcast and spindel's signal-sync
+;; already express both paths — `-apply-publish` is the live path and
+;; `-init-client-state`/`-handshake-items` is the differential state sync — so
+;; federation is a transport choice rather than an API.
+
+(defn set-transport!
+  "Install a transport: `{:publish! (fn [peer topic payload] ch)
+                          :subscribe! (fn [peer topics opts] ch)}`.
+
+  Either key may be omitted to keep the direct behaviour for that operation.
+  Passing nil restores both."
+  [peer transport]
+  (update-pubsub-state! peer assoc :transport transport)
+  peer)
+
+(defn- transport-fn
+  [peer k]
+  (get-in (get-pubsub-state peer) [:transport k]))
+
+(declare direct-publish! direct-subscribe!)
+
 (defn register-topic!
   "Register a topic on the peer for subscription.
 
@@ -153,6 +189,14 @@
    - payload: Any EDN value
 
    Returns: channel yielding {:ok true :sent-count N} or {:error ...}"
+  [peer topic payload]
+  (if-let [f (transport-fn peer :publish!)]
+    (f peer topic payload)
+    (direct-publish! peer topic payload)))
+
+(defn- direct-publish!
+  "The one-hop publish: a server fans out to its subscribers, a client sends to
+  its server. This was `publish!` before there was more than one transport."
   [peer topic payload]
   (let [{{S :supervisor} :volatile} @peer
         pubsub-state (get-pubsub-state peer)
@@ -455,6 +499,12 @@
    Returns channel yielding {:ok topics} when done, or {:error ...}"
   [peer topics {:keys [strategies on-publish on-handshake-complete] :as opts}]
   {:pre [(every? #(contains? strategies %) topics)]}
+  (if-let [f (transport-fn peer :subscribe!)]
+    (f peer topics opts)
+    (direct-subscribe! peer topics opts)))
+
+(defn- direct-subscribe!
+  [peer topics {:keys [strategies on-publish on-handshake-complete] :as opts}]
   (let [{{S :supervisor} :volatile} @peer
         out (get-in (get-pubsub-state peer) [:out])
         id #?(:clj (java.util.UUID/randomUUID)

@@ -45,6 +45,7 @@
       [:connect    <to-id> <address> <first-frame>]
       [:disconnect <to-id>]
       [:persist    <key> <value>]
+      [:deliver    <topic> <payload>]
 
   `:connect` and `:disconnect` exist because opening a transport is not a
   message — in a deployment they are `kabel.peer/connect` against a URL
@@ -300,6 +301,12 @@
       (-> sim
           (update-in [:stats :connects] (fnil inc 0))
           (transmit from to (or payload {:type :dial}))))
+
+    :deliver
+    ;; Handing a payload to the application. The simulator has no application —
+    ;; it counts the call so a test can assert delivery happened at the
+    ;; protocol's boundary, which is the part the protocol is responsible for.
+    (update-in sim [:stats :delivered-to-app] (fnil inc 0))
 
     :persist
     ;; Handing a value to durable storage. The simulator has no store — it

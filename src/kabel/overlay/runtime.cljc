@@ -97,7 +97,8 @@
       :connect!    (fn [to address frame])
       :disconnect! (fn [to])
       :schedule!   (fn [delay-ms payload])
-      :persist!    (fn [key value])   ; optional
+      :persist!    (fn [key value])       ; optional
+      :deliver!    (fn [topic payload])   ; optional — the application
 
   Returns a context map. Feed it events with `submit!` and start it with
   `run!`."
@@ -107,6 +108,13 @@
    :handler (or handler overlay/handler)
    :effects effects
    :now-fn (or now-fn now-ms)
+   ;; Late-bound application delivery. The effects map is fixed at
+   ;; construction, but `kabel.pubsub.overlay` can only wire delivery once BOTH
+   ;; the overlay and the peer's pub/sub state exist — so this one is an atom.
+   :deliver-fn (atom nil)
+   ;; Late-bound too, and for the same reason: what a horizon gap MEANS is the
+   ;; application's business, not the transport's.
+   :state-sync-fn (atom nil)
    ;; Per-connection metering. Written as a pure state machine, kept in an atom
    ;; here because the middleware meters concurrently across connections.
    :limiter (atom (rl/make-state (or ratelimit {})))
@@ -124,7 +132,7 @@
   (boolean (async/offer! (:events ctx) event)))
 
 (defn- apply-action!
-  [{:keys [effects] :as _ctx} [op & args]]
+  [{:keys [effects] :as ctx} [op & args]]
   (case op
     :send (let [[to payload] args] ((:send! effects) to (frame payload)))
     :connect (let [[to address payload] args]
@@ -133,6 +141,13 @@
     :timer (let [[delay payload] args] ((:schedule! effects) delay payload))
     :persist (let [[k v] args]
                (when-let [f (:persist! effects)] (f k v)))
+    :deliver (let [[topic payload] args]
+               (when-let [f (or (:deliver! effects) @(:deliver-fn ctx))]
+                 (f topic payload)))
+
+    :state-sync (let [[from stranded] args]
+                  (when-let [f (or (:state-sync! effects) @(:state-sync-fn ctx))]
+                    (f from stranded)))
     (throw (ex-info "Unknown overlay action"
                     {:type :kabel.overlay.runtime/unknown-action :action op}))))
 
@@ -548,6 +563,30 @@
                                       :require-signed? (if (nil? require-signed?)
                                                          true
                                                          require-signed?)})})))
+
+(defn set-deliver!
+  "Install the application delivery function — what `[:deliver topic payload]`
+  means. `kabel.pubsub.overlay` sets this to `-apply-publish`."
+  [{:keys [ctx]} f]
+  (reset! (:deliver-fn ctx) f)
+  nil)
+
+(defn set-state-sync!
+  "Install what a horizon gap means. `kabel.pubsub.overlay` sets this to
+  re-running the handshake, which IS the differential state sync."
+  [{:keys [ctx]} f]
+  (reset! (:state-sync-fn ctx) f)
+  nil)
+
+(defn subscribe-topics!
+  "Add `topics` to what this peer subscribes to, so dissemination delivers them.
+
+  Interest, not a request: nothing is asked of anybody. A peer forwards to us
+  because we said we want it, and relays carry ranges covering it."
+  [{:keys [ctx]} topics]
+  (submit! ctx {:type :message
+                :from :app
+                :payload {:type :subscribe :topics (set topics)}}))
 
 (defn publish!
   "Publish on a topic through a running overlay."

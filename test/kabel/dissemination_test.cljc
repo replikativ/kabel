@@ -95,7 +95,7 @@
                                   :epoch 0 :seq 1 :hops 0 :payload "x"}}
                      {:now 0})]
       (is (= ["x"] (:delivered s')))
-      (is (= 1 (count actions))))))
+      (is (= 1 (count (filter #(= :send (first %)) actions)))))))
 
 (deftest no-echo-and-hop-ttl
   (let [base (-> (d/make-state :me #{:t})
@@ -107,7 +107,7 @@
                              :payload {:type :gossip :topic :t :origin :o
                                        :epoch 0 :seq 1 :hops 0 :payload "x"}}
                        {:now 0})]
-        (is (= [:p2] (map second actions)))))
+        (is (= [:p2] (map second (filter #(= :send (first %)) actions))))))
 
     (testing "a message at the hop limit is delivered but not relayed"
       ;; gossipsub has no hop limit at all; a forwarding loop there is bounded
@@ -119,7 +119,12 @@
                                     :epoch 0 :seq 1 :hops 3 :payload "x"}}
                        {:now 0})]
         (is (= ["x"] (:delivered s')) "hop-expired message was not delivered")
-        (is (empty? actions) "hop-expired message was relayed anyway")
+        ;; Delivered AND not relayed — the two halves of the hop limit, and
+        ;; now separable because delivery is its own action.
+        (is (= [[:deliver :t "x"]] (filter #(= :deliver (first %)) actions))
+            "hop-expired message was not handed to the application")
+        (is (empty? (filter #(= :send (first %)) actions))
+            "hop-expired message was relayed anyway")
         (is (= 1 (get-in s' [:stats :hop-expired])))))))
 
 (deftest interest-filtering

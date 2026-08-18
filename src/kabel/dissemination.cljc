@@ -433,18 +433,25 @@
 (defn- accept-and-forward
   "Common path for a message we have not seen: record, deliver, relay."
   [state msg from]
-  (let [{:keys [origin epoch seq topic hops]} msg
+  (let [{:keys [origin epoch seq topic hops payload]} msg
         {:keys [max-hops]} (:opts state)
+        subscribed? (contains? (:topics state) topic)
         state (-> state
                   (mark-seen origin epoch seq)
                   (store-message msg)
-                  (deliver-local msg))]
+                  (deliver-local msg))
+        ;; Delivery to the APPLICATION is an action, not a callback. The state
+        ;; machine stays pure and the runtime decides what delivery means —
+        ;; which for `kabel.pubsub` is `-apply-publish` on the topic's
+        ;; strategy. `:delivered` is still recorded so tests and inspection
+        ;; can see it without interpreting actions.
+        deliver (when subscribed? [[:deliver topic payload]])]
     (if (>= hops max-hops)
-      [(update-in state [:stats :hop-expired] inc) []]
+      [(update-in state [:stats :hop-expired] inc) (vec deliver)]
       (let [targets (forward-targets state topic from)
             msg' (assoc msg :hops (inc hops))]
         [(update-in state [:stats :forwarded] + (count targets))
-         (vec (for [t targets] [:send t msg']))]))))
+         (vec (concat deliver (for [t targets] [:send t msg'])))]))))
 
 ;; =============================================================================
 ;; Handler
@@ -512,6 +519,21 @@
         (let [[state actions] (publish state (:topic payload) (:payload payload))]
           {:state state :actions actions})
 
+        ;; A subscription taken out AFTER we connected. `sync-peers` announces
+        ;; interests when a peer appears, which covers the peers we already
+        ;; had — but nothing tells them when our interest set later CHANGES.
+        ;; Without this a late subscriber is silently never forwarded to, since
+        ;; `interested?` is what gates forwarding.
+        :subscribe
+        (let [topics' (set (:topics payload))
+              state (update state :topics (fnil into #{}) topics')
+              targets (sort (keys (:peers state)))]
+          {:state state
+           :actions (vec (for [t targets]
+                           [:send t {:type :interests
+                                     :topics (:topics state)
+                                     :carries (effective-carries state now)}]))})
+
         :interests
         {:state (assoc-in state [:peers from]
                           {:interests (set (:topics payload))
@@ -545,9 +567,19 @@
               state (cond-> state
                       (seq stranded) (assoc :needs-state-sync (vec stranded)))]
           {:state state
-           :actions (if (seq wants)
-                      [[:send from {:type :want :ranges wants}]]
-                      [])})
+           :actions (vec (concat
+                          (when (seq wants)
+                            [[:send from {:type :want :ranges wants}]])
+                          ;; Being beyond the horizon is a TRANSPORT fact: the
+                          ;; messages that would close this gap no longer
+                          ;; exist anywhere, so no amount of repair can help.
+                          ;; Emitting it as an action rather than only setting
+                          ;; :needs-state-sync is what lets the layer above
+                          ;; answer with the one thing that does work — a
+                          ;; differential state sync, which is smaller than
+                          ;; the history it replaces.
+                          (when (seq stranded)
+                            [[:state-sync from (vec stranded)]])))})
 
         :want
         (let [{:keys [max-want-ranges]} (:opts state)

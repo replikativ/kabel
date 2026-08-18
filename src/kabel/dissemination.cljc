@@ -544,9 +544,9 @@
           {:state (update-in state [:stats :refused-injection] (fnil inc 0))
            :actions []}
           (let [topics' (set (:topics payload))
-              state (update state :topics (fnil into #{}) topics')
-              targets (sort (keys (:peers state)))]
-          {:state state
+                state (update state :topics (fnil into #{}) topics')
+                targets (sort (keys (:peers state)))]
+            {:state state
              :actions (vec (for [t targets]
                              [:send t {:type :interests
                                        :topics (:topics state)

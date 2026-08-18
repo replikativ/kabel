@@ -257,7 +257,6 @@
         (is (= #{:t} (set (keys (get-in @client [:pubsub :subscriptions]))))))
       (finally (<?? S (peer/stop server))))))
 
-
 ;; =============================================================================
 ;; A publish must not overtake the handshake it depends on
 ;; =============================================================================

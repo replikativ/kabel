@@ -549,14 +549,25 @@
           payload (:payload event)]
       (case (:type payload)
 
+        ;; APP-ONLY. A fetch is something WE decide to want: it consumes an
+        ;; `:max-outstanding` slot and fans `:content/find` out to every peer.
+        ;; Reachable from a remote frame, any connected peer could spend our
+        ;; fetch budget on keys of its choosing and make us interrogate our
+        ;; neighbours on its behalf.
         :content/fetch
-        (let [[state actions] (fetch state (:key payload) now)]
-          {:state state :actions actions})
+        (if-not (= :app from)
+          {:state (update-in state [:stats :refused-injection] (fnil inc 0))
+           :actions []}
+          (let [[state actions] (fetch state (:key payload) now)]
+            {:state state :actions actions}))
 
         :content/fetch-tree
-        (let [[state actions] (fetch-tree state (:root payload)
-                                          (:have payload) now)]
-          {:state state :actions actions})
+        (if-not (= :app from)
+          {:state (update-in state [:stats :refused-injection] (fnil inc 0))
+           :actions []}
+          (let [[state actions] (fetch-tree state (:root payload)
+                                            (:have payload) now)]
+            {:state state :actions actions}))
 
         :content/loaded
         ;; A value handed to us by our own durable store — no verification and

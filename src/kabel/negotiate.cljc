@@ -9,22 +9,31 @@
   ## Why there is no middleware here
 
   An earlier version of this namespace shipped a middleware that exchanged its
-  own hello on connect. It was removed before release, because the overlay
-  already has the handshake it was trying to be:
+  own hello on connect. It was removed before release, because it bought a
+  round trip, a timeout race and a way for a stranger to assert `:max-frame`
+  and be believed — in exchange for an agreement nothing consumed, computed
+  from a DEFAULT codec list that named what this namespace knows rather than
+  what the peer's stack installs.
 
-  - `kabel.overlay.runtime` announces a **signed identity record** on every
-    connection, and `register!` binds a peer id to its channel only after that
-    record verifies. A peer that does not run the overlay never sends one, is
-    never registered, and never receives an overlay frame — so feature gating
-    already exists, and unlike a bare capability hello it is *authenticated*.
-  - Frames for an unregistered peer go to an **outbox** and are flushed on
-    registration, so nothing is written to a peer before its handshake
-    resolves. That is the send barrier a codec agreement needs, and it is
-    already there.
+  It is worth being precise about what the overlay does and does not already
+  give you, because the first version of this docstring got it wrong:
 
-  A second, unauthenticated hello at a second layer added a round trip, a
-  timeout race, and a way for a stranger to assert `:max-frame` and be
-  believed — in exchange for an agreement nothing consumed.
+  - **What it does.** `overlay.runtime` announces a signed identity record per
+    connection and `register!` binds a peer id only once that record verifies,
+    so a peer not running the overlay is never registered and never receives an
+    overlay frame. That is authenticated *presence detection* — a boolean, with
+    no version or feature set.
+  - **What it does not.** That hello is written to the connection's `out`, which
+    passes DOWN through the codec middleware (`kabel.peer/connect` applies the
+    serialization middleware innermost). So it is encoded by the very codec it
+    would have to select, and cannot bootstrap one. `kabel.identity/record->wire`
+    hex-encoding its byte fields is the visible consequence: the hello had to be
+    made codec-AGNOSTIC precisely because it cannot choose the codec.
+  - **The outbox is not a whole-connection barrier either.** `send-frame!`
+    queues frames for an unregistered peer id, but that covers overlay frames
+    only; everything else — including the point-to-point pub/sub handshake —
+    goes straight out with no barrier. Codec agreement is a property of the
+    connection, not of a peer id.
 
   ## What still needs solving
 
@@ -34,9 +43,16 @@
   `kabel.middleware.dual` is today's answer: read both, write one, in a
   three-step deployment that cannot skip step 1.
 
-  The shape that would replace it is the identity hello carrying capabilities,
-  so registration and agreement become one authenticated event. `agree` is the
-  part of that worth keeping in advance.
+  So a real solution needs a frame that is readable BEFORE any codec is agreed.
+  `kabel.binary/to-binary` already has one: with no `:kabel/serialization` set
+  it falls back to `pr-str` (frame id 2), and every codec middleware passes a
+  serialization it does not recognise straight through. That is a channel every
+  kabel peer can read, and it is where a capability exchange has to live —
+  below the codec, not beside it or above it.
+
+  Whether that frame should also carry the identity record, making registration
+  and agreement one authenticated event, is the open design question. `agree`
+  is the part worth keeping in advance either way.
 
   ## Agreement without a tie-break
 

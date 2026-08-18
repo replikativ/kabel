@@ -113,6 +113,8 @@
    :handler (or handler overlay/handler)
    :effects effects
    :now-fn (or now-fn now-ms)
+   ;; Last address book written, so `persist-book!` only writes on a change.
+   :book-cache (atom ::unwritten)
    ;; Late-bound application delivery. The effects map is fixed at
    ;; construction, but `kabel.pubsub.overlay` can only wire delivery once BOTH
    ;; the overlay and the peer's pub/sub state exist — so this one is an atom.
@@ -156,17 +158,39 @@
     (throw (ex-info "Unknown overlay action"
                     {:type :kabel.overlay.runtime/unknown-action :action op}))))
 
+(defn- persist-book!
+  "Write the address book when it changes.
+
+  `start!` LOADS `:book` and, until this existed, nothing ever wrote it — so
+  the book was empty on every start and stayed that way. That silently disabled
+  the sticky/anchor-peer mitigation, which `kabel.store.protocol` calls the
+  thing without which the rest is \"worthless\": a peer that restarts with no
+  memory of who behaved well before takes whoever answers first, which is the
+  eclipse an attacker wants.
+
+  It lives here rather than as an action because persistence policy is the
+  runtime's business, and because emitting one on every book touch would write
+  far more often than the book meaningfully changes. Debounced by comparing to
+  what was last written."
+  [{:keys [state book-cache] :as _ctx} persist-book]
+  (when persist-book
+    (let [book (get-in @state [:membership :book])]
+      (when (not= book @book-cache)
+        (reset! book-cache book)
+        (persist-book book)))))
+
 (defn step!
   "Apply one event: run the state machine, then its actions.
 
   Exposed for tests, which want to drive the machine one event at a time
   rather than through the loop."
-  [{:keys [state handler now-fn id] :as ctx} event]
+  [{:keys [state handler now-fn id persist-book] :as ctx} event]
   (let [{new-state :state actions :actions}
         (handler @state event {:id id :now (now-fn)})]
     (reset! state (or new-state @state))
     (doseq [a (or actions [])]
       (apply-action! ctx a))
+    (persist-book! ctx persist-book)
     ctx))
 
 (defn run!
@@ -476,8 +500,13 @@
    (fn [to]
      (let [reg (registry peer)]
        (when-let [out (get-in @reg [:by-id to])]
-         (close! out)
-         (swap! reg update :by-id dissoc to))))
+         ;; Close only. Do NOT dissoc here: the socket's close path calls
+         ;; `unregister!`, which finds every peer id bound to this `out` and
+         ;; submits `:disconnected` for each. Removing the binding first makes
+         ;; that search come up empty, so membership never hears the connection
+         ;; went away, keeps it in `:connections` forever, and never redials --
+         ;; a deliberate disconnect would strand the peer permanently.
+         (close! out))))
 
    :schedule!
    (fn [delay payload]
@@ -563,7 +592,16 @@
                           ;; ahead of strangers after a restart.
                           (cond-> book (assoc-in [:membership :book] book)))
                 ctx (make-runtime {:id peer-id :state state :effects nil})
-                ctx (assoc ctx :effects (kabel-effects S peer ctx identity store))]
+                ctx (assoc ctx :effects (kabel-effects S peer ctx identity store))
+                ;; The book is durable membership state, not content, so it
+                ;; does not go through `:persist!` (which is content-shaped and
+                ;; writes under `[:blocks …]`).
+                ctx (cond-> ctx
+                      store (assoc :persist-book
+                                   (fn [book]
+                                     (go (try (<? S (store/-store! store :book book))
+                                              (catch #?(:clj Exception :cljs js/Error) _
+                                                nil))))))]
             (run! S ctx)
             {:ctx ctx
              :peer-id peer-id

@@ -569,3 +569,33 @@
       (is (c/have? s' k))
       (is (c/servable? s' k))
       (is (empty? acts)))))
+
+(deftest fetches-cannot-be-injected-from-the-wire
+  ;; Same class as the :publish / :subscribe / :content/loaded guards: the
+  ;; runtime funnels inbound frames in with the SAME event shape the local
+  ;; application uses, so an ungated handler is remotely reachable. A fetch
+  ;; spends an :max-outstanding slot and fans :content/find to every peer, so
+  ;; an attacker could spend our budget on keys of its choosing and make us
+  ;; interrogate our neighbours on its behalf.
+  (let [s (-> (c/make-state :me {} {})
+              (assoc :peers {:attacker {}}))]
+    (testing "a remote :content/fetch does nothing"
+      (let [{:keys [actions]} (c/handler s {:type :message :from :attacker
+                                            :payload {:type :content/fetch
+                                                      :key "k"}}
+                                         {:now 0})]
+        (is (empty? actions))))
+
+    (testing "a remote :content/fetch-tree does nothing"
+      (let [{:keys [actions]} (c/handler s {:type :message :from :attacker
+                                            :payload {:type :content/fetch-tree
+                                                      :root "r"}}
+                                         {:now 0})]
+        (is (empty? actions))))
+
+    (testing "but our own application can still fetch"
+      (let [{:keys [actions]} (c/handler s {:type :message :from :app
+                                            :payload {:type :content/fetch
+                                                      :key "k"}}
+                                         {:now 0})]
+        (is (seq actions) "the app path must be unaffected")))))

@@ -1,5 +1,6 @@
 (ns kabel.pubsub-test
   (:require [clojure.test :refer [deftest testing is]]
+            [kabel.authorize :as authz]
             [kabel.pubsub :as pubsub]
             [kabel.pubsub.protocol :as proto]
             #?(:clj [superv.async :refer [S go-try <? <??]]
@@ -10,6 +11,21 @@
 ;; =============================================================================
 ;; Test Helpers
 ;; =============================================================================
+
+(defn- legacy-gate
+  "Resolve a gate exactly as `pubsub-middleware` does.
+
+  These tests call the private handlers directly, so they have to resolve the
+  gate themselves — and resolving it through `kabel.authorize` rather than
+  hand-rolling the lookup is the point: it keeps the tests exercising the
+  production resolution, and it means the legacy `(fn [principal topic])` shape
+  stays covered."
+  [opts op]
+  (authz/gate opts {:op op
+                    :legacy-keys (if (= op :publish)
+                                   [:authorize-publish-fn :authorize-fn]
+                                   [:authorize-fn])
+                    :legacy-adapter authz/pubsub-legacy}))
 
 (defn make-test-peer
   "Create a minimal peer atom for testing."
@@ -195,7 +211,7 @@
                out (chan 100)]
            (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
            (<?? S (handle-subscription! S peer out sub-msg (atom {})
-                                        (fn [_principal _topic] false)))
+                                        (legacy-gate {:authorize-fn (fn [_ _] false)} :subscribe)))
            (let [msgs (drain out)]
              (is (some #(and (= :pubsub/error (:type %)) (= :t (:topic %))) msgs)
                  "an error is returned for the denied topic")
@@ -210,7 +226,7 @@
                out (chan 100)]
            (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
            (<?? S (handle-subscription! S peer out sub-msg (atom {})
-                                        (fn [_principal _topic] true)))
+                                        (legacy-gate {:authorize-fn (fn [_ _] true)} :subscribe)))
            (let [msgs (drain out)]
              (is (contains? (pubsub/get-subscribers peer :t) out)
                  "an authorized subscriber joins the topic")
@@ -224,7 +240,8 @@
                seen (atom nil)]
            (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
            (<?? S (handle-subscription! S peer out sub-msg (atom {})
-                                        (fn [principal _topic] (reset! seen principal) true)))
+                                        (legacy-gate {:authorize-fn (fn [p _] (reset! seen p) true)}
+                                                     :subscribe)))
            (is (= {:sub "alice"} @seen)))))))
 
 ;; =============================================================================
@@ -257,7 +274,7 @@
                out (chan 100)]
            (pubsub/register-topic! peer :t {:strategy recording-strategy})
            (<?? S (handle-publish! S peer out pub-msg nil
-                                   (fn [_principal _topic] false)))
+                                   (legacy-gate {:authorize-fn (fn [_ _] false)} :publish)))
            (is (= [] @applied)
                "a denied publish must not reach the topic's strategy")
            (is (some #(and (= :pubsub/error (:type %))
@@ -270,7 +287,7 @@
                out (chan 100)]
            (pubsub/register-topic! peer :t {:strategy recording-strategy})
            (<?? S (handle-publish! S peer out pub-msg nil
-                                   (fn [_principal _topic] true)))
+                                   (legacy-gate {:authorize-fn (fn [_ _] true)} :publish)))
            (is (= [{:k :v}] @applied)
                "an authorized publish is applied unchanged")))
 
@@ -281,8 +298,11 @@
                seen (atom nil)]
            (pubsub/register-topic! peer :t {:strategy recording-strategy})
            (<?? S (handle-publish! S peer out pub-msg nil
-                                   (fn [principal topic]
-                                     (reset! seen [principal topic]) true)))
+                                   (legacy-gate
+                                    {:authorize-fn (fn [principal topic]
+                                                     (reset! seen [principal topic])
+                                                     true)}
+                                    :publish)))
            (is (= [{:sub "mallory"} :t] @seen))))
 
        (testing "a denied publish is not forwarded to other subscribers"
@@ -293,7 +313,7 @@
            (pubsub/register-topic! peer :t {:strategy recording-strategy})
            (@#'pubsub/add-subscriber! peer :t other)
            (<?? S (handle-publish! S peer out pub-msg nil
-                                   (fn [_principal _topic] false)))
+                                   (legacy-gate {:authorize-fn (fn [_ _] false)} :publish)))
            (is (empty? (drain other))
                "refusing a write must also stop it reaching readers"))))))
 
@@ -335,9 +355,12 @@
              strategy (reify proto/PSyncStrategy
                         (-apply-publish [_ p] (go-try S (swap! applied conj p) true)))]
          (pubsub/register-topic! peer :t {:strategy strategy})
-         ;; The resolution under test: (get opts :authorize-publish-fn authorize-fn)
+         ;; The resolution under test now lives in `kabel.authorize/gate`: with
+         ;; no :authorize-publish-fn, the publish gate falls back to
+         ;; :authorize-fn — which is what keeps a consumer who set only the
+         ;; latter behaving exactly as before.
          (let [opts {:authorize-fn (fn [_ topic] (swap! asked conj topic) false)}
-               resolved (get opts :authorize-publish-fn (:authorize-fn opts))]
+               resolved (legacy-gate opts :publish)]
            (<?? S (handle-publish! S peer out
                                    {:type :pubsub/publish :topic :t :payload {:k :v}
                                     :kabel/principal {:sub "mallory"}}
@@ -363,3 +386,60 @@
          (is (some #(and (= :pubsub/error (:type %))
                          (= :pubsub/unauthorized (:error %))) msgs)
              "and the refusal reached the sender")))))
+
+;; =============================================================================
+;; The unified gate
+;; =============================================================================
+
+(deftest authorize-gate-unification
+  ;; `:authorize-fn` meant two incompatible things under one name: pubsub called
+  ;; it (fn [principal topic]), dissemination called it (fn [topic origin]). A
+  ;; consumer passing one predicate to both bound `principal` to a topic —
+  ;; silently, and in whichever direction their predicate happened to lean.
+  (testing "the new :authorize takes a map and cannot be misordered"
+    (let [seen (atom nil)
+          g (authz/gate {:authorize (fn [ctx] (reset! seen ctx) true)}
+                        {:op :publish
+                         :legacy-keys [:authorize-fn]
+                         :legacy-adapter authz/pubsub-legacy})]
+      (is (true? (g {:principal :alice :topic :t :payload {:root "r"}})))
+      (is (= {:op :publish :principal :alice :topic :t :payload {:root "r"}} @seen))
+      (testing "and it carries the payload, so a policy can ask WHICH database"
+        (is (= {:root "r"} (:payload @seen))))))
+
+  (testing ":authorize wins over the legacy key"
+    (let [g (authz/gate {:authorize (constantly true)
+                         :authorize-fn (constantly false)}
+                        {:op :subscribe
+                         :legacy-keys [:authorize-fn]
+                         :legacy-adapter authz/pubsub-legacy})]
+      (is (true? (g {:principal :a :topic :t})))))
+
+  (testing "the released positional shape is called exactly as it always was"
+    ;; This is the only compatibility that exists, and it exists because
+    ;; kabel.pubsub shipped it. A layer that has never been released gets one
+    ;; shape and no adapter.
+    (let [seen (atom nil)
+          g (authz/gate {:authorize-fn (fn [p t] (reset! seen [p t]) true)}
+                        {:op :subscribe :legacy-keys [:authorize-fn]
+                         :legacy-adapter authz/pubsub-legacy})]
+      (g {:principal :alice :topic :t})
+      (is (= [:alice :t] @seen) "principal first, then topic — unchanged")))
+
+  (testing "a caller with no released positional form passes no legacy keys"
+    (let [g (authz/gate {:authorize (fn [{:keys [op principal]}]
+                                      (and (= :publish op) (= :alice principal)))}
+                        {:op :publish})]
+      (is (true? (g {:principal :alice :topic :t})))
+      (is (false? (g {:principal :mallory :topic :t})))))
+
+  (testing "no policy configured permits everything, as before"
+    (let [g (authz/gate {} {:op :publish :legacy-keys [:authorize-fn]
+                            :legacy-adapter authz/pubsub-legacy})]
+      (is (true? (g {:principal :anyone :topic :t})))))
+
+  (testing "a truthy non-boolean is normalised"
+    (let [g (authz/gate {:authorize (constantly "yes")}
+                        {:op :publish :legacy-keys []
+                         :legacy-adapter authz/pubsub-legacy})]
+      (is (true? (g {:topic :t}))))))

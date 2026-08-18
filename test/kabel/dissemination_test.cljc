@@ -386,3 +386,59 @@
             "the newcomer never connected")
         (is (= ["missed"] (o/delivered (sim/node-state joined :late)))
             "a new subscriber did not catch up until the digest timer fired")))))
+
+(deftest a-dormant-relay-stops-volunteering
+  ;; Mastodon degrades registrations after seven days without an admin login.
+  ;; Ours is narrower and more directly useful: a relay carries other people's
+  ;; traffic on its operator's behalf, and when that operator stops showing up
+  ;; it should stop volunteering. Unattended relaying is how an instance ends
+  ;; up hosting content nobody is watching.
+  (let [opts {:dormant-after-ms 10000 :have-interval-ms 1000}
+        base (-> (d/make-state :relay #{:mine} opts)
+                 (assoc :carries #{[:public]}))]
+
+    (testing "a relay with no heartbeat yet is NOT dormant"
+      ;; It must not narrow itself before anyone has had a chance to say hello.
+      (is (not (d/dormant? base 999999)))
+      (is (= #{[:public]} (d/effective-carries base 999999))))
+
+    (let [alive (d/heartbeat! base 0)]
+      (testing "and stays live while the operator keeps showing up"
+        (is (not (d/dormant? alive 5000)))
+        (is (= #{[:public]} (d/effective-carries alive 5000))))
+
+      (testing "but goes dormant once absent past the threshold"
+        (is (d/dormant? alive 20000))
+        (is (= #{} (d/effective-carries alive 20000))
+            "a dormant relay was still volunteering"))
+
+      (testing "while continuing to work for itself"
+        ;; It stops serving strangers; it does not stop being a peer.
+        (is (= #{:mine} (:topics alive))))
+
+      (testing "and a heartbeat brings it straight back"
+        (let [revived (d/heartbeat! alive 20000)]
+          (is (not (d/dormant? revived 20001)))
+          (is (= #{[:public]} (d/effective-carries revived 20001))))))))
+
+(deftest going-dormant-is-announced
+  (testing "peers are told coverage changed, once, on the transition"
+    ;; Narrowing silently would leave peers routing to a relay that has stopped
+    ;; carrying — and re-announcing every tick would be noise.
+    (let [s (-> (d/make-state :relay #{} {:dormant-after-ms 10000
+                                          :have-interval-ms 1000})
+                (assoc :carries #{[:public]})
+                (d/heartbeat! 0)
+                (assoc :peers {:p {:interests #{} :carries #{}}}))
+          interests-of (fn [{:keys [actions]}]
+                         (filter #(= :interests (:type (nth % 2))) actions))
+          before (d/handler s {:type :timer :payload :have-tick} {:now 5000})
+          crossing (d/handler (:state before) {:type :timer :payload :have-tick}
+                              {:now 20000})
+          after (d/handler (:state crossing) {:type :timer :payload :have-tick}
+                           {:now 21000})]
+      (is (empty? (interests-of before)) "announced while nothing had changed")
+      (is (= 1 (count (interests-of crossing))) "the transition was not announced")
+      (is (= #{} (:carries (nth (first (interests-of crossing)) 2)))
+          "announced coverage it no longer provides")
+      (is (empty? (interests-of after)) "re-announced on every tick"))))

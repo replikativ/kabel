@@ -55,7 +55,7 @@
         peers (keys (:connections ms'))
 
         ds (assoc (:dissemination state) :rng (:rng ms') :id (:id state))
-        [ds d-sync] (d/sync-peers ds peers)
+        [ds d-sync] (d/sync-peers ds peers (:now ctx))
         {ds' :state da :actions} (d/handler ds event ctx)
 
         cs (assoc (:content state) :rng (:rng ds') :id (:id state))

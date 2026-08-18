@@ -110,7 +110,23 @@
    ;;
    ;; `:authorize-fn` is the legacy `(fn [topic origin])` and still works.
    :authorize nil
-   :authorize-fn nil})
+   :authorize-fn nil
+
+   ;; --- Dormant operator ------------------------------------------------
+   ;; A relay carries other people's traffic on its operator's behalf. When
+   ;; that operator stops showing up, the relay should stop volunteering:
+   ;; unattended relaying is how an instance ends up hosting content nobody is
+   ;; watching, which is the practical form of the moderation burden that
+   ;; sinks fediverse admins.
+   ;;
+   ;; Mastodon's version of this idea is that registrations degrade after
+   ;; seven days without an admin login. Ours is narrower and more directly
+   ;; useful: the relay narrows its `:carries` to what it is subscribed to and
+   ;; stops volunteering for anything else. It keeps working for itself; it
+   ;; just stops working for strangers.
+   ;;
+   ;; nil disables it. `heartbeat!` is how an operator says they are present.
+   :dormant-after-ms nil})
 
 (defn make-state
   ([id] (make-state id #{} {}))
@@ -130,6 +146,11 @@
     ;; useful setting is usually neither extreme but a slice.
     :carries #{topics/everything}
     :peers {}
+    ;; When the operator was last seen. nil means never, which counts as
+    ;; present until the first heartbeat — a relay must not narrow itself
+    ;; before anyone has had a chance to say hello.
+    :operator-seen-at nil
+    :dormant? false
     :seen {}
     :store {}
     :store-order []
@@ -142,6 +163,33 @@
 ;; =============================================================================
 ;; Seen tracking
 ;; =============================================================================
+
+(defn heartbeat!
+  "Record that the operator is present.
+
+  Called from wherever a human actually shows up — an admin login, a console
+  command, a health endpoint someone has to authenticate to. What must NOT
+  drive it is automated traffic: a relay that heartbeats itself is answering
+  the wrong question."
+  [state now]
+  (-> state (assoc :operator-seen-at now) (assoc :dormant? false)))
+
+(defn dormant?
+  "Has the operator been absent longer than `:dormant-after-ms`?"
+  [state now]
+  (let [after (get-in state [:opts :dormant-after-ms])
+        seen (:operator-seen-at state)]
+    (boolean (and after seen (> (- now seen) after)))))
+
+(defn effective-carries
+  "The ranges we actually relay right now.
+
+  A dormant relay carries nothing beyond its own subscriptions: it keeps
+  working for itself and stops volunteering for strangers."
+  [state now]
+  (if (dormant? state now)
+    #{}
+    (:carries state)))
 
 (defn seen?
   [state origin epoch seq-no]
@@ -225,27 +273,33 @@
   A peer whose interests we do not yet know is treated as a relay — optimistic,
   and self-correcting the moment it announces. The alternative, withholding
   traffic until interests arrive, deadlocks a fresh connection."
-  [state peer-ids]
-  (let [current (set peer-ids)
-        known (set (keys (:peers state)))
-        added (remove known current)
-        removed (remove current known)
-        state (as-> state s
-                (reduce (fn [s p] (assoc-in s [:peers p]
-                                            {:interests nil
-                                             :carries #{topics/everything}}))
-                        s added)
-                (reduce (fn [s p] (update s :peers dissoc p)) s removed))]
-    [state
-     (vec (concat
-           (for [p added]
-             [:send p {:type :interests
-                       :topics (:topics state)
-                       :carries (:carries state)}])
+  ([state peer-ids] (sync-peers state peer-ids nil))
+  ([state peer-ids now]
+   (let [current (set peer-ids)
+         known (set (keys (:peers state)))
+         added (remove known current)
+         removed (remove current known)
+         state (as-> state s
+                 (reduce (fn [s p] (assoc-in s [:peers p]
+                                             {:interests nil
+                                              :carries #{topics/everything}}))
+                         s added)
+                 (reduce (fn [s p] (update s :peers dissoc p)) s removed))]
+     [state
+      (vec (concat
+            (for [p added]
+              [:send p {:type :interests
+                        :topics (:topics state)
+                       ;; The EFFECTIVE ranges: a dormant relay must not keep
+                       ;; advertising coverage it has stopped providing, or
+                       ;; peers go on routing to it.
+                        :carries (if now
+                                   (effective-carries state now)
+                                   (:carries state))}])
            ;; Offer the digest at once rather than on the next tick.
-           (let [digest (summary state)]
-             (for [p added]
-               [:send p {:type :have :summary digest}]))))]))
+            (let [digest (summary state)]
+              (for [p added]
+                [:send p {:type :have :summary digest}]))))])))
 
 (defn- interested?
   "Should we forward `topic` to `peer-id`?
@@ -332,7 +386,7 @@
 
 (defn handler
   "Dissemination state machine, in the `kabel.sim` handler form."
-  [state event {:keys [_now] :as _ctx}]
+  [state event {:keys [now] :as _ctx}]
   (case (:type event)
 
     :init
@@ -342,11 +396,25 @@
     :timer
     (if (= :have-tick (:payload event))
       (let [digest (summary state)
-            targets (sort (keys (:peers state)))]
+            targets (sort (keys (:peers state)))
+            ;; Notice a dormancy transition here rather than on a timer of its
+            ;; own — this tick already exists and already talks to everyone.
+            now-dormant? (dormant? state now)
+            transitioned? (not= now-dormant? (:dormant? state))
+            state (assoc state :dormant? now-dormant?)]
         {:state state
-         :actions (conj (vec (for [t targets]
-                               [:send t {:type :have :summary digest}]))
-                        [:timer (get-in state [:opts :have-interval-ms]) :have-tick])})
+         :actions (vec (concat
+                        (for [t targets]
+                          [:send t {:type :have :summary digest}])
+                        ;; Re-announce only on a transition: peers must learn
+                        ;; that coverage changed, and saying so every tick
+                        ;; would be noise.
+                        (when transitioned?
+                          (for [t targets]
+                            [:send t {:type :interests
+                                      :topics (:topics state)
+                                      :carries (effective-carries state now)}]))
+                        [[:timer (get-in state [:opts :have-interval-ms]) :have-tick]]))})
       {:state state :actions []})
 
     :message

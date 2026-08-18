@@ -1,118 +1,106 @@
 (ns kabel.identity
-  "Self-certifying peer identity.
+  "Self-certifying peer identity: a genesis record whose hash is the peer id.
 
-  A peer holds an Ed25519 keypair, and its peer id is derived from the public
-  key:
+  ## What is here and what is not
 
-      peer-id = SHA-256(\"kabel/peer-id/v1\" ‖ public-key)
+  This namespace owns *protocol*: the genesis record, peer-id derivation, which
+  keys may sign for an identity, the revocation commitment, and signed identity
+  records. It owns **no cryptography** — every primitive comes from
+  `org.replikativ.geheimnis`, which had all of it already.
 
-  Two properties follow, and they are the whole point:
+  That was not the original arrangement. kabel.identity carried its own
+  Ed25519, byte helpers, SHA-256 and CSPRNG until it turned out geheimnis
+  provided each of them, and better in three specific ways: `core/random-bytes`
+  is the sanctioned CSPRNG rather than an ad-hoc one, `core/ct-equal?` is
+  constant-time where ours explicitly was not, and `hash/sha256` is re-exported
+  from hasch so the stack has ONE hash implementation instead of a third.
 
-  - **Self-certifying.** A peer can prove it owns its id by signing a
-    challenge. Nobody can claim an id they do not hold the key for, so
-    identity needs no issuer and no registry.
-  - **Grinding-priced.** Occupying a chosen point in a routing keyspace costs
-    key generation rather than being free, which is what makes routing-table
-    poisoning expensive rather than trivial.
+  The two Ed25519 implementations were checked against each other before the
+  switch: same raw 32-byte keys, same DER envelopes, and byte-identical
+  signatures that verify across both. So this is a deletion, not a migration —
+  no wire format moved.
 
-  ## Wire format
+  ## The identity
 
-  Keys are **raw 32 bytes** on the wire, never ASN.1. The JVM's
-  `KeyPairGenerator` emits X.509 `SubjectPublicKeyInfo` (44 bytes) and PKCS#8
-  (48 bytes); both carry a fixed prefix for Ed25519, so raw keys are the tail
-  and re-wrapping is prepending a constant. Those constants are verified by
-  `kabel.identity-test/asn1-prefixes-are-constant`.
+      peer-id = SHA-256(\"kabel/peer-id/v2\" ‖ hasch(genesis))
 
-  This is a wire-format decision and therefore the expensive kind to change —
-  see `.internal/DHT_DESIGN.md` §3.
-
-  ## Why the private key is a keypair, not a seed
-
-  Restoring an identity needs the public key too. The JDK offers no
-  \"derive public from private seed\" operation, so a stored identity carries
-  both halves, as libsodium's 64-byte secret keys do for the same reason.
+  Hashing a *record* rather than a key is the decision the whole design rests
+  on. SSB, did:key and UCAN all hash a key directly and none can undo it: the
+  identity IS the key, so the key can never change and a compromise is
+  terminal. A genesis names a SET of keys, so rotation is possible later
+  without a format change.
 
   ## Async
 
-  `generate-keypair`, `sign` and `verify` return core.async channels. The JVM
-  could do all three synchronously, but ClojureScript's Ed25519 goes through
-  WebCrypto's `subtle.digest`, which is async-only. One API that is honest on
-  both platforms beats two that diverge. `peer-id` is pure and synchronous on
-  both, because routing decisions need it in hand.
+  `generate-identity`, `sign` and `verify` return core.async channels, because
+  ClojureScript's Ed25519 goes through Web Crypto and is async-only. `peer-id`
+  is pure and synchronous on both platforms, because routing decisions need it
+  in hand.
 
   ## Portability
 
-  Every byte operation here works on byte arrays / `Uint8Array`, never on
-  numbers. ClojureScript coerces bit operations to 32-bit signed integers, so
-  a 256-bit identifier manipulated as numbers is silently wrong on exactly one
-  platform — see `.internal/DHT_DESIGN.md` §5."
+  Byte operations work on byte arrays / `Uint8Array`, never on numbers.
+  ClojureScript coerces bit operations to 32-bit signed integers, so a 256-bit
+  identifier manipulated as numbers is silently wrong on exactly one platform —
+  see `doc/design/DHT_DESIGN.md` §5."
   (:require [hasch.core :refer [edn-hash]]
+            [org.replikativ.geheimnis.codec :as codec]
+            [org.replikativ.geheimnis.core :as gcore]
+            [org.replikativ.geheimnis.hash :as ghash]
+            [org.replikativ.geheimnis.sign :as gsign]
             #?(:clj [clojure.core.async :as async :refer [chan put! close!]]
                :cljs [clojure.core.async :as async :refer [chan put! close!]])
-            #?(:cljs ["@noble/ed25519" :as ed]))
-  #?(:clj (:import [java.security KeyPairGenerator Signature KeyFactory
-                    MessageDigest SecureRandom]
-                   [java.security.spec X509EncodedKeySpec PKCS8EncodedKeySpec]
-                   [java.util Arrays UUID])
-     :cljs (:import [goog.crypt Sha256])))
+            #?(:cljs ["@noble/ed25519" :as noble]))
+  #?(:clj (:import [java.util UUID])))
+
+;; Web Crypto only reached Ed25519 in Chrome in mid-2025, so an older browser
+;; cannot sign at all. geheimnis takes a fallback rather than requiring one, so
+;; the ~4 KB is our choice to spend and not every geheimnis user's.
+#?(:cljs (gsign/set-fallback! noble))
 
 ;; =============================================================================
-;; Byte primitives
+;; Primitives — delegated
 ;; =============================================================================
-;; Deliberately explicit rather than clever: these are the operations a wire
-;; format is built from, and every one of them is a place where a platform
-;; difference could hide.
+;; Re-exported rather than wrapped, so there is one implementation and callers
+;; here read the same as callers anywhere else in the stack.
 
 (def ^:const key-size 32)
 (def ^:const signature-size 64)
 (def ^:const peer-id-size 32)
 
-(defn byte-buf
-  "Allocate a mutable byte buffer of length `n`."
-  [n]
-  #?(:clj (byte-array n)
-     :cljs (js/Uint8Array. n)))
-
-(defn buf-length [b]
-  #?(:clj (alength ^bytes b)
-     :cljs (.-length b)))
-
-(defn sub-buf
-  "Bytes of `b` in `[from to)`."
-  [b from to]
-  #?(:clj (Arrays/copyOfRange ^bytes b (int from) (int to))
-     :cljs (.slice b from to)))
+(def byte-buf   codec/zeros)
+(def buf-length codec/blen)
+(def bytes->hex codec/bytes->hex)
+(def hex->bytes codec/hex->bytes)
+(def utf8-bytes codec/str->bytes)
+(def sha256     ghash/sha256)
+(def random-bytes gcore/random-bytes)
 
 (defn concat-bufs
-  "Concatenate byte buffers into a new one."
+  "Concatenate byte buffers."
   [& bufs]
-  (let [total (reduce + 0 (map buf-length bufs))
-        out (byte-buf total)]
-    (loop [offset 0
-           [b & more] bufs]
-      (if b
-        (let [n (buf-length b)]
-          #?(:clj (System/arraycopy ^bytes b 0 ^bytes out offset n)
-             :cljs (.set out b offset))
-          (recur (+ offset n) more))
-        out))))
+  (codec/concat-bytes (vec bufs)))
+
+(defn sub-buf
+  "Bytes of `b` in `[from to)`.
+
+  `codec/sub-bytes` takes a prefix length, so a general slice is a prefix of a
+  suffix. Kept because a wire format needs arbitrary ranges."
+  [b from to]
+  #?(:clj (java.util.Arrays/copyOfRange ^bytes b (int from) (int to))
+     :cljs (.slice b from to)))
 
 (defn bufs=
-  "Structural equality of two byte buffers.
-
-  Not constant-time, and deliberately not used for anything secret — signature
-  comparison happens inside the crypto library."
+  "Constant-time byte comparison."
   [a b]
-  (and (= (buf-length a) (buf-length b))
-       (every? true? (map = (seq a) (seq b)))))
+  (gcore/ct-equal? a b))
 
 (defn seq->bytes
   "Byte buffer from a sequence of byte values.
 
   `hasch/edn-hash` yields signed bytes on the JVM and unsigned numbers in
-  ClojureScript; masking to `0xff` before writing makes both produce the same
-  buffer, which is the whole point — a signature computed over these bytes has
-  to verify on the other platform."
+  ClojureScript; masking to `0xff` makes both produce the same buffer, which is
+  the point — a signature over these bytes has to verify on the other platform."
   [s]
   (let [v (vec s)
         out (byte-buf (count v))]
@@ -120,35 +108,6 @@
       (let [b (bit-and (nth v i) 0xff)]
         #?(:clj (aset-byte out i (unchecked-byte b))
            :cljs (aset out i b))))
-    out))
-
-(defn utf8-bytes [^String s]
-  #?(:clj (.getBytes s "UTF-8")
-     :cljs (.encode (js/TextEncoder.) s)))
-
-(defn sha256
-  "SHA-256 of a byte buffer, synchronously, on both platforms."
-  [b]
-  #?(:clj (.digest (MessageDigest/getInstance "SHA-256") ^bytes b)
-     :cljs (let [d (Sha256.)]
-             (.update d b)
-             (js/Uint8Array.from (.digest d)))))
-
-(defn bytes->hex [b]
-  (apply str (map #(let [v (bit-and #?(:clj % :cljs %) 0xff)]
-                     (str (when (< v 16) "0")
-                          #?(:clj (Integer/toHexString v)
-                             :cljs (.toString v 16))))
-                  (seq b))))
-
-(defn hex->bytes [^String s]
-  (let [n (quot (count s) 2)
-        out (byte-buf n)]
-    (dotimes [i n]
-      (let [v #?(:clj (Integer/parseInt (subs s (* 2 i) (+ 2 (* 2 i))) 16)
-                 :cljs (js/parseInt (subs s (* 2 i) (+ 2 (* 2 i))) 16))]
-        #?(:clj (aset-byte out i (unchecked-byte v))
-           :cljs (aset out i v))))
     out))
 
 ;; =============================================================================
@@ -285,126 +244,34 @@
      (catch #?(:clj Exception :cljs js/Error) _ false))))
 
 ;; =============================================================================
-;; Keys and signatures
+;; Keys and signatures — geheimnis
 ;; =============================================================================
 
-#?(:clj
-   (def ^:private spki-prefix
-     ;; X.509 SubjectPublicKeyInfo header for Ed25519. Verified against a
-     ;; freshly generated key in kabel.identity-test.
-     (byte-array (map unchecked-byte
-                      [0x30 0x2a 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x03 0x21 0x00]))))
-
-#?(:clj
-   (def ^:private pkcs8-prefix
-     ;; PKCS#8 PrivateKeyInfo header for Ed25519. Likewise verified.
-     (byte-array (map unchecked-byte
-                      [0x30 0x2e 0x02 0x01 0x00 0x30 0x05 0x06 0x03 0x2b 0x65 0x70
-                       0x04 0x22 0x04 0x20]))))
-
-#?(:clj
-   (defn- ->public-key [raw]
-     (.generatePublic (KeyFactory/getInstance "Ed25519")
-                      (X509EncodedKeySpec. (concat-bufs spki-prefix raw)))))
-
-#?(:clj
-   (defn- ->private-key [raw]
-     (.generatePrivate (KeyFactory/getInstance "Ed25519")
-                       (PKCS8EncodedKeySpec. (concat-bufs pkcs8-prefix raw)))))
-
-(defn- deliver-chan
-  "One-shot channel carrying `v` (or an exception), then closed."
-  [v]
-  (let [ch (chan 1)]
-    (when (some? v) (put! ch v))
-    (close! ch)
-    ch))
-
-(defn- error-chan [e]
-  (let [ch (chan 1)]
-    (put! ch e)
-    (close! ch)
-    ch))
-
 (defn generate-keypair
-  "Generate a fresh Ed25519 identity.
-
-  Returns a channel yielding `{:public <32 bytes> :private <32 bytes>}`, or an
-  exception."
+  "A fresh Ed25519 keypair. Channel of `{:public <32 bytes> :private <32 bytes>}`."
   []
-  (try
-    #?(:clj
-       (let [kp (.generateKeyPair (KeyPairGenerator/getInstance "Ed25519"))
-             pub (.getEncoded (.getPublic kp))
-             priv (.getEncoded (.getPrivate kp))]
-         (deliver-chan {:public (sub-buf pub 12 44)
-                        :private (sub-buf priv 16 48)}))
-       :cljs
-       (let [ch (chan 1)
-             ;; Draw the secret from WebCrypto rather than from the library's
-             ;; own helper: @noble/ed25519 renamed `randomPrivateKey` to
-             ;; `randomSecretKey` across a minor version, and a key generator
-             ;; that silently becomes `undefined` on a dependency bump is not
-             ;; a thing to leave to a name. `crypto.getRandomValues` is
-             ;; specified in browsers and global in Node 19+.
-             sk (js/Uint8Array. key-size)
-             _ (.getRandomValues js/crypto sk)]
-         (-> (.getPublicKeyAsync ed sk)
-             (.then (fn [pk]
-                      (put! ch {:public pk :private sk})
-                      (close! ch)))
-             (.catch (fn [e] (put! ch e) (close! ch))))
-         ch))
-    (catch #?(:clj Exception :cljs js/Error) e
-      (error-chan e))))
+  (gsign/generate-keypair))
 
 (defn sign
-  "Sign `message` (a byte buffer) with a raw 32-byte private key.
-
-  Returns a channel yielding a 64-byte signature, or an exception."
+  "Sign `message` with a raw 32-byte private key. Channel of a 64-byte signature."
   [private-key message]
-  (try
-    #?(:clj
-       (let [s (Signature/getInstance "Ed25519")]
-         (.initSign s (->private-key private-key))
-         (.update s ^bytes message)
-         (deliver-chan (.sign s)))
-       :cljs
-       (let [ch (chan 1)]
-         (-> (.signAsync ed message private-key)
-             (.then (fn [sig] (put! ch sig) (close! ch)))
-             (.catch (fn [e] (put! ch e) (close! ch))))
-         ch))
-    (catch #?(:clj Exception :cljs js/Error) e
-      (error-chan e))))
+  (gsign/sign private-key message))
 
 (defn verify
   "Verify `signature` over `message` against a raw 32-byte public key.
 
-  Returns a channel yielding `true` or `false`. A malformed key or signature
-  yields `false` rather than an exception: a peer must not be able to make us
-  throw by sending us garbage."
+  Channel of `true`/`false`. Garbage yields `false` rather than an exception: a
+  peer must not be able to make us throw by sending us nonsense."
   [public-key message signature]
-  (try
-    #?(:clj
-       (let [v (Signature/getInstance "Ed25519")]
-         (.initVerify v (->public-key public-key))
-         (.update v ^bytes message)
-         (deliver-chan (boolean (.verify v ^bytes signature))))
-       :cljs
-       (let [ch (chan 1)]
-         (-> (.verifyAsync ed signature message public-key)
-             (.then (fn [ok] (put! ch (boolean ok)) (close! ch)))
-             (.catch (fn [_] (put! ch false) (close! ch))))
-         ch))
-    (catch #?(:clj Exception :cljs js/Error) _
-      (deliver-chan false))))
-
-(defn random-bytes
-  "`n` cryptographically random bytes."
-  [n]
-  #?(:clj (let [b (byte-array n)] (.nextBytes (SecureRandom.) b) b)
-     :cljs (let [b (js/Uint8Array. n)] (.getRandomValues js/crypto b) b)))
+  (let [ch (chan 1)]
+    (async/go
+      (put! ch (boolean
+                (try
+                  (let [r (async/<! (gsign/verify public-key message signature))]
+                    (and (not (instance? #?(:clj Exception :cljs js/Error) r)) r))
+                  (catch #?(:clj Exception :cljs js/Error) _ false))))
+      (close! ch))
+    ch))
 
 (defn generate-identity
   "Generate a complete identity: genesis, keys, and a revocation secret.

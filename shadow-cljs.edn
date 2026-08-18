@@ -1,4 +1,4 @@
-{:deps {:aliases [:dev :test :auth :bench]}
+{:deps {:aliases [:dev :test :auth :bench :overlay]}
 
  :dependencies []
 

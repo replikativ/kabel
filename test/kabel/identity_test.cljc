@@ -11,8 +11,7 @@
             [kabel.identity :as id]
             #?(:clj [clojure.core.async :refer [<!!]]
                :cljs [clojure.core.async :refer [go <!]])
-            #?(:cljs [cljs.test :refer [async]]))
-  #?(:clj (:import [java.security KeyPairGenerator])))
+            #?(:cljs [cljs.test :refer [async]])))
 
 ;; =============================================================================
 ;; Byte primitives — pure, shared across platforms
@@ -158,23 +157,6 @@
 ;; =============================================================================
 ;; ASN.1 constants — JVM only, because they exist only on the JVM
 ;; =============================================================================
-
-#?(:clj
-   (deftest asn1-prefixes-are-constant
-     (testing "the ASN.1 prefixes kabel.identity hardcodes match freshly generated keys"
-       ;; kabel.identity strips these prefixes to get raw keys and prepends
-       ;; them to rebuild. If a JDK ever emitted a different encoding, every
-       ;; key import would break; this catches it at test time.
-       (dotimes [_ 5]
-         (let [kp (.generateKeyPair (KeyPairGenerator/getInstance "Ed25519"))
-               pub (.getEncoded (.getPublic kp))
-               priv (.getEncoded (.getPrivate kp))]
-           (is (= 44 (alength pub)))
-           (is (= 48 (alength priv)))
-           (is (= "302a300506032b6570032100"
-                  (id/bytes->hex (id/sub-buf pub 0 12))))
-           (is (= "302e020100300506032b657004220420"
-                  (id/bytes->hex (id/sub-buf priv 0 16)))))))))
 
 ;; =============================================================================
 ;; Signing — async, so written once per platform

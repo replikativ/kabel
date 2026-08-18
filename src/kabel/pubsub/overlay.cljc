@@ -86,16 +86,20 @@
      (ok {:ok true :transport :overlay}))
 
    :subscribe!
-   (fn [peer topics {:keys [strategies on-handshake-complete] :as _opts}]
+   (fn [peer topics opts]
      (go-try S
-             ;; Local subscription state first, so a publish arriving during
-             ;; the handshake has a strategy to be applied to.
-             (doseq [topic topics]
-               (#'pubsub/init-subscription-state!
-                peer topic (get strategies topic) on-handshake-complete))
-             ;; Interest, so dissemination forwards these topics to us at all.
+             ;; Interest FIRST. It is what makes dissemination forward these
+             ;; topics to us at all, and registering it before the handshake
+             ;; means a publish that lands mid-handshake is delivered rather
+             ;; than dropped for lack of interest.
              (rt/subscribe-topics! running topics)
-             {:ok topics :transport :overlay}))})
+             ;; Then the ordinary point-to-point handshake — the SAME code the
+             ;; direct transport runs. A handshake is a bulk, acknowledged,
+             ;; backpressured transfer between two peers; disseminating it
+             ;; would flood the network with one peer's catch-up. What the
+             ;; overlay changes is who you may handshake WITH, not how.
+             (assoc (<? S (#'pubsub/direct-subscribe! peer topics opts))
+                    :transport :overlay)))})
 
 (defn re-handshake!
   "Answer a horizon gap by re-running the handshake for everything this peer

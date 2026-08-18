@@ -67,7 +67,8 @@
 ;; =============================================================================
 
 (defn- run-direct
-  "Two peers, one connection: today's pub/sub."
+  "Two peers, one connection: today's pub/sub. The server owns the topic and
+  publishes; the client subscribes."
   [applied strategy]
   (let [port (unique-port)
         url (str "ws://localhost:" port)
@@ -82,13 +83,15 @@
         (<?? S (peer/connect S client url))
         (<?? S (pubsub/subscribe! client #{:t} {:strategies {:t strategy}}))
         (<?? S (timeout 500))
-        (<?? S (pubsub/publish! client :t {:hello :world}))
-        (is (wait-for 5000 #(seq @applied)) "direct: nothing was ever delivered"))
+        (<?? S (pubsub/publish! server :t {:hello :world}))
+        (is (wait-for 5000 #(seq @applied)) "direct: nothing was ever delivered")
+        nil)
       (finally (<?? S (peer/stop server))))))
 
 (defn- run-overlay
-  "The same two peers, the same calls — but publishes are disseminated and
-  subscriptions are topic interest."
+  "The same two peers and the same calls — but the middleware now carries the
+  overlay as well, so the handshake stays point-to-point while the publish is
+  disseminated. Returns the two runtimes for inspection."
   [applied strategy]
   (let [port (unique-port)
         url (str "ws://localhost:" port)
@@ -96,20 +99,26 @@
         client-kp (<?? S (id/generate-identity))
         server-id (id/peer-id (:genesis server-kp))
         client-id (id/peer-id (:genesis client-kp))
-        [server-mw install-server!] (rt/deferred-middleware)
+        [server-ov install-server!] (rt/deferred-middleware)
+        ;; Composed, not replaced. `comp` applies right-to-left, so the overlay
+        ;; sees the raw socket and passes everything it does not recognise
+        ;; through to pub/sub — which is exactly the division of labour: the
+        ;; overlay owns its own frames, pub/sub owns the handshake.
         server (peer/server-peer S (http-kit/create-http-kit-handler! S url server-id)
-                                 server-id server-mw identity)
+                                 server-id
+                                 (comp (pubsub/make-pubsub-peer-middleware {}) server-ov)
+                                 identity)
         server-run (<?? S (rt/start! S server {:identity server-kp
                                                :addresses [url]
                                                :topics #{}}))]
     (install-server! (:middleware server-run))
-    ;; The server relays everything, which is what makes it a relay.
-    (swap! (:state (:ctx server-run)) assoc-in [:dissemination :carries]
-           #{kabel.topics/everything})
     (<?? S (peer/start server))
     (try
-      (let [[client-mw install-client!] (rt/deferred-middleware)
-            client (peer/client-peer S client-id client-mw identity)
+      (let [[client-ov install-client!] (rt/deferred-middleware)
+            client (peer/client-peer S client-id
+                                     (comp (pubsub/make-pubsub-peer-middleware {})
+                                           client-ov)
+                                     identity)
             client-run (<?? S (rt/start! S client
                                          {:identity client-kp
                                           :addresses []
@@ -118,45 +127,43 @@
                                                    :addresses [url]
                                                    :group "seed"}]}))]
         (install-client! (:middleware client-run))
-        ;; Publisher and subscriber are the two ENDS here, so wire delivery on
-        ;; the server: it is the peer whose strategy must be applied.
         (pso/install! S server server-run)
         (pso/install! S client client-run)
         (pubsub/register-topic! server :t {:strategy strategy})
-        ;; The server is the subscriber in this direction.
-        (<?? S (pubsub/subscribe! server #{:t} {:strategies {:t strategy}}))
         (<?? S (peer/connect S client url))
         (is (wait-for 8000 #(contains? (rt/connections client) server-id))
-             "the overlay never connected, so the comparison would be vacuous")
+            "the overlay never connected, so the comparison would be vacuous")
+        (<?? S (pubsub/subscribe! client #{:t} {:strategies {:t strategy}}))
         (<?? S (timeout 500))
-        (<?? S (pubsub/publish! client :t {:hello :world}))
+        (<?? S (pubsub/publish! server :t {:hello :world}))
         (is (wait-for 8000 #(seq @applied)) "overlay: nothing was ever delivered")
-        ;; The atom is shared by both peers' strategies, so "something was
-        ;; applied" alone would also be satisfied by a purely local delivery.
-        ;; Assert the message actually CROSSED: published on one side,
-        ;; delivered on the other.
-        (let [client-stats (:dissemination (rt/overlay-state client-run))
-              server-stats (:dissemination (rt/overlay-state server-run))]
-          (is (= 1 (get-in client-stats [:stats :published]))
-              "the client should have published exactly once")
-          (is (= 1 (get-in server-stats [:stats :delivered]))
-              "the SERVER must be the peer that delivered — otherwise the
-               payload never left the publisher")
-          (is (zero? (get-in client-stats [:stats :delivered] 0))
-              "the publisher is not subscribed, so it must not deliver to
-               itself — this is the interest filter doing its job")))
+        {:client client-run :server server-run})
       (finally (<?? S (peer/stop server))))))
 
 (deftest a-publish-reaches-the-strategy-on-either-transport
   (doseq [[label run] [[:direct run-direct] [:overlay run-overlay]]]
     (testing (name label)
       (let [applied (atom [])
-            strategy (recording-strategy applied)]
-        (run applied strategy)
+            strategy (recording-strategy applied)
+            runs (run applied strategy)]
         ;; The identical assertion under both transports. That it is identical
         ;; IS the result.
         (is (= [{:hello :world}] @applied)
-            (str (name label) ": the strategy saw the wrong payloads"))))))
+            (str (name label) ": the strategy saw the wrong payloads"))
+        (when runs
+          ;; The atom is shared by both peers' strategies, so "something was
+          ;; applied" alone would also be satisfied by a purely local delivery.
+          ;; Assert the payload actually CROSSED.
+          (let [c (:dissemination (rt/overlay-state (:client runs)))
+                sv (:dissemination (rt/overlay-state (:server runs)))]
+            (is (= 1 (get-in sv [:stats :published]))
+                "the server should have published exactly once")
+            (is (= 1 (get-in c [:stats :delivered]))
+                "the CLIENT must be the peer that delivered — otherwise the
+                 payload never left the publisher")
+            (is (zero? (get-in sv [:stats :delivered] 0))
+                "the publisher is not subscribed, so it must not deliver to
+                 itself — this is the interest filter doing its job")))))))
 
 ;; =============================================================================
 ;; The horizon is a re-handshake

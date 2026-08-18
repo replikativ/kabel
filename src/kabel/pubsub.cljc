@@ -20,7 +20,8 @@
    ;; Either side: Publish
    (publish! peer :my-topic {:data 123})
    ```"
-  (:require [kabel.pubsub.protocol :as proto]
+  (:require [kabel.authorize :as authz]
+            [kabel.pubsub.protocol :as proto]
             [replikativ.logging :as log]
             #?(:clj [superv.async :refer [<? >? put? go-try go-loop-try go-loop-super]]
                :cljs [superv.async :refer [put?]])
@@ -78,6 +79,42 @@
 ;; Server-Side API
 ;; =============================================================================
 
+;; =============================================================================
+;; Transport
+;; =============================================================================
+;; Where a publish GOES, and what a subscription MEANS, are the only two things
+;; that differ between running pub/sub over one connection and running it over
+;; a peer-to-peer overlay. Everything else — topics, strategies, the batched
+;; ack-driven handshake, backpressure — is identical, so it lives here once and
+;; the difference is a pair of injected functions.
+;;
+;;   :direct   (default, and today's behaviour) a server fans out to the
+;;             subscriber channels it holds; a client sends to its server.
+;;   :overlay  a publish is disseminated multi-hop, signed at origin and
+;;             verified at every hop; a subscription is topic interest.
+;;
+;; `PSyncStrategy` does not change, and neither does any consumer. That is the
+;; point: konserve-sync, datahike's tx-broadcast and spindel's signal-sync
+;; already express both paths — `-apply-publish` is the live path and
+;; `-init-client-state`/`-handshake-items` is the differential state sync — so
+;; federation is a transport choice rather than an API.
+
+(defn set-transport!
+  "Install a transport: `{:publish! (fn [peer topic payload] ch)
+                          :subscribe! (fn [peer topics opts] ch)}`.
+
+  Either key may be omitted to keep the direct behaviour for that operation.
+  Passing nil restores both."
+  [peer transport]
+  (update-pubsub-state! peer assoc :transport transport)
+  peer)
+
+(defn- transport-fn
+  [peer k]
+  (get-in (get-pubsub-state peer) [:transport k]))
+
+(declare direct-publish! direct-subscribe!)
+
 (defn register-topic!
   "Register a topic on the peer for subscription.
 
@@ -108,6 +145,23 @@
   (log/info :pubsub/unregister-topic {:topic topic})
   (update-pubsub-state! peer update :topics dissoc topic)
   topic)
+
+(defn subscription
+  "This peer's subscription to `topic`, or nil.
+
+  `{:strategy _ :on-handshake-complete _ :handshake-complete? _}`. A transport
+  needs `:handshake-complete?` to know whether a live publish may be applied
+  yet, or whether it has to wait for the state the publish builds on.
+
+  An accessor rather than letting callers read the peer atom: the shape under
+  `:pubsub` is an implementation detail, and it has already changed once."
+  [peer topic]
+  (get-in (get-pubsub-state peer) [:subscriptions topic]))
+
+(defn subscriptions
+  "Every topic this peer subscribes to, as `{topic subscription}`."
+  [peer]
+  (get-in (get-pubsub-state peer) [:subscriptions] {}))
 
 (defn get-topic-config
   "Get configuration for a topic."
@@ -152,6 +206,19 @@
    - payload: Any EDN value
 
    Returns: channel yielding {:ok true :sent-count N} or {:error ...}"
+  [peer topic payload]
+  (if-let [f (transport-fn peer :publish!)]
+    (f peer topic payload)
+    (direct-publish! peer topic payload)))
+
+(defn direct-publish!
+  "The one-hop publish: a server fans out to its subscribers, a client sends to
+  its server. This was `publish!` before there was more than one transport.
+
+  Public because it is part of the transport CONTRACT, not an implementation
+  detail: a transport that carries publishes some other way may still want the
+  direct path for some of them, and reaching a private var across a library
+  boundary is not an interface."
   [peer topic payload]
   (let [{{S :supervisor} :volatile} @peer
         pubsub-state (get-pubsub-state peer)
@@ -330,7 +397,8 @@
                 sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
                 strategy (or (:strategy topic-config) (:strategy sub-state))
                 subscribers (get-subscribers peer topic)]
-            (if-not (authorize-publish-fn principal topic)
+            (if-not (authorize-publish-fn {:principal principal :topic topic
+                                           :payload payload})
               (do
                 (log/warn :pubsub/publish-denied {:topic topic})
                 (>? S out {:type :pubsub/error
@@ -385,7 +453,7 @@
                   (>? S out (proto/error-msg topic "Topic not registered")))
 
           ;; Registered, but the subject may not subscribe
-                (not (authorize-fn principal topic))
+                (not (authorize-fn {:principal principal :topic topic}))
                 (do
                   (log/warn :pubsub/subscription-denied {:topic topic})
                   (>? S out (proto/error-msg topic "Not authorized")))
@@ -453,8 +521,29 @@
    Returns channel yielding {:ok topics} when done, or {:error ...}"
   [peer topics {:keys [strategies on-publish on-handshake-complete] :as opts}]
   {:pre [(every? #(contains? strategies %) topics)]}
+  (if-let [f (transport-fn peer :subscribe!)]
+    (f peer topics opts)
+    (direct-subscribe! peer topics opts)))
+
+(defn direct-subscribe!
+  "The point-to-point subscribe and handshake.
+
+  Public for the same reason as `direct-publish!`, and needed more: a transport
+  that disseminates publishes over a mesh should still run the handshake here,
+  because a bulk acknowledged backpressured transfer is exactly what should NOT
+  be broadcast. `:out` selects which connection to run it over -- see below.
+
+  `opts` is as `subscribe!`, plus `:out`."
+  [peer topics {:keys [strategies on-publish on-handshake-complete out] :as opts}]
   (let [{{S :supervisor} :volatile} @peer
-        out (get-in (get-pubsub-state peer) [:out])
+        ;; `[:pubsub :out]` is ONE slot written by per-connection middleware, so
+        ;; on a peer with several connections it is whichever was accepted last.
+        ;; Harmless for a client with a single connection -- the case pub/sub
+        ;; was built for -- and wrong for anything on a mesh, where "handshake
+        ;; with the peer that has the state" is the whole point. So a caller
+        ;; that knows which connection it means passes `:out`; the fallback is
+        ;; the historical behaviour.
+        out (or out (get-in (get-pubsub-state peer) [:out]))
         id #?(:clj (java.util.UUID/randomUUID)
               :cljs (random-uuid))]
     (go-try S
@@ -557,10 +646,17 @@
     (let [;; Join-time subscribe authorization. Default permissive so kabel
           ;; stays a plain pub/sub substrate; an app injects a policy that reads
           ;; the `:kabel/principal` an upstream auth middleware stamped.
-          authorize-fn (get opts :authorize-fn (fn [_principal _topic] true))
+          ;; Resolved once, here, so the two gates cannot drift apart again.
+          authorize-fn (authz/gate opts {:op :subscribe
+                                         :legacy-keys [:authorize-fn]
+                                         :legacy-adapter authz/pubsub-legacy})
           ;; Defaults to the subscribe gate, so an existing consumer that passes
           ;; only :authorize-fn behaves exactly as before.
-          authorize-publish-fn (get opts :authorize-publish-fn authorize-fn)
+          authorize-publish-fn (authz/gate opts
+                                           {:op :publish
+                                            :legacy-keys [:authorize-publish-fn
+                                                          :authorize-fn]
+                                            :legacy-adapter authz/pubsub-legacy})
           on-publish (get opts :on-publish)
           pass-in (chan)
           pass-out (chan)

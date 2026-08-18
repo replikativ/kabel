@@ -515,24 +515,42 @@
           payload (:payload event)]
       (case (:type payload)
 
+        ;; APP-ONLY. `publish` stamps `:origin (:id state)` -- OUR id -- and
+        ;; the runtime then signs anything it originates with our key. Reached
+        ;; from a remote frame, that lets any peer we are connected to make us
+        ;; sign and disseminate content attributed to us, bypassing the
+        ;; `authorized?` gate entirely (it guards the :gossip branch only).
+        ;;
+        ;; `from` is `:app` exactly for events this peer's own application
+        ;; submitted; an inbound frame carries the sending peer's id.
         :publish
-        (let [[state actions] (publish state (:topic payload) (:payload payload))]
-          {:state state :actions actions})
+        (if-not (= :app from)
+          {:state (update-in state [:stats :refused-injection] (fnil inc 0))
+           :actions []}
+          (let [[state actions] (publish state (:topic payload) (:payload payload))]
+            {:state state :actions actions}))
 
         ;; A subscription taken out AFTER we connected. `sync-peers` announces
         ;; interests when a peer appears, which covers the peers we already
         ;; had — but nothing tells them when our interest set later CHANGES.
         ;; Without this a late subscriber is silently never forwarded to, since
         ;; `interested?` is what gates forwarding.
+        ;; APP-ONLY, same reasoning: a remote peer must not be able to choose
+        ;; what we subscribe to. It would make us retain payloads for topics we
+        ;; never asked for -- an unbounded, attacker-chosen key space -- and
+        ;; announce that interest onward so peers start forwarding it to us.
         :subscribe
-        (let [topics' (set (:topics payload))
+        (if-not (= :app from)
+          {:state (update-in state [:stats :refused-injection] (fnil inc 0))
+           :actions []}
+          (let [topics' (set (:topics payload))
               state (update state :topics (fnil into #{}) topics')
               targets (sort (keys (:peers state)))]
           {:state state
-           :actions (vec (for [t targets]
-                           [:send t {:type :interests
-                                     :topics (:topics state)
-                                     :carries (effective-carries state now)}]))})
+             :actions (vec (for [t targets]
+                             [:send t {:type :interests
+                                       :topics (:topics state)
+                                       :carries (effective-carries state now)}]))}))
 
         :interests
         {:state (assoc-in state [:peers from]
@@ -562,10 +580,36 @@
               {:state state :actions actions})))
 
         :have
-        (let [wants (gaps-against state (:summary payload) (:horizon payload))
-              stranded (beyond-horizon state (:summary payload) (:horizon payload))
-              state (cond-> state
-                      (seq stranded) (assoc :needs-state-sync (vec stranded)))]
+        ;; The summary and horizon are peer-supplied, so both are bounded
+        ;; before use — the same reasoning that caps `:want` below. Without
+        ;; this, one `:have` naming a million synthetic origins turns into a
+        ;; million want-ranges we ask for in a single frame.
+        (let [{:keys [max-summary-origins]} (:opts state)
+              summary (into {} (take max-summary-origins (:summary payload)))
+              horizon (:horizon payload)
+              wants (gaps-against state summary horizon)
+              stranded (beyond-horizon state summary horizon)
+              ;; Escalate an (origin, epoch) only once per floor.
+              ;;
+              ;; `beyond-horizon` is a pure function of the peer's horizon and
+              ;; OUR `:seen`, and a state sync does not touch `:seen` — so the
+              ;; condition that produced the escalation is still true on the
+              ;; next `:have`. Re-emitting would mean a full handshake every
+              ;; `:have-interval-ms` (5 s), per peer, forever, and the case is
+              ;; permanent rather than transient: a relay that saw a burst and
+              ;; evicted it keeps `:seen` but can serve none of it.
+              fresh (remove (fn [{:keys [origin epoch missing-below]}]
+                              (>= (get-in state [:escalated [origin epoch]] -1)
+                                  missing-below))
+                            stranded)
+              state (reduce (fn [s {:keys [origin epoch missing-below]}]
+                              (assoc-in s [:escalated [origin epoch]] missing-below))
+                            state fresh)
+              ;; Attacker-influenced keys, so bounded like everything else here.
+              state (if (> (count (:escalated state)) max-summary-origins)
+                      (update state :escalated dissoc
+                              (first (sort (keys (:escalated state)))))
+                      state)]
           {:state state
            :actions (vec (concat
                           (when (seq wants)
@@ -573,13 +617,12 @@
                           ;; Being beyond the horizon is a TRANSPORT fact: the
                           ;; messages that would close this gap no longer
                           ;; exist anywhere, so no amount of repair can help.
-                          ;; Emitting it as an action rather than only setting
-                          ;; :needs-state-sync is what lets the layer above
-                          ;; answer with the one thing that does work — a
+                          ;; Emitting it as an action is what lets the layer
+                          ;; above answer with the one thing that does work — a
                           ;; differential state sync, which is smaller than
                           ;; the history it replaces.
-                          (when (seq stranded)
-                            [[:state-sync from (vec stranded)]])))})
+                          (when (seq fresh)
+                            [[:state-sync from (vec fresh)]])))})
 
         :want
         (let [{:keys [max-want-ranges]} (:opts state)

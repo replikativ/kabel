@@ -65,7 +65,7 @@ jobs:
           at: /home/circleci
       - run:
           name: Run Clojure tests
-          command: clojure -X:auth:test:jetty
+          command: clojure -X:auth:overlay:test:jetty
           no_output_timeout: 5m
 
   test-cljs:

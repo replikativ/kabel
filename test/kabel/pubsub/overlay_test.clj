@@ -220,6 +220,7 @@
   ;; Recovery and join are the same problem — "give me the current state" — so
   ;; they must be the same code, or the rarely-exercised one rots.
   (let [inits (atom 0)
+        completes (atom 0)
         applied (atom [])
         strategy (reify proto/PSyncStrategy
                    (-init-client-state [_] (swap! inits inc) (done {:since 0}))
@@ -240,9 +241,15 @@
         (is (wait-for 5000 #(= 1 @inits)) "the initial handshake never ran")
         ;; Now the horizon fires. No new message type, no new state: the peer
         ;; simply asks again, and -init-client-state bounds what that costs.
-        (<?? S (pso/re-handshake! S client))
+        ;; The opts the subscription was made with, as `install!` remembers
+        ;; them — a re-handshake must reproduce the ORIGINAL subscription.
+        (let [subs (atom {:t {:strategies {:t strategy}
+                              :on-handshake-complete (fn [_] (swap! completes inc))}})]
+          (pso/re-handshake! S client subs))
         (is (wait-for 5000 #(= 2 @inits))
             "a horizon gap must re-run the SAME differential sync the join used")
+        (is (wait-for 5000 #(pos? @completes))
+            "a re-handshake must not silently drop :on-handshake-complete")
         ;; The strategies survive the round trip — a re-handshake that lost
         ;; them would silently stop applying anything afterwards.
         (is (= #{:t} (set (keys (get-in @client [:pubsub :subscriptions]))))))

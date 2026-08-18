@@ -98,7 +98,12 @@
       :disconnect! (fn [to])
       :schedule!   (fn [delay-ms payload])
       :persist!    (fn [key value])       ; optional
-      :deliver!    (fn [topic payload])   ; optional — the application
+
+  Delivery and state-sync are deliberately NOT here. They are installed later,
+  with `set-deliver!` / `set-state-sync!`, because what they mean is the
+  application's business and the application does not exist yet when the
+  runtime is built — `start!` runs the machine before a consumer can wire
+  itself in.
 
   Returns a context map. Feed it events with `submit!` and start it with
   `run!`."
@@ -142,11 +147,11 @@
     :persist (let [[k v] args]
                (when-let [f (:persist! effects)] (f k v)))
     :deliver (let [[topic payload] args]
-               (when-let [f (or (:deliver! effects) @(:deliver-fn ctx))]
+               (when-let [f @(:deliver-fn ctx)]
                  (f topic payload)))
 
     :state-sync (let [[from stranded] args]
-                  (when-let [f (or (:state-sync! effects) @(:state-sync-fn ctx))]
+                  (when-let [f @(:state-sync-fn ctx)]
                     (f from stranded)))
     (throw (ex-info "Unknown overlay action"
                     {:type :kabel.overlay.runtime/unknown-action :action op}))))

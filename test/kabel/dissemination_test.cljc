@@ -552,3 +552,85 @@
                                        {:now 0})
             have (first (filter #(= :have (:type (nth % 2))) acts))]
         (is (= {[:pub 0] 15} (:horizon (nth have 2))))))))
+
+(deftest app-only-events-are-refused-from-the-wire
+  ;; `kabel.overlay.runtime` funnels every inbound overlay frame into the
+  ;; machine as {:type :message :from <peer-id> :payload ...} -- the SAME shape
+  ;; the local application uses with :from :app. Without a source check, three
+  ;; event types that exist only for the application are reachable by any peer
+  ;; we are connected to.
+  (let [me (-> (d/make-state :me #{:t})
+               (assoc :peers {:attacker {:interests #{:t} :carries #{}}}))]
+
+    (testing "a remote peer cannot make us originate under our own identity"
+      ;; The worst of the three: `publish` stamps :origin (:id state) -- ours --
+      ;; and the runtime signs anything it originates with our key. This would
+      ;; let any connected peer make us sign arbitrary content, and it bypasses
+      ;; the authorize gate, which guards the :gossip branch only.
+      (let [{:keys [actions]} (d/handler me {:type :message
+                                             :from :attacker
+                                             :payload {:type :publish
+                                                       :topic :t
+                                                       :payload {:forged true}}}
+                                         {:now 0})]
+        (is (empty? actions)
+            "an injected publish must produce nothing at all")))
+
+    (testing "but our own application can still publish"
+      (let [{:keys [actions]} (d/handler me {:type :message
+                                             :from :app
+                                             :payload {:type :publish
+                                                       :topic :t
+                                                       :payload {:ours true}}}
+                                         {:now 0})
+            gossip (first (filter #(= :gossip (:type (nth % 2)))
+                                  (filter #(= :send (first %)) actions)))]
+        (is (some? gossip) "the app path must be unaffected")
+        (is (= :me (:origin (nth gossip 2))))))
+
+    (testing "a remote peer cannot choose what we subscribe to"
+      ;; Attacker-chosen topics would make us retain payloads for an unbounded
+      ;; key space and announce that interest onward.
+      (let [{:keys [state]} (d/handler me {:type :message
+                                           :from :attacker
+                                           :payload {:type :subscribe
+                                                     :topics #{:theirs}}}
+                                       {:now 0})]
+        (is (= #{:t} (:topics state)))))
+
+    (testing "but our own application can"
+      (let [{:keys [state]} (d/handler me {:type :message
+                                           :from :app
+                                           :payload {:type :subscribe
+                                                     :topics #{:ours}}}
+                                       {:now 0})]
+        (is (= #{:t :ours} (:topics state)))))))
+
+(deftest a-late-subscription-is-announced
+  ;; `sync-peers` announces interests when a peer APPEARS, but nothing told
+  ;; peers when our interest set later CHANGED — and `interested?` is what
+  ;; gates forwarding, so a peer that subscribed after connecting was silently
+  ;; never forwarded to. The fix was a `:subscribe` event; this is its
+  ;; regression test.
+  (let [s (-> (d/make-state :me #{})
+              (assoc :peers {:a {:interests #{} :carries #{}}
+                             :b {:interests #{} :carries #{}}}))
+        {:keys [state actions]} (d/handler s {:type :message
+                                              :from :app
+                                              :payload {:type :subscribe
+                                                        :topics #{:t}}}
+                                           {:now 0})
+        interests (filter #(= :interests (:type (nth % 2))) actions)]
+    (is (= #{:t} (:topics state)))
+    (is (= 2 (count interests))
+        "every connected peer must be told, or it will not forward to us")
+    (is (every? #(= #{:t} (:topics (nth % 2))) interests))
+
+    (testing "and with no peers it is a state change with nothing to send"
+      (let [{:keys [state actions]} (d/handler (d/make-state :me #{})
+                                               {:type :message :from :app
+                                                :payload {:type :subscribe
+                                                          :topics #{:t}}}
+                                               {:now 0})]
+        (is (= #{:t} (:topics state)))
+        (is (empty? actions))))))

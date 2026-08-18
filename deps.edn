@@ -46,7 +46,7 @@
            :auth {:extra-deps {metosin/jsonista {:mvn/version "1.0.0"}
                                buddy/buddy-hashers {:mvn/version "2.0.167"}
                                ;; portable crypto (HS256 verify on JVM + CLJS).
-                               org.replikativ/geheimnis {:mvn/version "0.2.33"}}}
+                               org.replikativ/geheimnis {:mvn/version "0.2.38"}}}
            ;; The overlay (kabel.identity / .membership / .dissemination /
            ;; .content / .overlay.*). Kept off the base graph for the same reason
            ;; as :auth — a kabel user who only wants a WebSocket should not
@@ -59,7 +59,7 @@
            ;; re-exported from hasch so the stack has one hash implementation
            ;; rather than a third. The two signature implementations were
            ;; verified byte-identical before the switch.
-           :overlay {:extra-deps {org.replikativ/geheimnis {:local/root "../geheimnis"}}}
+           :overlay {:extra-deps {org.replikativ/geheimnis {:mvn/version "0.2.38"}}}
            ;; konserve-backed PPeerStore (kabel.store.konserve) — durable overlay
            ;; identity and address book. konserve is the consumer's to provide;
            ;; kabel's base library keeps no storage dependency, exactly as it

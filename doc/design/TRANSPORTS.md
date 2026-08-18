@@ -1,8 +1,13 @@
 # Transports: SSE, TCP, HTTP/3 — and the two things that have to be fixed first
 
-Everything below that is stated as a number was measured in this repo, not
-estimated. The probes are reproducible; where a claim is an argument rather
-than a measurement, it says so.
+Everything below that is stated as a number was measured, not estimated, and
+where a claim is an argument rather than a measurement it says so.
+
+Two caveats on reproducing them. The SSE transport of §1 and the probes behind
+§3–§5 were written to a scratch directory and are **not** in this repo — they
+were built to answer a question, and the answer was "not yet", so they were not
+committed. And §5's backpressure numbers are a property of `http-kit 2.8.0`,
+which is what kabel depends on; a fix is in flight upstream.
 
 ---
 
@@ -212,9 +217,9 @@ SSE streams are cut constantly (§4b), **a client must reset its inflater on
 every reconnect** — otherwise it gets errors or, worse, silently wrong bytes.
 One line, but it has to be documented or it will bite someone.
 
-**And it is opt-in.** Compression is negotiated (`:kabel/features #{:deflate}`),
-so a client that does not ask for it gets CBOR + base64 and needs three lines in
-any language. A naive consumer stays first-class; that is the property that
+**And it would be opt-in.** Compression is meant to be negotiated
+(`:kabel/features #{:deflate}` — not implemented yet, see §8), so a client that
+does not ask for it gets CBOR + base64 and needs three lines in any language. A naive consumer stays first-class; that is the property that
 makes this reasonable to put on a public wire.
 
 ### But large blobs should not be on SSE at all
@@ -460,15 +465,15 @@ kabel already has the escape and does not use it: `to-binary` falls back to
 middleware guards its in-branch and passes unknown serializations through. So
 frame id 2 is a universal channel, readable by every kabel peer ever built.
 
-Measured: a full capability hello round-trips in **118 bytes**.
+Measured: a full capability hello round-trips in **158 bytes**.
 
 ```clojure
 {:type :kabel/hello
  :kabel/protocol  1
- :kabel/codecs    [:cbor :fressian :transit-json]  ; preference order
+ :kabel/codecs    [:transit-json :fressian :cbor]  ; what we can READ, not a preference
  :kabel/binary?   true        ; a FACT about the transport, not a preference
  :kabel/max-frame 1048576
- :kabel/features  #{:overlay/v1 :pubsub/v1}}
+ :kabel/features  #{}}   ; shipped default; no feature is defined yet
 ```
 
 Both ends send it unconditionally on connect — the overlay's identity hello
@@ -481,12 +486,18 @@ text transport must land on a text codec or pay 33%. Negotiation is the only
 path by which a transport's constraint can reach the codec layer, which today
 has no way to learn it.
 
-### What it retires
+### What it is intended to retire — once something consumes it
 
 `kabel.middleware.dual`'s three-step deployment dance — *"There is no way to
-skip step 1."* With negotiation, a peer that understands CBOR says so, and a
-peer that does not is never sent it. `dual` remains useful as a mechanism (read
-both, write one); it stops being a coordination problem.
+skip step 1."* With negotiation a peer that understands CBOR can say so, and a
+peer that does not need never be sent it.
+
+**Not yet, though, and the gap is worth stating.** Nothing reads
+`{:type :kabel/negotiated}` today, so no codec is actually selected by it. And
+even with a consumer, the agreement cannot govern the FIRST round trip: the
+hello and any upper-layer frame race each other onto the wire, so `dual`'s
+read-both property is still required for the opening exchange. Retiring `dual`
+needs a consumer *and* a send barrier; this PR ships neither.
 
 ### Where it sits
 
@@ -513,12 +524,20 @@ overlay passes non-overlay frames on. **So a capability added later cannot
 break a middleware that does not care about it** — which is the property that
 makes this safe to extend. Tested end-to-end through a real pub/sub stack.
 
-### Status: implemented
+### Status: mechanism landed, no consumer yet
 
 `kabel.negotiate`, with agreement as a pure function (`agree`) so most of it
 tests without channels. Deployable without a flag day: a peer that sends no
 hello yields `nil` capabilities after `:timeout-ms`, which is exactly today's
 behaviour.
+
+Be precise about what that means: the hello is exchanged and the agreement is
+computed, published inband and tested end-to-end through a real pub/sub stack —
+but **nothing consumes it**, so it changes no behaviour. It is the layer a
+consumer needs, not the consumer. Note also that `default-opts` advertises what
+`kabel.negotiate` can name, not what the peer's middleware stack actually
+installs; a consumer must derive `:codecs` from the stack or two peers will
+cheerfully agree on a codec neither has.
 
 ---
 
@@ -572,7 +591,7 @@ which is the real result:
 
 | item | status |
 |---|---|
-| **Capability negotiation** | **landed** — `kabel.negotiate` |
+| **Capability negotiation** | mechanism landed (`kabel.negotiate`); no consumer yet |
 | **Per-message DEFLATE with context takeover** (7.7×) | designed, not built; belongs in codec middleware, not the server |
 | **Outbound backpressure** | **outstanding, and a live vulnerability** |
 | SSE transport | deferred |

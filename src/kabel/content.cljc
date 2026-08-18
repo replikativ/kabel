@@ -563,11 +563,20 @@
         ;; no re-persist, because it came from there. This is what makes a
         ;; restarted peer able to serve what it already holds instead of
         ;; starting empty.
-        {:state (put-block state (:key payload) (:value payload)
-                           (if (contains? payload :immutable?)
-                             (:immutable? payload)
-                             true))
-         :actions []}
+        ;;
+        ;; APP-ONLY, and the lack of verification is exactly why: reached from
+        ;; a remote frame it would let any peer write an arbitrary value under
+        ;; an arbitrary content key, marked immutable, with no content-address
+        ;; check — and we would then serve it as a provider. `:content/announce`
+        ;; below already makes the same distinction for the same reason.
+        (if-not (= :app from)
+          {:state (update-in state [:stats :refused-injection] (fnil inc 0))
+           :actions []}
+          {:state (put-block state (:key payload) (:value payload)
+                             (if (contains? payload :immutable?)
+                               (:immutable? payload)
+                               true))
+           :actions []})
 
         :content/announce
         ;; Accepted only for the sender. An announcement on somebody else's

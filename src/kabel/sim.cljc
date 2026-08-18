@@ -308,6 +308,13 @@
     ;; protocol's boundary, which is the part the protocol is responsible for.
     (update-in sim [:stats :delivered-to-app] (fnil inc 0))
 
+    :state-sync
+    ;; "Your gap is older than anything I still hold." The simulator has no
+    ;; application to answer it, so it counts the escalation — which is what a
+    ;; test wants to assert anyway: that the transport gave up on repair
+    ;; exactly once per unrepairable gap, rather than every tick.
+    (update-in sim [:stats :state-syncs] (fnil inc 0))
+
     :persist
     ;; Handing a value to durable storage. The simulator has no store — it
     ;; counts the call so a test can assert persistence was attempted, which is

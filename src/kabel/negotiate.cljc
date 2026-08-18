@@ -23,7 +23,7 @@
   when `:kabel/serialization` is unset, and **every** codec middleware guards
   its in-branch on a serialization it recognises and passes anything else
   through untouched. So frame id 2 is a universal channel, readable by every
-  kabel peer ever built. A full hello costs 118 bytes.
+  kabel peer ever built. A full hello costs 158 bytes.
 
   This is why the middleware must sit **below** the codec and above the
   transport: it has to write a frame the codec layer would otherwise claim.
@@ -73,12 +73,20 @@
             [replikativ.logging :as log]
             [clojure.set :as set]
             #?(:clj [superv.async :refer [go-try <? >? go-loop-try]])
-            [clojure.core.async :as async :refer [chan close! timeout alts!]])
+            [clojure.core.async :refer [chan close! timeout]])
   #?(:cljs (:require-macros [superv.async :refer [go-try <? >? go-loop-try]])))
 
-(def ^:const hello-type :kabel/hello)
+(def hello-type
+  "Message type of the capability hello. Rides frame id 2 (`pr-str`)."
+  :kabel/hello)
 
 (def default-opts
+  "Defaults for `negotiate`.
+
+  `:codecs` is what this NAMESPACE can name, not what the peer's middleware
+  stack actually installs. A consumer that acts on the agreement must derive it
+  from the installed stack instead, or two peers will agree on a codec neither
+  of them has."
   {;; What we can READ. Order is documentation only — agreement uses the
    ;; canonical ranking below, so a peer cannot skew the outcome by reordering.
    :codecs [:transit-json :fressian :cbor]
@@ -96,6 +104,7 @@
    :timeout-ms 5000})
 
 (defn make-hello
+  "The hello frame for `opts` (see `default-opts`)."
   [{:keys [codecs features max-frame binary?]}]
   {:type hello-type
    :kabel/protocol 1
@@ -105,6 +114,7 @@
    :kabel/binary? (boolean binary?)})
 
 (defn hello?
+  "Is `m` a capability hello?"
   [m]
   (and (map? m) (= hello-type (:type m))))
 
@@ -114,19 +124,24 @@
   [c]
   (get table/encoding-table c -1))
 
-(defn text-codecs
+(def text-codecs
   "Codecs whose payload is text and therefore survives a transport that cannot
   carry bytes."
-  []
   #{:transit-json :string :pr-str})
 
 (defn agree
   "Agreed capabilities from our options and a peer's hello, or `nil` if there
   is no common ground.
 
+  Returns `{:codec :codecs :features :max-frame :binary? :protocol}` — the map
+  every middleware above reads, so this shape is the public contract.
+
   Deterministic and symmetric: both ends compute the same map from the same two
   inputs, which is the property that makes this safe to run on both sides at
-  once."
+  once.
+
+  Note `:protocol` is recorded but not enforced; there is no rule yet for what
+  a receiver does with a version it does not know."
   [opts their-hello]
   (let [ours (set (:codecs opts))
         theirs (set (:kabel/codecs their-hello))
@@ -136,7 +151,7 @@
         binary? (and (boolean (:binary? opts))
                      (boolean (:kabel/binary? their-hello)))
         common (cond-> (set/intersection ours theirs)
-                 (not binary?) (set/intersection (text-codecs)))]
+                 (not binary?) (set/intersection text-codecs))]
     (when (seq common)
       {:codec (apply max-key rank (sort common))
        :codecs common

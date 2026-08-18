@@ -178,6 +178,15 @@
     :seen {}
     :store {}
     :store-order []
+    ;; (origin, epoch) -> the lowest sequence number we can still serve.
+    ;;
+    ;; The repair horizon. Gossip repair covers RECENT gaps; a peer that has
+    ;; been away longer than the store window is asking for messages that no
+    ;; longer exist, and without a floor it asks every tick forever while we
+    ;; look and find nothing. replikativ had the better division: recent gaps
+    ;; are a message problem, being far behind is a STATE problem, and state
+    ;; per identity is much smaller than every change that produced it.
+    :store-floor {}
     :epoch 0
     :next-seq 0
     :delivered []
@@ -245,16 +254,36 @@
   Only gaps *below* a peer's high-water mark are requested: above it there is
   nothing to ask for, and asking would mean requesting messages that do not
   exist yet."
-  [state their-summary]
+  ([state their-summary] (gaps-against state their-summary nil))
+  ([state their-summary their-horizon]
+   (vec (for [[origin epochs] their-summary
+              [epoch their-iset] epochs
+              :let [mine (get-in state [:seen origin epoch] is*/empty)
+                    hi (is*/maximum their-iset)
+                    ;; Never ask below what they said they can serve. Without
+                    ;; this a peer asks every tick for messages that fell out
+                    ;; of the store, and the answer is silence, forever.
+                    floor (get their-horizon [origin epoch] 0)]
+              :when hi
+              [lo hi'] (is*/missing mine (max floor (or (is*/minimum their-iset) 0)) hi)
+              ;; Only ask for what they actually claim to hold.
+              :when (some (fn [[a b]] (and (<= a hi') (<= lo b))) their-iset)]
+          {:origin origin :epoch epoch :lo lo :hi hi'}))))
+
+(defn beyond-horizon
+  "Which (origin, epoch) we are behind on further than `their-horizon` can
+  serve — i.e. where gossip repair cannot help and a state sync is required.
+
+  Reported rather than silently skipped, because \"you are too far behind to
+  catch up this way\" is information the layer above needs and cannot derive."
+  [state their-summary their-horizon]
   (vec (for [[origin epochs] their-summary
-             [epoch their-iset] epochs
-             :let [mine (get-in state [:seen origin epoch] is*/empty)
-                   hi (is*/maximum their-iset)]
-             :when hi
-             [lo hi'] (is*/missing mine (or (is*/minimum their-iset) 0) hi)
-             ;; Only ask for what they actually claim to hold.
-             :when (some (fn [[a b]] (and (<= a hi') (<= lo b))) their-iset)]
-         {:origin origin :epoch epoch :lo lo :hi hi'})))
+             [epoch _] epochs
+             :let [floor (get their-horizon [origin epoch] 0)
+                   mine (get-in state [:seen origin epoch] is*/empty)
+                   my-hi (or (is*/maximum mine) -1)]
+             :when (and (pos? floor) (< my-hi (dec floor)))]
+         {:origin origin :epoch epoch :missing-below floor})))
 
 ;; =============================================================================
 ;; Message store
@@ -266,13 +295,28 @@
         {:keys [store-size]} (:opts state)
         state (-> state
                   (assoc-in [:store k] msg)
-                  (update :store-order conj k))]
+                  (update :store-order conj k))
+        ;; A first message for an (origin, epoch) sets the floor there.
+        state (update-in state [:store-floor [origin epoch]]
+                         (fn [f] (if f (min f seq) seq)))]
     (if (> (count (:store-order state)) store-size)
-      (let [evict (first (:store-order state))]
+      (let [[eo ee es :as evict] (first (:store-order state))]
         (-> state
             (update :store dissoc evict)
-            (update :store-order subvec 1)))
+            (update :store-order subvec 1)
+            ;; The floor rises as history falls out. Below it we cannot help,
+            ;; and saying so is what stops the asking.
+            (update-in [:store-floor [eo ee]] (fn [f] (max (or f 0) (inc es))))))
       state)))
+
+(defn horizon
+  "The lowest sequence number we can still serve per (origin, epoch).
+
+  Published in the digest so a peer knows what is worth asking for. Everything
+  below is gone, and recovering it is a state sync — a different protocol, one
+  layer up."
+  [state]
+  (:store-floor state))
 
 (defn stored
   "Messages held for `range`, capped at `:max-want` served and
@@ -437,6 +481,7 @@
     :timer
     (if (= :have-tick (:payload event))
       (let [digest (summary state)
+            floors (horizon state)
             targets (sort (keys (:peers state)))
             ;; Notice a dormancy transition here rather than on a timer of its
             ;; own — this tick already exists and already talks to everyone.
@@ -446,7 +491,7 @@
         {:state state
          :actions (vec (concat
                         (for [t targets]
-                          [:send t {:type :have :summary digest}])
+                          [:send t {:type :have :summary digest :horizon floors}])
                         ;; Re-announce only on a transition: peers must learn
                         ;; that coverage changed, and saying so every tick
                         ;; would be noise.
@@ -495,7 +540,10 @@
               {:state state :actions actions})))
 
         :have
-        (let [wants (gaps-against state (:summary payload))]
+        (let [wants (gaps-against state (:summary payload) (:horizon payload))
+              stranded (beyond-horizon state (:summary payload) (:horizon payload))
+              state (cond-> state
+                      (seq stranded) (assoc :needs-state-sync (vec stranded)))]
           {:state state
            :actions (if (seq wants)
                       [[:send from {:type :want :ranges wants}]]

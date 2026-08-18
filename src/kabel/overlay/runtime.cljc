@@ -48,6 +48,7 @@
   (:refer-clojure :exclude [run!])
   (:require [kabel.dissemination :as d]
             [kabel.identity :as id]
+            [kabel.ratelimit :as rl]
             [kabel.overlay :as overlay]
             [kabel.peer :as peer]
             [kabel.sim.rng :as rng]
@@ -100,18 +101,27 @@
 
   Returns a context map. Feed it events with `submit!` and start it with
   `run!`."
-  [{:keys [id state handler effects now-fn]}]
+  [{:keys [id state handler effects now-fn ratelimit]}]
   {:id id
    :state (atom state)
    :handler (or handler overlay/handler)
    :effects effects
    :now-fn (or now-fn now-ms)
+   ;; Per-connection metering. Written as a pure state machine, kept in an atom
+   ;; here because the middleware meters concurrently across connections.
+   :limiter (atom (rl/make-state (or ratelimit {})))
    :events (chan 1024)})
 
 (defn submit!
-  "Hand an event to the runtime."
+  "Hand an event to the runtime. Returns false when the queue is full.
+
+  `offer!` rather than `put!`, deliberately. `put!` on a full channel queues,
+  and core.async throws past 1024 pending puts — so overload arrived as an
+  exception rather than as a decision. Refusing here lets the caller do what
+  replikativ did and drop the connection, which is the correct answer to a peer
+  sending faster than we can process."
   [ctx event]
-  (async/put! (:events ctx) event))
+  (boolean (async/offer! (:events ctx) event)))
 
 (defn- apply-action!
   [{:keys [effects] :as _ctx} [op & args]]
@@ -259,6 +269,28 @@
            (fn [m] (apply dissoc m removed)))
     removed))
 
+(defn- log-rejected
+  "A frame refused by the rate limiter. Counted so an operator can see a peer
+  being throttled, and otherwise dropped in silence — answering a flood is
+  participating in it."
+  [ctx from]
+  (swap! (:limiter ctx) update-in [:stats :dropped-frames] (fnil inc 0))
+  nil)
+
+(defn- accept-or-drop!
+  "Submit an event, or close the connection if the machine cannot keep up.
+
+  `submit!` refuses when the event queue is full, and a peer that fills it is
+  sending faster than we can process no matter how politely we ask. replikativ
+  dropped the connection in exactly this case, which is better than the
+  alternative we had — queueing until core.async threw."
+  [S ctx peer out from payload]
+  (or (submit! ctx {:type :message :from from :payload payload})
+      (do
+        (swap! (:limiter ctx) update-in [:stats :overload-drops] (fnil inc 0))
+        (close! out)
+        false)))
+
 (defn- send-frame!
   "Send to `peer-id`, queueing if the connection is not yet identified."
   [S peer peer-id m]
@@ -322,17 +354,29 @@
                              ;; Only frames on an identified connection become
                              ;; events; an anonymous peer cannot inject into
                              ;; the state machine.
-                             (let [payload (:payload m)]
-                               (if (and require-signed? (= :gossip (:type payload)))
+                             (let [payload (:payload m)
+                                   [lim verdict] (rl/check @(:limiter ctx) from
+                                                           (now-ms))
+                                   _ (reset! (:limiter ctx) lim)]
+                               ;; Synapse's shape: slow, then queue, then
+                               ;; reject. Sleeping here IS the backpressure —
+                               ;; it stops draining `in`, which backs up the
+                               ;; socket, so a busy peer is throttled rather
+                               ;; than dropped and a hostile one is cut off.
+                               (case verdict
+                                 :slow (<? S (timeout 25))
+                                 :queue (<? S (timeout 250))
+                                 nil)
+                               (if (= :reject verdict)
+                                 (log-rejected ctx from)
+                                 (if (and require-signed? (= :gossip (:type payload)))
                                  ;; Checked at EVERY hop, not only at the
                                  ;; destination: a single authorised relay
                                  ;; would otherwise be able to inject anything
                                  ;; into the rest of the network.
-                                 (when (<? S (verify-gossip S payload))
-                                   (submit! ctx {:type :message :from from
-                                                 :payload payload}))
-                                 (submit! ctx {:type :message :from from
-                                               :payload payload}))))
+                                   (when (<? S (verify-gossip S payload))
+                                     (accept-or-drop! S ctx peer out from payload))
+                                   (accept-or-drop! S ctx peer out from payload)))))
 
                            :else
                            (>? S pass-in m))

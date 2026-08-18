@@ -133,3 +133,21 @@
     (is (not (rt/overlay-message? {:type :app/thing})))
     (is (not (rt/overlay-message? "a string")))
     (is (not (rt/overlay-message? nil)))))
+
+(deftest overload-refuses-rather-than-throws
+  (testing "submit! reports a full queue instead of queueing until it breaks"
+    ;; `put!` on a full channel queues, and core.async throws past 1024 pending
+    ;; puts — so overload used to arrive as an exception rather than a decision.
+    ;; replikativ dropped the connection in exactly this case, which is the
+    ;; right answer to a peer sending faster than we can process.
+    (let [ctx (rt/make-runtime {:id :me :state {}
+                                :handler (fn [s _ _] {:state s :actions []})
+                                :effects {:send! (fn [_ _]) :connect! (fn [_ _ _])
+                                          :disconnect! (fn [_]) :schedule! (fn [_ _])}})
+          ;; nothing is draining :events, so it fills at its buffer
+          accepted (count (take-while true?
+                                      (repeatedly 5000 #(rt/submit! ctx {:type :init}))))]
+      (is (< accepted 5000) "the queue accepted everything, so it is unbounded")
+      (is (pos? accepted))
+      (testing "and keeps refusing rather than throwing"
+        (is (false? (rt/submit! ctx {:type :init})))))))

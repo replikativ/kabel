@@ -500,3 +500,50 @@
       (is (d/seen? s :a 0 198) "the newest message was forgotten")
       (is (not (d/seen? s :a 0 0)) "the oldest should have been evicted")
       (is (= 8 (is*/count-ranges iset))))))
+
+(deftest repair-has-a-horizon
+  ;; replikativ's division, which we were missing: recent gaps are a MESSAGE
+  ;; problem, being far behind is a STATE problem — and state per identity is
+  ;; much smaller than every change that produced it. Without a horizon a peer
+  ;; whose gap predates the store window asks every tick forever, we look, we
+  ;; find nothing, and nothing changes.
+  (let [;; a publisher whose store keeps only the last 5
+        pub (reduce (fn [s i] (first (d/publish s :t i)))
+                    (d/make-state :pub #{:t} {:store-size 5})
+                    (range 20))]
+
+    (testing "the floor rises as history falls out of the store"
+      (is (= {[:pub 0] 15} (d/horizon pub))))
+
+    (testing "a peer only asks for what can still be served"
+      (let [behind (d/mark-seen (d/make-state :behind #{:t}) :pub 0 0)
+            wants (d/gaps-against behind (d/summary pub) (d/horizon pub))]
+        (is (seq wants))
+        (is (every? #(>= (:lo %) 15) wants)
+            "asked below the horizon, where the answer is silence forever")))
+
+    (testing "and without a horizon it would ask for all of it"
+      (let [behind (d/mark-seen (d/make-state :behind #{:t}) :pub 0 0)
+            wants (d/gaps-against behind (d/summary pub))]
+        (is (some #(< (:lo %) 15) wants))))
+
+    (testing "being stranded is REPORTED, not silently skipped"
+      ;; The layer above cannot derive "you are too far behind to catch up this
+      ;; way" and has to be told, so it can do a state sync instead.
+      (let [behind (d/mark-seen (d/make-state :behind #{:t}) :pub 0 0)
+            stranded (d/beyond-horizon behind (d/summary pub) (d/horizon pub))]
+        (is (= [{:origin :pub :epoch 0 :missing-below 15}] stranded))))
+
+    (testing "a caught-up peer is not stranded"
+      (let [current (reduce (fn [s i] (d/mark-seen s :pub 0 i))
+                            (d/make-state :current #{:t}) (range 20))]
+        (is (empty? (d/beyond-horizon current (d/summary pub) (d/horizon pub))))
+        (is (empty? (d/gaps-against current (d/summary pub) (d/horizon pub))))))
+
+    (testing "the digest carries the horizon, or a peer cannot use it"
+      (let [{acts :actions} (d/handler (assoc pub :peers {:p {:interests #{:t}
+                                                              :carries #{}}})
+                                       {:type :timer :payload :have-tick}
+                                       {:now 0})
+            have (first (filter #(= :have (:type (nth % 2))) acts))]
+        (is (= {[:pub 0] 15} (:horizon (nth have 2))))))))

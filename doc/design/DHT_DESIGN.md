@@ -595,15 +595,89 @@ konserve roots survives; peer routing as a DHT does not.
     pins the actual values. It passes on both, which turns "hasch presumably
     agrees" into a checked fact.
 
-12. **Still open.** The single most
-   valuable optimisation, and it already exists locally: datahike does bulk BFS
-   warmups against S3, and konserve has `multi-get` / `multi-assoc` with
-   `{:immutable? true}` metadata (`konserve/core.cljc:353,418,449`) for exactly
-   this batch shape. Over a network the same idea is graphsync's: ask for a
-   *subtree* rather than a node, so a DAG walk costs one round trip per level
-   instead of one per node. BitTorrent v2 (BEP 52) does the analogous thing
-   with per-file merkle trees and its `piece layers`. The `{:immutable? true}`
-   flag is also the honest signal for what may be cached and served at all.
+12. **Topic ranges — DONE.** `src/kabel/topics.cljc`. A boolean relay flag is
+    all-or-nothing; measured on a 40-node mesh, relaying everything costs **4×**
+    relaying nothing at 10% subscribers, and neither extreme is what a
+    deployment wants. A range is a vector prefix (`[]` = everything), so a relay
+    can carry `[:db "alice"]` and nothing else. Peer exchange gossips each
+    peer's ranges and dialling prefers peers whose ranges cover what we want —
+    without that, membership picks peers blind to what they carry, which is the
+    blindness that forces a discovery layer at scale.
+
+    Ranges say what you **relay**; subscriptions say what you **deliver**.
+    Conflating them would hand a relay every message under a prefix it merely
+    agreed to forward.
+
+13. **Verifiable roots — DONE.** `src/kabel/roots.cljc`. A signed root proves
+    who said it, never that it is current; a signature is valid forever, so an
+    old signed root is a valid signed root. Monotone pinning, hash chaining, and
+    equivocation-as-evidence — all local, none needing a clock, a quorum or a
+    serialiser. This is AT Protocol's inductive verification, whose saving is
+    **storage, not crypto**: their relay went from 16 TB to ~21 GB by holding
+    one hash per producer. The cost, which they paid: cheap verification makes
+    archival somebody else's job, so a `:gap` is reported rather than papered
+    over.
+
+14. **Sealed content — DONE.** `src/kabel/sealed.cljc`, and it needed no
+    protocol. A sealed block is an ordinary content-addressed block whose value
+    is `{:children [...] :ciphertext ...}`: verification is untouched, the tree
+    walk streams it because children are in the clear, and the address is
+    unguessable without the key. Tahoe's verify-cap tier, including the
+    traversal half Tahoe designed and never shipped. It leaks the **shape** of
+    the DAG, by construction.
+
+15. **Crypto consolidated into geheimnis — DONE.** `kabel.identity` carried its
+    own Ed25519, byte helpers, SHA-256 and CSPRNG; geheimnis had all of them.
+    214 lines deleted, and the two signature implementations were verified
+    byte-identical first, so no wire format moved. geheimnis's are better in
+    three ways: a sanctioned CSPRNG, a constant-time comparison, and `sha256`
+    re-exported from hasch so the stack has one hash implementation rather than
+    a third. Contributed back: an injectable `@noble/ed25519` fallback for
+    runtimes whose Web Crypto lacks the curve (Chrome only shipped it mid-2025).
+
+## Still open
+
+**Moderation and abuse** — researched (`.internal/reference/moderation.md`), a
+position formed, nothing built. The position: identity costs one key
+generation, so bans are structurally unenforceable and the only controls that
+can work are the **grant side** (`:authorize` at every hop, which already
+carries more than any equivalent hook in Mastodon, Synapse or atproto) and the
+**receiver side** (labels you subscribe to). Open work, smallest first:
+
+- the foreclosed-capabilities list, written into the docs rather than
+  discovered — no suspension, no ban-evasion resistance, no deletion, no global
+  view, no in-protocol appeals;
+- labels as signed content on `[:labels <labeler> <subject>]`, which needs
+  almost no new protocol — the same finding as chunking;
+- the enforcement seam: only a labeler the *client* privileges may turn a label
+  into a takedown, copying atproto's `;redact`;
+- rate limiting keyed on the **connection**, not the identity — Synapse's
+  `rc_federation` shape (sleep → queue → reject). Token buckets on a free
+  identity are theatre;
+- a relay narrowing its `:carries` when its operator goes quiet — Mastodon's
+  dormant-admin idea, expressible directly in ranges.
+
+**Deferred with named thresholds**, none of them yet reached:
+
+- **key rotation mechanism** — the format landed (§3 of `KEY_ROTATION.md`); the
+  chain, thresholds and forward validation did not;
+- **RBSR** (range-based set reconciliation) for reconciling unordered
+  content-addressed sets — ranked *above* Kademlia, because interval sets only
+  work where senders number their own messages;
+- **Kademlia and per-topic meshes** — they arrive together, at the point where
+  relay-everything stops being affordable;
+- **Plumtree** — a degree-fold bandwidth win within a carried topic; needs a
+  traffic profile we do not have;
+- **peer scoring** — deprioritised deliberately. A formal analysis (IEEE S&P
+  2024) synthesised an attack on Eth2.0's gossipsub parameters where
+  misbehaving peers never forward yet keep positive scores; the mechanism is
+  not the security property, the parameters are. The labeler model gives
+  receivers a policy hook without that fragility.
+
+**Landing** — the code exists and nothing runs on it. README and an example;
+a geheimnis release so `:overlay` can point at Maven rather than a local root;
+konserve onto the modern geheimnis tree; and **recovering replikativ on the
+overlay**, which is the actual proof and the goal this began with.
 
 ## 10. Things I am not confident about
 

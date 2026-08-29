@@ -2,7 +2,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [kabel.auth.websocket :as ws]
             [kabel.auth.jwt :as jwt]
-            [clojure.core.async :refer [chan go <! >! <!! >!! timeout alt!!]]
+            [clojure.core.async :refer [chan close! go <! >! <!! >!! timeout alt!!]]
             [superv.async :refer [S]]))
 
 (def test-secret "test-secret-for-websocket-testing")
@@ -54,6 +54,23 @@
                        new-in ([v] v))]
         (is (= :my-message (:type msg)))
         (is (= "alice@example.com" (get-in msg [:kabel/principal :email])))))))
+
+(deftest validate-middleware-closure-test
+  (testing "raw input closure reaches the application input"
+    (let [in (chan)
+          out (chan)
+          [_ _ [new-in _new-out]] ((ws/validate-middleware {:dev-mode true})
+                                   [S nil [in out]])]
+      (close! in)
+      (is (nil? (alt!! (timeout 1000) :timeout new-in ([v] v))))))
+
+  (testing "application output closure reaches the raw output"
+    (let [in (chan)
+          out (chan)
+          [_ _ [_new-in new-out]] ((ws/validate-middleware {:dev-mode true})
+                                   [S nil [in out]])]
+      (close! new-out)
+      (is (nil? (alt!! (timeout 1000) :timeout out ([v] v)))))))
 
 (deftest auth-failure-test
   (testing "Invalid token"
@@ -243,25 +260,152 @@
 
       ;; new-in should be closed
       (is (nil? (alt!! (timeout 100) :timeout
-                       new-in ([v] v))))))
+                       new-in ([v] v))))
+      ;; Rejection tears down the raw transport output as well.
+      (is (nil? (alt!! (timeout 100) :timeout
+                       out ([v] v))))))
 
-  (testing "Passes through non-auth first message (graceful degradation)"
+  (testing "Rejects auth-ok without a principal"
+    (let [in (chan)
+          out (chan)
+          error-result (promise)
+          middleware (ws/authenticate-middleware
+                      {:token "test-token"
+                       :on-error #(deliver error-result %)})
+          [_ _ [new-in _new-out]] (middleware [S nil [in out]])]
+      (<!! out)
+      (>!! in {:type :kabel/auth-ok})
+      (is (= "auth-invalid-response"
+             (:error (deref error-result 1000 :timeout))))
+      (is (nil? (alt!! (timeout 100) :timeout new-in ([v] v))))))
+
+  (testing "Propagates channel closure after successful auth"
     (let [in (chan)
           out (chan)
           middleware (ws/authenticate-middleware {:token "test-token"})
+          [_ _ [new-in new-out]] (middleware [S nil [in out]])]
+      (<!! out)
+      (>!! in {:type :kabel/auth-ok :principal {:sub "user1"}})
+
+      (close! in)
+      (is (nil? (alt!! (timeout 1000) :timeout
+                       new-in ([v] v))))
+
+      (close! new-out)
+      (is (nil? (alt!! (timeout 1000) :timeout
+                       out ([v] v))))))
+
+  (testing "Fails closed on handshake timeout"
+    (let [in (chan)
+          out (chan)
+          error-result (promise)
+          middleware (ws/authenticate-middleware
+                      {:token "test-token"
+                       :timeout-ms 25
+                       :pending-limit 100000
+                       :on-error #(deliver error-result %)})
           [_ _ [new-in _new-out]] (middleware [S nil [in out]])]
+      (<!! out)
+      ;; Keep input continuously ready across the deadline. Timeout is the
+      ;; priority arm once ready and cannot be starved by this stream.
+      (go (dotimes [i 10000]
+            (>! in {:type :early :i i})))
+      (is (= "auth-timeout" (:error (deref error-result 1000 :timeout))))
+      (is (nil? (alt!! (timeout 100) :timeout new-in ([v] v))))
+      (is (nil? (alt!! (timeout 100) :timeout out ([v] v))))))
+
+  (testing "The initial auth write is covered by the handshake deadline"
+    (let [in (chan)
+          ;; Deliberately leave the unbuffered transport output unconsumed.
+          out (chan)
+          error-result (promise)
+          middleware (ws/authenticate-middleware
+                      {:token "test-token"
+                       :timeout-ms 25
+                       :on-error #(deliver error-result %)})
+          [_ _ [new-in new-out]] (middleware [S nil [in out]])]
+      (is (= "auth-timeout" (:error (deref error-result 1000 :timeout))))
+      (is (nil? (alt!! (timeout 100) :timeout new-in ([v] v))))
+      (is (false? (>!! new-out {:type :must-not-be-accepted})))))
+
+  (testing "Bounds frames buffered before the auth result"
+    (let [in (chan)
+          out (chan)
+          error-result (promise)
+          middleware (ws/authenticate-middleware
+                      {:token "test-token"
+                       :pending-limit 1
+                       :on-error #(deliver error-result %)})
+          [_ _ [new-in _new-out]] (middleware [S nil [in out]])]
+      (<!! out)
+      (>!! in {:type :early-1})
+      (>!! in {:type :early-2})
+      (let [error (deref error-result 1000 :timeout)]
+        (is (= "auth-pending-overflow" (:error error)))
+        (is (= :inbound (:direction error))))
+      (is (nil? (alt!! (timeout 100) :timeout new-in ([v] v))))))
+
+  (testing "Lifecycle callbacks cannot strand or reverse settlement"
+    (let [in (chan)
+          out (chan)
+          middleware (ws/authenticate-middleware
+                      {:token "test-token"
+                       :on-auth (fn [_] (throw (ex-info "consumer callback failed" {})))})
+          [_ _ [new-in new-out]] (middleware [S nil [in out]])]
+      (<!! out)
+      (>!! in {:type :kabel/auth-ok :principal {:sub "user1"}})
+      (>!! in {:type :after-auth})
+      (>!! new-out {:type :after-auth-out})
+      (is (= :after-auth (:type (alt!! (timeout 1000) :timeout new-in ([v] v)))))
+      (is (= :after-auth-out (:type (alt!! (timeout 1000) :timeout out ([v] v))))))
+
+    (let [in (chan)
+          out (chan)
+          success-result (promise)
+          error-result (promise)
+          middleware (ws/authenticate-middleware
+                      {:token "test-token"
+                       :pending-limit 0
+                       :on-auth #(deliver success-result %)
+                       :on-error (fn [error]
+                                   (deliver error-result error)
+                                   (throw (ex-info "consumer error callback failed" {})))})
+          [_ _ [_new-in new-out]] (middleware [S nil [in out]])]
+      (<!! out)
+      (>!! new-out {:type :too-early})
+      (is (= "auth-pending-overflow" (:error (deref error-result 1000 :timeout))))
+      ;; A late acceptance cannot reverse the terminal overflow settlement.
+      (>!! in {:type :kabel/auth-ok :principal {:sub "late"}})
+      (is (= :timeout (deref success-result 100 :timeout)))
+      (is (nil? (alt!! (timeout 100) :timeout out ([v] v))))))
+
+  (testing "Buffers interleaved inbound and outbound traffic until auth succeeds"
+    (let [in (chan)
+          out (chan)
+          auth-result (promise)
+          middleware (ws/authenticate-middleware
+                      {:token "test-token"
+                       :on-auth #(deliver auth-result %)})
+          [_ _ [new-in new-out]] (middleware [S nil [in out]])]
 
       ;; Consume the auth message
       (<!! out)
 
-      ;; Simulate peer that doesn't support auth (sends regular message)
-      (>!! in {:type :regular-message :data "hello"})
+      ;; Another server middleware may speak before the auth response. Neither
+      ;; direction may escape to the application/transport yet.
+      (>!! in {:type :server-init :data "hello"})
+      (>!! new-out {:type :subscribe :topic :private})
+      (is (= :timeout (alt!! (timeout 50) :timeout new-in ([v] v))))
+      (is (= :timeout (alt!! (timeout 50) :timeout out ([v] v))))
 
-      ;; Should pass through
-      (let [msg (alt!! (timeout 1000) :timeout
-                       new-in ([v] v))]
-        (is (= :regular-message (:type msg)))
-        (is (= "hello" (:data msg)))))))
+      (>!! in {:type :kabel/auth-ok :principal {:sub "user1"}})
+      (is (= "user1" (:sub (deref auth-result 1000 :timeout))))
+
+      ;; Buffered messages retain their direction and order after acceptance.
+      (is (= {:type :server-init :data "hello"}
+             (alt!! (timeout 1000) :timeout new-in ([v] v))))
+      (is (= {:type :subscribe :topic :private}
+             (alt!! (timeout 1000) :timeout out ([v] v)))))))
 
 ;; =============================================================================
 ;; Unified Auth Middleware Tests
@@ -326,42 +470,36 @@
                           (ws/auth-middleware {:authenticate {:token "my-token"}}))))
 
   (testing "Bidirectional mode (both peers authenticate to each other)"
-    ;; This tests that both middlewares are composed correctly
-    (let [in (chan)
-          out (chan)
-          my-auth-accepted (promise)
-          remote-auth-validated (promise)
-          ;; Bidirectional: I authenticate to remote, and validate auth from remote
-          middleware (ws/auth-middleware
-                      {:authenticate {:token "my-token"
-                                      :on-auth (fn [principal]
-                                                 (deliver my-auth-accepted principal))}
-                       :validate {:dev-mode true
-                                  :dev-principal {:sub "dev" :email "dev@test.com"}
-                                  :on-auth (fn [principal]
-                                             (deliver remote-auth-validated principal))}})
-          [_ _ [new-in _new-out]] (middleware [S nil [in out]])]
+    ;; Wire two real middleware stacks directly together. Both initial auth
+    ;; frames cross before either auth-ok; a sequential mock misses the cycle
+    ;; this mode has to support.
+    (let [a->b (chan 1000)
+          b->a (chan 1000)
+          a-authenticated (promise)
+          a-validated-b (promise)
+          b-authenticated (promise)
+          b-validated-a (promise)
+          token-a (make-test-token {:sub "peer-a" :email "a@test.com"})
+          token-b (make-test-token {:sub "peer-b" :email "b@test.com"})
+          middleware-a (ws/auth-middleware
+                        {:authenticate {:token token-a :on-auth #(deliver a-authenticated %)}
+                         :validate {:jwt {:secret test-secret :alg :HS256}
+                                    :on-auth #(deliver a-validated-b %)}})
+          middleware-b (ws/auth-middleware
+                        {:authenticate {:token token-b :on-auth #(deliver b-authenticated %)}
+                         :validate {:jwt {:secret test-secret :alg :HS256}
+                                    :on-auth #(deliver b-validated-a %)}})
+          [_ _ [a-in a-out]] (middleware-a [S nil [b->a a->b]])
+          [_ _ [b-in _b-out]] (middleware-b [S nil [a->b b->a]])]
 
-      ;; I should have sent auth first (innermost middleware)
-      (let [auth-msg (alt!! (timeout 1000) :timeout
-                            out ([v] v))]
-        (is (= :kabel/auth (:type auth-msg)))
-        (is (= "my-token" (:token auth-msg))))
+      (is (= "peer-a" (:sub (deref a-authenticated 1000 :timeout))))
+      (is (= "peer-b" (:sub (deref a-validated-b 1000 :timeout))))
+      (is (= "peer-b" (:sub (deref b-authenticated 1000 :timeout))))
+      (is (= "peer-a" (:sub (deref b-validated-a 1000 :timeout))))
 
-      ;; Simulate remote accepting my auth
-      (>!! in {:type :kabel/auth-ok :principal {:sub "remote-user" :email "remote@test.com"}})
-
-      ;; My on-auth callback should have been called
-      (is (= "remote@test.com" (:email (deref my-auth-accepted 1000 :timeout))))
-
-      ;; Now simulate remote authenticating to me
-      (>!! in {:type :kabel/auth :token "remote-peer-token"})
-
-      ;; I should respond with auth-ok
-      (let [response (alt!! (timeout 1000) :timeout
-                            out ([v] v))]
-        (is (= :kabel/auth-ok (:type response)))
-        (is (= "dev@test.com" (get-in response [:principal :email]))))
-
-      ;; My validate on-auth callback should have been called
-      (is (= "dev@test.com" (:email (deref remote-auth-validated 1000 :timeout)))))))
+      ;; Normal traffic starts only after both handshakes and is attributed to
+      ;; the authenticated sending peer by the receiving validator.
+      (>!! a-out {:type :data-msg :value 42})
+      (let [msg (alt!! (timeout 1000) :timeout b-in ([v] v))]
+        (is (= 42 (:value msg)))
+        (is (= "peer-a" (get-in msg [:kabel/principal :sub])))))))

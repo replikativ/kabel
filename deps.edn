@@ -54,10 +54,11 @@
            ;; overlay the co-developed checkout (already prepped, tracks the stack's
            ;; main); a release swaps this for a Maven datahike coordinate.
            :auth-store-datahike {:extra-deps {org.replikativ/datahike {:local/root "../datahike"}}}
-           ;; The permessage-deflate cross-implementation tests need an
-           ;; http-kit that HAS the extension, which is an unreleased PR
-           ;; (http-kit/http-kit#617). That is a GIT dep, and http-kit is a lein
-           ;; project, so using it requires
+           ;; The transport cross-implementation tests need the tested
+           ;; replikativ integration of the still-unreleased http-kit
+           ;; permessage-deflate and outbound-backpressure PRs (#617 and #619).
+           ;; That is a GIT dep, and http-kit is a lein project, so using it
+           ;; requires
            ;;
            ;;   clojure -X:deps prep :aliases '[:pmd]'
            ;;
@@ -68,9 +69,9 @@
            ;; and .npm to the workspace but not .gitlibs, and cannot prep a lein
            ;; project anyway.
            ;;
-           ;; Without :pmd the tests SKIP with a message rather than passing
-           ;; vacuously -- they check for the class. Fold this away once
-           ;; http-kit releases the extension.
+           ;; Without :pmd the compression tests SKIP with a message rather
+           ;; than passing vacuously -- they check for the class. Fold this
+           ;; away once upstream http-kit releases both transport changes.
            ;;
            ;;   clojure -X:auth:test:pmd
            ;; Jetty, to prove kabel.ring-ws is an abstraction rather than a
@@ -86,8 +87,8 @@
 
            :pmd {:override-deps
                  {http-kit/http-kit
-                  {:git/url "https://github.com/whilo/http-kit"
-                   :git/sha "694a8a62fcd4dbba31f21eb65ef710d81dd17f55"}}}
+                  {:git/url "https://github.com/replikativ/http-kit"
+                   :git/sha "c55b2de60336876e0d39b290553289dc60c891f0"}}}
 
    :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}

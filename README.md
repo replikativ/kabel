@@ -378,8 +378,9 @@ clj -X:auth:test
 # Without :jetty that half prints SKIPPED instead of running.
 clj -X:auth:test:jetty
 
-# ...plus permessage-deflate against an http-kit that has it (see :pmd in
-# deps.edn; needs a one-off `clojure -X:deps prep :aliases '[:pmd]'`)
+# ...plus permessage-deflate against the tested replikativ http-kit integration
+# (see :pmd in deps.edn; needs a one-off prep for the Git dependency)
+clojure -X:deps prep :aliases '[:pmd]'
 clj -X:auth:test:jetty:pmd
 
 # ClojureScript (Node.js)
@@ -437,8 +438,11 @@ and `:thread-pool` work by naming them.
 
 One difference worth knowing: **Jetty negotiates
 [permessage-deflate](https://datatracker.ietf.org/doc/html/rfc7692) out of the
-box**, http-kit does not yet
-([http-kit#617](https://github.com/http-kit/http-kit/pull/617)). On a
+box**. Upstream http-kit does not yet, although the implementation is open as
+[http-kit#617](https://github.com/http-kit/http-kit/pull/617) and is included
+in the tested
+[replikativ integration branch](https://github.com/replikativ/http-kit/tree/replikativ/p2p-transport).
+On a
 fressian/CBOR wire that is a large saving. kabel's Tyrus client offers the
 extension via `org.replikativ.kabel.PerMessageDeflateExtension`, so a JVM client
 gets compression against a Jetty-backed peer today.
@@ -457,9 +461,10 @@ server, `kabel.ring-ws` waits for Ring's `AsyncSocket` completion callback when
 the adapter provides it. Jetty does; released http-kit 2.8.x does not, and its
 internal socket write list is unbounded below Ring. Until
 [http-kit PR #619](https://github.com/http-kit/http-kit/pull/619) (or an
-equivalent byte ceiling) is released, use Jetty or a patched http-kit with a
-per-connection `:max-queued-bytes` for untrusted public peers. Kabel's own
-bounded channel cannot bound an adapter queue beneath it.
+equivalent byte ceiling) is released, use Jetty or the tested
+[replikativ integration branch](https://github.com/replikativ/http-kit/tree/replikativ/p2p-transport)
+with a per-connection `:max-queued-bytes` for untrusted public peers. Kabel's
+own bounded channel cannot bound an adapter queue beneath it.
 
 Server deployments can lower `:max-frame-bytes` and `:out-buffer-items` in the
 options passed to `create-http-kit-handler!` or `create-jetty-handler!`. JVM

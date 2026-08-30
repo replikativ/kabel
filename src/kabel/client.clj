@@ -29,8 +29,9 @@
   Tyrus ships no implementation of the extension, so this is
   `PerMessageDeflateExtension`, ours. The peer decides: a server that does not
   accept the offer leaves the connection uncompressed, and nothing else
-  changes. http-kit accepts it from 2.9.0 (http-kit/http-kit#617); browsers
-  offer it to us in the other direction automatically.
+  changes. Kabel's replikativ http-kit distribution accepts it
+  (http-kit/http-kit#617); browsers offer it to us in the other direction
+  automatically.
 
   Bind to false when payloads are already compressed, or when per-connection
   memory matters more than bandwidth -- context takeover keeps a deflate and an

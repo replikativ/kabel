@@ -7,9 +7,9 @@
   implementation talking to itself agrees with itself no matter what it does
   with the RFC; two agreeing is evidence about the wire format.
 
-  Requires an http-kit with permessage-deflate (2.9.0-beta4 + PR #617). Until
-  that is released these run against a locally installed build, and skip with
-  an explicit message rather than passing vacuously if it is absent."
+  Requires an http-kit with permessage-deflate. Kabel's default replikativ
+  distribution includes it; the explicit capability check keeps the test
+  honest if a consumer overrides that dependency."
   (:require [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as http-kit])
   (:import [org.replikativ.kabel PerMessageDeflateExtension

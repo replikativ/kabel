@@ -40,10 +40,10 @@
 (def ^:private http-kit-async?
   "Whether the selected http-kit provides the outbound-queue integration.
 
-  Kabel's baseline suite must keep working with released http-kit 2.8.x, while
-  the explicit `:pmd` suite must prove that the pinned replikativ build exposes
-  Ring's AsyncSocket. `queued-bytes` is part of that same change and therefore
-  makes the expected capability unambiguous."
+  The default replikativ distribution exposes Ring's AsyncSocket. Keep this
+  capability check because consumers may override the server implementation;
+  `queued-bytes` is part of the same change and makes the expectation
+  unambiguous."
   (boolean (ns-resolve 'org.httpkit.server 'queued-bytes)))
 
 (defn- skip! [what]

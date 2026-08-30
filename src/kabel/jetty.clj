@@ -18,7 +18,8 @@
   this tracks Jetty 12 core and exposes HTTP/2 and HTTP/3 as options.
 
   Jetty also ships permessage-deflate ON by default, negotiated with no
-  configuration -- which http-kit does not (http-kit/http-kit#617)."
+  configuration. Kabel's replikativ http-kit distribution supports it as
+  well; upstream discussion is at http-kit/http-kit#617."
   (:require [kabel.ring-ws :as ring-ws]
             [ring.adapter.jetty9 :as jetty]))
 

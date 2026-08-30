@@ -29,7 +29,11 @@
         ;; kabel.ring-ws is written against these, and http-kit implements them
         ;; (2.8.0+), as do both Jetty adapters.
         org.ring-clojure/ring-websocket-protocols {:mvn/version "1.15.5"}
-        http-kit/http-kit {:mvn/version "2.8.0"}
+        ;; Maintained distribution with permessage-deflate, Ring AsyncSocket
+        ;; completion, and a bounded outbound byte queue. It retains http-kit's
+        ;; org.httpkit namespaces and API, but uses a distinct coordinate so it
+        ;; can be released without claiming upstream artifacts.
+        org.replikativ/http-kit {:mvn/version "2.9.0-beta4-replikativ.1"}
         org.glassfish.tyrus/tyrus-core {:mvn/version "1.13.1"}
         org.glassfish.tyrus/tyrus-client {:mvn/version "1.13.1"}
         org.glassfish.tyrus/tyrus-container-grizzly-client {:mvn/version "1.13.1"}}
@@ -54,25 +58,6 @@
            ;; overlay the co-developed checkout (already prepped, tracks the stack's
            ;; main); a release swaps this for a Maven datahike coordinate.
            :auth-store-datahike {:extra-deps {org.replikativ/datahike {:local/root "../datahike"}}}
-           ;; The transport cross-implementation tests need the tested
-           ;; replikativ main branch with the still-unreleased http-kit
-           ;; permessage-deflate and outbound-backpressure PRs (#617 and #619).
-           ;; That is a GIT dep, and http-kit is a lein project, so using it
-           ;; requires
-           ;;
-           ;;   clojure -X:deps prep :aliases '[:pmd]'
-           ;;
-           ;; It lives in its own alias for exactly that reason. Putting the
-           ;; override in :test would make every JVM and ClojureScript command
-           ;; require a prepared Git dependency. The dedicated CircleCI
-           ;; integration job prepares this alias explicitly, while the normal
-           ;; jobs continue to prove compatibility with released http-kit.
-           ;;
-           ;; Without :pmd the compression tests SKIP with a message rather
-           ;; than passing vacuously -- they check for the class. Fold this
-           ;; away once upstream http-kit releases both transport changes.
-           ;;
-           ;;   clojure -X:auth:test:pmd
            ;; Jetty, to prove kabel.ring-ws is an abstraction rather than a
            ;; rename. An interface with one implementation agrees with itself
            ;; no matter what it does; two implementations is what makes the
@@ -83,11 +68,6 @@
            ;; routes through Jetty's ee9 legacy servlet environment and is
            ;; HTTP/1.1-only, while this tracks Jetty 12 core directly.
            :jetty {:extra-deps {info.sunng/ring-jetty9-adapter {:mvn/version "0.40.2"}}}
-
-           :pmd {:override-deps
-                  {http-kit/http-kit
-                  {:git/url "https://github.com/replikativ/http-kit"
-                   :git/sha "2e94245183ff5d9b54bea08c93fab9fe8ebc347f"}}}
 
    :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}

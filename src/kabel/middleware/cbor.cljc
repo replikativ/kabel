@@ -51,6 +51,12 @@
 
 (def ^:const serialization-key :cbor)
 
+(defn- encoded-frame-bytes
+  "Exact WebSocket application bytes for Kabel's binary CBOR frame."
+  [payload]
+  (+ 4 #?(:clj (alength ^bytes payload)
+          :cljs (.-byteLength payload))))
+
 (defn- boring-wire-name
   "incognito's munged key as boring >= 0.1.11 spells it, or nil if it is already
   in that form.
@@ -178,11 +184,19 @@
                  (if (= serialization serialization-key)
                    (let [reg (registry-for cache @registry-atom
                                            incognito-read-handlers-atom)
-                         v (boring/decode payload (assoc opts :registry reg))]
+                         v (boring/decode payload (assoc opts :registry reg))
+                         frame-metadata (dissoc % :kabel/serialization
+                                                :kabel/payload)]
                      ;; Merge message metadata (:host and friends) back on, the
-                     ;; same contract the fressian middleware has.
+                     ;; same contract the fressian middleware has. The exact
+                     ;; encoded size is Clojure metadata: consumers can bound
+                     ;; decoded queues without re-encoding or accidentally
+                     ;; relaying a local accounting field.
                      (if (map? v)
-                       (merge v (dissoc % :kabel/serialization :kabel/payload))
+                       (let [decoded (merge v frame-metadata)]
+                         (with-meta decoded
+                           (assoc (meta decoded) :kabel/encoded-bytes
+                                  (encoded-frame-bytes payload))))
                        v))
                    %)))
 
@@ -192,6 +206,7 @@
                  %
                  {:kabel/serialization serialization-key
                   :kabel/payload (boring/encode
-                                  % (assoc opts :registry @registry-atom))}))
+                                  %
+                                  (assoc opts :registry @registry-atom))}))
 
       [S peer [in out]]))))

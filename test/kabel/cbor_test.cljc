@@ -57,6 +57,17 @@
          (is (= {:a 1 :kabel/host "example.com"} (<?? S tin)))))))
 
 #?(:clj
+   (deftest decoded-maps-carry-exact-local-wire-size
+     (let [payload (boring/encode {:type :publication :value "hello"})
+           {:keys [in tin]} (mw #(cbor %))]
+       (put? S in {:kabel/serialization :cbor :kabel/payload payload})
+       (let [decoded (<?? S tin)]
+         (is (= (+ 4 (alength ^bytes payload))
+                (:kabel/encoded-bytes (meta decoded))))
+         (is (not (contains? decoded :kabel/encoded-bytes))
+             "local accounting metadata must never become relayable data")))))
+
+#?(:clj
    (deftest records-round-trip-with-no-registration
      (testing "boring writes a record's type name natively via CBOR tag 27, so
                unlike fressian it needs NO write handler. Without a read

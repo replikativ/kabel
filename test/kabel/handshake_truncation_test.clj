@@ -157,3 +157,29 @@
                              (assoc pubsub/default-opts :item-timeout-ms 100))]
       (is (:complete? res))
       (is (zero? (:data-count res))))))
+
+(deftest ack-waiter-exists-before-batch-boundary-is-visible
+  (let [out (chan)
+        handshake-ch (chan 1)
+        pending-acks (atom {})
+        missed? (atom false)]
+    (put! handshake-ch :item)
+    (close! handshake-ch)
+    ;; The unbuffered `out` makes this deterministic: the receiver handles the
+    ;; boundary before the sender's put resumes. An ACK waiter installed after
+    ;; the put is therefore necessarily too late.
+    (async/go-loop []
+      (when-let [{:keys [type topic batch-idx]} (async/<! out)]
+        (when (= :pubsub/handshake-batch-complete type)
+          (if-let [ack-ch (get-in @pending-acks [topic batch-idx])]
+            (put! ack-ch :ack)
+            (reset! missed? true)))
+        (recur)))
+    (let [result-ch (send-handshake! S out :t handshake-ch
+                                     (assoc pubsub/default-opts
+                                            :batch-timeout-ms 200)
+                                     pending-acks)
+          [result port] (alts!! [result-ch (timeout 1000)])]
+      (is (= result-ch port) "the handshake must not lose the immediate ACK")
+      (is (:ok result))
+      (is (false? @missed?)))))

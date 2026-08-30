@@ -363,8 +363,13 @@
 
                   :else
 
-            ;; Send batch
-                  (do
+            ;; Register the ACK waiter BEFORE anything can cause the peer to ACK
+            ;; this batch. With an unbuffered transport, the receiver can consume
+            ;; batch-complete and answer before the sender resumes from its put.
+            ;; Registering afterward loses that perfectly valid fast ACK and then
+            ;; times out a batch the receiver already applied.
+                  (let [ack-ch (chan 1)]
+                    (swap! pending-acks assoc-in [topic batch-idx] ack-ch)
                     (log/debug :pubsub/sending-batch {:topic topic :batch-idx batch-idx :item-count (count items)})
               ;; Send each item
                     (doseq [item items]
@@ -373,17 +378,13 @@
               ;; Send batch-complete with item count
                     (>? S out (proto/handshake-batch-complete-msg topic batch-idx (count items)))
 
-              ;; Create promise for ack
-                    (let [ack-ch (chan 1)]
-                      (swap! pending-acks assoc-in [topic batch-idx] ack-ch)
-
-                ;; Wait for ack or timeout
-                      (let [[result ch] (alts! [ack-ch (timeout batch-timeout-ms)])]
-                        (swap! pending-acks update topic dissoc batch-idx)
-                        (if (= ch ack-ch)
-                          (recur (inc batch-idx) (+ total-sent (count items)) (now-ms))
-                          {:error (ex-info "Handshake batch ack timeout"
-                                           {:topic topic :batch-idx batch-idx})}))))))))))
+              ;; Wait for ACK or timeout
+                    (let [[result ch] (alts! [ack-ch (timeout batch-timeout-ms)])]
+                      (swap! pending-acks update topic dissoc batch-idx)
+                      (if (= ch ack-ch)
+                        (recur (inc batch-idx) (+ total-sent (count items)) (now-ms))
+                        {:error (ex-info "Handshake batch ack timeout"
+                                         {:topic topic :batch-idx batch-idx})})))))))))
 
 (defn- handle-publish!
   "Apply an inbound `:pubsub/publish` and forward it to the topic's other

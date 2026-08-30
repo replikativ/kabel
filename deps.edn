@@ -85,9 +85,9 @@
            :jetty {:extra-deps {info.sunng/ring-jetty9-adapter {:mvn/version "0.40.2"}}}
 
            :pmd {:override-deps
-                 {http-kit/http-kit
+                  {http-kit/http-kit
                   {:git/url "https://github.com/replikativ/http-kit"
-                   :git/sha "75c0327451a2ea38075a623f2c05b7455db58638"}}}
+                   :git/sha "2e94245183ff5d9b54bea08c93fab9fe8ebc347f"}}}
 
    :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}

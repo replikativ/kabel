@@ -115,7 +115,8 @@
   [peer k]
   (get-in (get-pubsub-state peer) [:transport k]))
 
-(declare direct-publish! direct-subscribe! topic-apply-lock)
+(declare direct-publish! direct-subscribe! topic-apply-lock safe-result!
+         explicit-success?)
 
 (defn register-topic!
   "Register a topic on the peer for subscription.
@@ -290,6 +291,54 @@
                      (close! result-ch)))))))))
       result-ch)))
 
+(defn- apply-publish-under-lock!
+  [S peer topic payload strategy on-publish after-success]
+  (let [lock (topic-apply-lock peer topic)]
+    (go-try S
+            (<! lock)
+            (try
+              (let [apply-result (if strategy
+                                   (<! (safe-result!
+                                        S #(proto/-apply-publish strategy payload)
+                                        {:operation :apply-publish
+                                         :topic topic}))
+                                   {:ok true})]
+                (if-not (explicit-success? apply-result)
+                  {:error (or (:error apply-result)
+                              (ex-info "Publish strategy did not report success"
+                                       {:topic topic :result apply-result}))}
+                  (do
+                    (when on-publish
+                      (on-publish topic payload))
+                    (when after-success
+                      (after-success))
+                    {:ok true})))
+              (catch #?(:clj Throwable :cljs :default) e
+                {:error e})
+              (finally
+                ;; A one-slot semaphore must never park its releasing runner.
+                (async/offer! lock :available))))))
+
+(defn apply-publish!
+  "Apply one live payload through the peer-wide serializer for `topic`.
+
+  This is the transport-independent local application boundary. Direct Kabel
+  frames, snapshot application, and an installed overlay must all use the same
+  peer/topic serializer so two network paths cannot invoke one strategy at
+  once. The function applies the registered or subscribed strategy first and
+  then calls `:on-publish`, both while holding that boundary.
+
+  It deliberately does not forward the payload. Routing belongs to the direct
+  middleware or the installed transport; this operation owns only local
+  application. Success is the literal strategy result `{:ok true}`."
+  ([S peer topic payload]
+   (apply-publish! S peer topic payload nil))
+  ([S peer topic payload {:keys [strategy on-publish]}]
+   (let [strategy (or strategy
+                      (:strategy (get-topic-config peer topic))
+                      (:strategy (subscription peer topic)))]
+     (apply-publish-under-lock! S peer topic payload strategy on-publish nil))))
+
 ;; =============================================================================
 ;; Handshake Logic
 ;; =============================================================================
@@ -457,7 +506,7 @@
           (try
             (let [{:keys [topic payload]} msg
                   principal (:kabel/principal msg)
-          ;; Server-side (topic registered) / client-side (subscribed).
+                  ;; Server-side (topic registered) / client-side (subscribed).
                   topic-config (get-topic-config peer topic)
                   sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
                   strategy (or (:strategy topic-config) (:strategy sub-state))]
@@ -470,50 +519,35 @@
                              :error :pubsub/unauthorized
                              :message "not authorized to publish to this topic"})
                   {:ok true :denied? true})
-                (let [lock (topic-apply-lock peer topic)]
-                  (<! lock)
-                  (try
-                    (let [apply-result (if strategy
-                                         (<! (safe-result!
-                                              S #(proto/-apply-publish strategy payload)
-                                              {:operation :apply-publish
-                                               :topic topic}))
-                                         {:ok true})]
-                      (if-not (explicit-success? apply-result)
-                        {:error (or (:error apply-result)
-                                    (ex-info "Publish strategy did not report success"
-                                             {:topic topic :result apply-result}))}
-                        (do
-                          (log/debug :pubsub/publish-received {:topic topic})
-          ;; Apply locally
-                          (when on-publish
-                            (on-publish topic payload))
-          ;; Server-side: forward to other subscribers (except the sender).
-          ;; Subscribers are the transport channels from connected clients, not
-          ;; the peer's own out channel, so `out` identifies the sender.
-                          ;; Re-read the subscriber set after apply while still
-                          ;; holding the same topic boundary used by unsubscribe.
-                          (let [subscribers (get-subscribers peer topic)]
-                            (when (and topic-config (seq subscribers))
-                              (log/debug :pubsub/forwarding-publish {:topic topic :count (count subscribers)})
-                              (let [fwd-msg (proto/publish-msg topic payload)]
-                                (doseq [transport subscribers]
-                                  (when (not= transport out)
-                                    (try
-                                      ;; Nonparking pending puts retain channel
-                                      ;; FIFO, which makes the later drain ACK
-                                      ;; a real marker on unbuffered transports.
-                                      (put? S transport fwd-msg
-                                            (fn [delivered?]
-                                              (when-not delivered?
-                                                (remove-subscriber!
-                                                 peer topic transport))))
-                                      (catch #?(:clj Exception :cljs js/Error) e
-                                        (log/warn :pubsub/forward-failed
-                                                  {:topic topic :error (str e)}))))))))
-                          {:ok true})))
-                    (finally
-                      (async/offer! lock :available))))))
+                (<!
+                 (apply-publish-under-lock!
+                  S peer topic payload strategy on-publish
+                  (fn []
+                    (log/debug :pubsub/publish-received {:topic topic})
+                    ;; Server-side: forward to other subscribers (except the
+                    ;; sender). Re-read the subscriber set after apply while
+                    ;; still holding the same topic boundary used by
+                    ;; unsubscribe.
+                    (let [subscribers (get-subscribers peer topic)]
+                      (when (and topic-config (seq subscribers))
+                        (log/debug :pubsub/forwarding-publish
+                                   {:topic topic :count (count subscribers)})
+                        (let [fwd-msg (proto/publish-msg topic payload)]
+                          (doseq [transport subscribers]
+                            (when (not= transport out)
+                              (try
+                                ;; Nonparking pending puts retain channel FIFO,
+                                ;; which makes the later drain ACK a real marker
+                                ;; on unbuffered transports.
+                                (put? S transport fwd-msg
+                                      (fn [delivered?]
+                                        (when-not delivered?
+                                          (remove-subscriber!
+                                           peer topic transport))))
+                                (catch #?(:clj Exception :cljs js/Error) e
+                                  (log/warn :pubsub/forward-failed
+                                            {:topic topic
+                                             :error (str e)})))))))))))))
             (catch #?(:clj Throwable :cljs :default) e
               {:error e}))))
 

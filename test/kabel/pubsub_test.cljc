@@ -367,6 +367,44 @@
        (close! in-b))))
 
 #?(:clj
+   (deftest direct-and-external-delivery-share-the-topic-serializer-test
+     (let [peer (make-test-peer)
+           [in out] (make-channel-pair)
+           entered (chan 10)
+           release (chan 10)
+           in-flight (atom 0)
+           max-in-flight (atom 0)
+           strategy
+           (reify proto/PSyncStrategy
+             (-apply-publish [_ payload]
+               (go
+                 (let [active (swap! in-flight inc)]
+                   (swap! max-in-flight max active)
+                   (>! entered payload)
+                   (<! release)
+                   (swap! in-flight dec)
+                   {:ok true}))))]
+       (pubsub/register-topic! peer :t {:strategy strategy})
+       ((pubsub/make-pubsub-peer-middleware {}) [S peer [in out]])
+       ;; An overlay or another transport enters through the public application
+       ;; boundary. A direct frame arriving concurrently must queue behind it.
+       (let [external-result (pubsub/apply-publish! S peer :t :overlay)]
+         (is (= :overlay (<?? S entered)))
+         (put! in (proto/publish-msg :t :direct))
+         (let [[_ port] (async/alts!! [entered (timeout 100)])]
+           (is (not= entered port)
+               "the direct path cannot concurrently enter the strategy"))
+         (put! release true)
+         (is (:ok (<?? S external-result)))
+         (let [[value port] (async/alts!! [entered (timeout 500)])]
+           (is (= entered port))
+           (is (= :direct value)))
+         (put! release true)
+         (Thread/sleep 50)
+         (is (= 1 @max-in-flight)))
+       (close! in))))
+
+#?(:clj
    (deftest unsubscribe-ack-is-after-in-flight-publish-test
      (let [handle-publish! @#'pubsub/handle-publish!
            handle-unsubscription! @#'pubsub/handle-unsubscription!

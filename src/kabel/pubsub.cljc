@@ -21,6 +21,7 @@
    (publish! peer :my-topic {:data 123})
    ```"
   (:require [kabel.authorize :as authz]
+            [kabel.metrics :as metrics]
             [kabel.pubsub.protocol :as proto]
             [replikativ.logging :as log]
             #?(:clj [superv.async :refer [<? >? put? go-try go-loop-try go-loop-super]]
@@ -181,14 +182,29 @@
 (defn- add-subscriber!
   "Add a subscriber transport to a topic."
   [peer topic transport]
-  (update-pubsub-state! peer update-in [:topics topic :subscribers]
-                        (fnil conj #{}) transport))
+  (let [added? (volatile! false)]
+    (update-pubsub-state! peer update-in [:topics topic :subscribers]
+                          (fn [subscribers]
+                            (let [subscribers (or subscribers #{})]
+                              (if (contains? subscribers transport)
+                                subscribers
+                                (do (vreset! added? true)
+                                    (conj subscribers transport))))))
+    (when @added?
+      (metrics/subscription-event! :server :subscribe 1))))
 
 (defn- remove-subscriber!
   "Remove a subscriber transport from a topic."
   [peer topic transport]
-  (update-pubsub-state! peer update-in [:topics topic :subscribers]
-                        disj transport))
+  (let [removed? (volatile! false)]
+    (update-pubsub-state! peer update-in [:topics topic :subscribers]
+                          (fn [subscribers]
+                            (if (contains? subscribers transport)
+                              (do (vreset! removed? true)
+                                  (disj subscribers transport))
+                              subscribers)))
+    (when @removed?
+      (metrics/subscription-event! :server :unsubscribe 1))))
 
 ;; =============================================================================
 ;; Publishing
@@ -497,10 +513,31 @@
 (defn- init-subscription-state!
   "Initialize client-side subscription state."
   [peer topic strategy on-handshake-complete]
-  (update-pubsub-state! peer assoc-in [:subscriptions topic]
-                        {:strategy strategy
-                         :on-handshake-complete on-handshake-complete
-                         :handshake-complete? false}))
+  (let [added? (volatile! false)]
+    (update-pubsub-state!
+     peer
+     (fn [state]
+       (when-not (contains? (:subscriptions state) topic)
+         (vreset! added? true))
+       (assoc-in state [:subscriptions topic]
+                 {:strategy strategy
+                  :on-handshake-complete on-handshake-complete
+                  :handshake-complete? false})))
+    (when @added?
+      (metrics/subscription-event! :client :subscribe 1))))
+
+(defn- remove-subscription!
+  [peer topic]
+  (let [removed? (volatile! false)]
+    (update-pubsub-state!
+     peer
+     (fn [state]
+       (if (contains? (:subscriptions state) topic)
+         (do (vreset! removed? true)
+             (update state :subscriptions dissoc topic))
+         state)))
+    (when @removed?
+      (metrics/subscription-event! :client :unsubscribe 1))))
 
 (defn- mark-handshake-complete!
   "Mark handshake as complete for a topic."
@@ -577,7 +614,7 @@
         out (get-in (get-pubsub-state peer) [:out])]
     (go-try S
             (doseq [topic topics]
-              (update-pubsub-state! peer update :subscriptions dissoc topic))
+              (remove-subscription! peer topic))
             ;; `out` is the CLIENT side of the protocol; a server peer has
             ;; none. Calling this there used to reach `put!` with a nil port
             ;; and throw "No implementation of method: :put! ... for class:

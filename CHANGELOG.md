@@ -1,6 +1,13 @@
 # Change Log
 
 ## Unreleased
+ - **Opt-in transport metrics.** `kabel.metrics/messages` counts logical
+   messages by direction and type; `kabel.metrics/wire` counts WebSocket
+   application bytes outside the codec; connection/reconnection/disconnection
+   and successful pub/sub subscription events share the same dependency-free
+   `replikativ.metrics` registry used by the rest of the stack. Labels exclude
+   peer ids, URLs, and topics so a deployment cannot accidentally create an
+   unbounded series set.
  - **Server IO is no longer tied to http-kit.** `kabel.ring-ws` is written
    against `ring.websocket.protocols`; callers inject `run-server`.
    `kabel.http-kit` and the new `kabel.jetty` supply theirs and return the same

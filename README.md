@@ -227,6 +227,30 @@ not usually possible, so `kabel.middleware.dual` makes it two deploys:
 - **Handler** (`kabel.middleware.handler`): Generic callback middleware for custom transforms
 - **WAMP** (`kabel.middleware.wamp`): Experimental WAMP protocol client
 
+### Transport metrics
+
+`kabel.metrics` records into the shared `replikativ.metrics` registry without
+choosing an exposition format. Compose `messages` with the application
+middleware, inside the codec, and `wire` outside the codec:
+
+```clojure
+(:require [kabel.metrics :as metrics]
+          [kabel.middleware.cbor :as cbor]
+          [kabel.pubsub :as pubsub])
+
+(peer/server-peer S handler server-id
+  (comp (pubsub/make-pubsub-peer-middleware opts) metrics/messages)
+  (comp cbor/cbor metrics/wire))
+```
+
+This records logical messages by direction and `:type`, application bytes by
+direction and serialization, connection/reconnection/disconnection events,
+and successful pub/sub subscription events. Wire bytes are measured before a
+WebSocket extension such as permessage-deflate; they are the application-byte
+load, not a packet capture. Peer ids, URLs, and topics are deliberately absent
+from labels to keep metric cardinality bounded. A host can render the registry
+with `replikativ.metrics.prometheus` or consume its plain snapshot directly.
+
 ## Authentication (optional)
 
 kabel ships an optional authentication subsystem under `kabel.auth.*`, kept
@@ -399,7 +423,7 @@ JDK 21+, and native-image tested across nine platform combinations.
 
 **Reach for Jetty** when you want what http-kit does not offer: in-process TLS
 termination, HTTP/2, connection caps, idle timeouts, request-rate limiting, or
-metrics. It is a *provided* dependency — add it yourself:
+server-level HTTP metrics. It is a *provided* dependency — add it yourself:
 
 ```clojure
 info.sunng/ring-jetty9-adapter {:mvn/version "0.40.2"}

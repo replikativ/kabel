@@ -104,6 +104,7 @@
 (defn set-transport!
   "Install a transport: `{:publish! (fn [peer topic payload] ch)
                           :subscribe! (fn [peer topics opts] ch)
+                          :unsubscribe! (fn [peer topics] ch)
                           :receive-publish!
                           (fn [peer topic payload context] ch)}`.
 
@@ -889,15 +890,17 @@
   Active topics must belong to one connection. Call `direct-unsubscribe!`
   explicitly for each connection when coordinating a multi-source client."
   [peer topics]
-  (let [pubsub-state (get-pubsub-state peer)
-        outs (into #{} (keep #(get-in pubsub-state [:subscriptions % :out]))
-                   topics)]
-    (if (> (count outs) 1)
-      (doto (chan 1)
-        (put! {:error (ex-info "Topics belong to different connections"
-                               {:topics topics :connections (count outs)})})
-        close!)
-      (direct-unsubscribe! peer topics {:out (first outs)}))))
+  (if-let [f (transport-fn peer :unsubscribe!)]
+    (f peer topics)
+    (let [pubsub-state (get-pubsub-state peer)
+          outs (into #{} (keep #(get-in pubsub-state [:subscriptions % :out]))
+                     topics)]
+      (if (> (count outs) 1)
+        (doto (chan 1)
+          (put! {:error (ex-info "Topics belong to different connections"
+                                 {:topics topics :connections (count outs)})})
+          close!)
+        (direct-unsubscribe! peer topics {:out (first outs)})))))
 
 ;; =============================================================================
 ;; Middleware

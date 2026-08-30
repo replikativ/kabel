@@ -284,6 +284,25 @@
          (is (= [[:t :v {:principal :alice :out sender}]] @received))))))
 
 #?(:clj
+   (deftest installed-transport-owns-unsubscribe-lifecycle-test
+     (let [peer (make-test-peer)
+           called (atom [])
+           result (doto (chan 1) (put! {:ok true :transport :overlay}) close!)]
+       (pubsub/set-transport!
+        peer
+        {:unsubscribe! (fn [actual-peer topics]
+                         (swap! called conj [actual-peer topics])
+                         result)})
+       (swap! peer assoc-in [:pubsub :subscriptions :t]
+              {:generation :owned-by-transport})
+       (is (= {:ok true :transport :overlay}
+              (<?? S (pubsub/unsubscribe! peer #{:t}))))
+       (is (= [[peer #{:t}]] @called))
+       (is (= :owned-by-transport
+              (:generation (pubsub/subscription peer :t)))
+           "the direct unsubscribe path must not run behind the transport"))))
+
+#?(:clj
    (deftest throwing-ready-callback-never-establishes-readiness-test
      (let [peer (make-test-peer)
            [in out] (make-channel-pair)

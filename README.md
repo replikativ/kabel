@@ -441,7 +441,7 @@ One difference worth knowing: **Jetty negotiates
 box**. Upstream http-kit does not yet, although the implementation is open as
 [http-kit#617](https://github.com/http-kit/http-kit/pull/617) and is included
 in the tested
-[replikativ integration branch](https://github.com/replikativ/http-kit/tree/replikativ/p2p-transport).
+[replikativ fork](https://github.com/replikativ/http-kit/tree/main).
 On a
 fressian/CBOR wire that is a large saving. kabel's Tyrus client offers the
 extension via `org.replikativ.kabel.PerMessageDeflateExtension`, so a JVM client
@@ -462,7 +462,7 @@ the adapter provides it. Jetty does; released http-kit 2.8.x does not, and its
 internal socket write list is unbounded below Ring. Until
 [http-kit PR #619](https://github.com/http-kit/http-kit/pull/619) (or an
 equivalent byte ceiling) is released, use Jetty or the tested
-[replikativ integration branch](https://github.com/replikativ/http-kit/tree/replikativ/p2p-transport)
+[replikativ fork](https://github.com/replikativ/http-kit/tree/main)
 with a per-connection `:max-queued-bytes` for untrusted public peers. Kabel's
 own bounded channel cannot bound an adapter queue beneath it.
 

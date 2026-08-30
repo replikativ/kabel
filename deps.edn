@@ -55,7 +55,7 @@
            ;; main); a release swaps this for a Maven datahike coordinate.
            :auth-store-datahike {:extra-deps {org.replikativ/datahike {:local/root "../datahike"}}}
            ;; The transport cross-implementation tests need the tested
-           ;; replikativ integration of the still-unreleased http-kit
+           ;; replikativ main branch with the still-unreleased http-kit
            ;; permessage-deflate and outbound-backpressure PRs (#617 and #619).
            ;; That is a GIT dep, and http-kit is a lein project, so using it
            ;; requires

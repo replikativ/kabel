@@ -88,7 +88,7 @@
            :pmd {:override-deps
                  {http-kit/http-kit
                   {:git/url "https://github.com/replikativ/http-kit"
-                   :git/sha "c55b2de60336876e0d39b290553289dc60c891f0"}}}
+                   :git/sha "75c0327451a2ea38075a623f2c05b7455db58638"}}}
 
    :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}

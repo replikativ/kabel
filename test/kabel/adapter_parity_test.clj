@@ -37,6 +37,15 @@
      :create-handler! @(resolve 'kabel.jetty/create-jetty-handler!)}
     (catch Exception _ nil)))
 
+(def ^:private http-kit-async?
+  "Whether the selected http-kit provides the outbound-queue integration.
+
+  Kabel's baseline suite must keep working with released http-kit 2.8.x, while
+  the explicit `:pmd` suite must prove that the pinned replikativ build exposes
+  Ring's AsyncSocket. `queued-bytes` is part of that same change and therefore
+  makes the expected capability unambiguous."
+  (boolean (ns-resolve 'org.httpkit.server 'queued-bytes)))
+
 (defn- skip! [what]
   (println "SKIPPED" what "— no ring-jetty9-adapter on the classpath"
            "(run with the :jetty alias)"))
@@ -78,7 +87,7 @@
             implementations. Passing on http-kit and failing on Jetty would
             mean kabel.ring-ws is still coupled to http-kit."
     (testing "http-kit"
-      (is (= {:reply "ping" :async? true}
+      (is (= {:reply "ping" :async? http-kit-async?}
              (roundtrip-over 47411 http-kit/run-server))))
     (testing "Jetty 12"
       (if-not jetty
@@ -95,7 +104,7 @@
       (skip! "create-handler-entry-points-agree/kabel.jetty"))
     (doseq [[nm port create! async?]
             (cond-> [["kabel.http-kit" 47415
-                      kabel-http-kit/create-http-kit-handler! true]]
+                      kabel-http-kit/create-http-kit-handler! http-kit-async?]]
               jetty (conj ["kabel.jetty" 47416
                            (:create-handler! jetty) true]))]
       (testing nm

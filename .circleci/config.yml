@@ -68,6 +68,20 @@ jobs:
           command: clojure -X:auth:test:jetty
           no_output_timeout: 5m
 
+  test-http-kit-integration:
+    executor: tools/clojurecli
+    steps:
+      - attach_workspace:
+          at: /home/circleci
+      - run:
+          name: Prepare pinned replikativ http-kit
+          command: clojure -X:deps prep :aliases '[:pmd]'
+          no_output_timeout: 5m
+      - run:
+          name: Run Clojure tests with replikativ http-kit
+          command: clojure -X:auth:test:jetty:pmd
+          no_output_timeout: 5m
+
   test-cljs:
     executor: tools/clojurecli
     steps:
@@ -117,6 +131,10 @@ workflows:
           context: dockerhub-deploy
           requires:
             - setup
+      - test-http-kit-integration:
+          context: dockerhub-deploy
+          requires:
+            - setup
       - test-cljs:
           context: dockerhub-deploy
           requires:
@@ -135,5 +153,6 @@ workflows:
           requires:
             - format-check
             - test-clj
+            - test-http-kit-integration
             - test-cljs
             - build

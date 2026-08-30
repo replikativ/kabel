@@ -63,11 +63,10 @@
            ;;   clojure -X:deps prep :aliases '[:pmd]'
            ;;
            ;; It lives in its own alias for exactly that reason. Putting the
-           ;; override in :test turned CI red: `clojure -X:auth:test` and
-           ;; `shadow-cljs compile :node-test` both failed with "The following
-           ;; libs must be prepared before use", because our CI persists .m2
-           ;; and .npm to the workspace but not .gitlibs, and cannot prep a lein
-           ;; project anyway.
+           ;; override in :test would make every JVM and ClojureScript command
+           ;; require a prepared Git dependency. The dedicated CircleCI
+           ;; integration job prepares this alias explicitly, while the normal
+           ;; jobs continue to prove compatibility with released http-kit.
            ;;
            ;; Without :pmd the compression tests SKIP with a message rather
            ;; than passing vacuously -- they check for the class. Fold this

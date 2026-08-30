@@ -257,6 +257,33 @@
              "failed apply is neither observed nor forwarded")))))
 
 #?(:clj
+   (deftest installed-transport-owns-inbound-live-delivery-test
+     (let [handle-publish! @#'pubsub/handle-publish!
+           peer (make-test-peer)
+           sender (chan 10)
+           applied (atom 0)
+           received (atom [])
+           strategy (reify proto/PSyncStrategy
+                      (-apply-publish [_ _]
+                        (swap! applied inc)
+                        (doto (chan 1) (put! {:ok true}) close!)))]
+       (pubsub/register-topic! peer :t {:strategy strategy})
+       (pubsub/set-transport!
+        peer
+        {:receive-publish!
+         (fn [_ topic payload context]
+           (swap! received conj [topic payload context])
+           (doto (chan 1) (put! {:ok true}) close!))})
+       (let [result (<?? S (handle-publish!
+                            S peer sender
+                            (assoc (proto/publish-msg :t :v)
+                                   :kabel/principal :alice)
+                            nil (constantly true)))]
+         (is (:ok result))
+         (is (zero? @applied) "the direct strategy path must be bypassed")
+         (is (= [[:t :v {:principal :alice :out sender}]] @received))))))
+
+#?(:clj
    (deftest throwing-ready-callback-never-establishes-readiness-test
      (let [peer (make-test-peer)
            [in out] (make-channel-pair)

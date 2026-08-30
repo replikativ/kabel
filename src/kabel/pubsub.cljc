@@ -103,9 +103,13 @@
 
 (defn set-transport!
   "Install a transport: `{:publish! (fn [peer topic payload] ch)
-                          :subscribe! (fn [peer topics opts] ch)}`.
+                          :subscribe! (fn [peer topics opts] ch)
+                          :receive-publish!
+                          (fn [peer topic payload context] ch)}`.
 
   Either key may be omitted to keep the direct behaviour for that operation.
+  `:receive-publish!` owns authenticated inbound live frames when present; it
+  is how a transport makes direct and overlay live delivery mutually exclusive.
   Passing nil restores both."
   [peer transport]
   (update-pubsub-state! peer assoc :transport transport)
@@ -519,35 +523,40 @@
                              :error :pubsub/unauthorized
                              :message "not authorized to publish to this topic"})
                   {:ok true :denied? true})
-                (<!
-                 (apply-publish-under-lock!
-                  S peer topic payload strategy on-publish
-                  (fn []
-                    (log/debug :pubsub/publish-received {:topic topic})
-                    ;; Server-side: forward to other subscribers (except the
-                    ;; sender). Re-read the subscriber set after apply while
-                    ;; still holding the same topic boundary used by
-                    ;; unsubscribe.
-                    (let [subscribers (get-subscribers peer topic)]
-                      (when (and topic-config (seq subscribers))
-                        (log/debug :pubsub/forwarding-publish
-                                   {:topic topic :count (count subscribers)})
-                        (let [fwd-msg (proto/publish-msg topic payload)]
-                          (doseq [transport subscribers]
-                            (when (not= transport out)
-                              (try
-                                ;; Nonparking pending puts retain channel FIFO,
-                                ;; which makes the later drain ACK a real marker
-                                ;; on unbuffered transports.
-                                (put? S transport fwd-msg
-                                      (fn [delivered?]
-                                        (when-not delivered?
-                                          (remove-subscriber!
-                                           peer topic transport))))
-                                (catch #?(:clj Exception :cljs js/Error) e
-                                  (log/warn :pubsub/forward-failed
-                                            {:topic topic
-                                             :error (str e)})))))))))))))
+                (if-let [receive-publish! (transport-fn peer :receive-publish!)]
+                  (<! (safe-result!
+                       S #(receive-publish!
+                           peer topic payload {:principal principal :out out})
+                       {:operation :transport-receive-publish :topic topic}))
+                  (<!
+                   (apply-publish-under-lock!
+                    S peer topic payload strategy on-publish
+                    (fn []
+                      (log/debug :pubsub/publish-received {:topic topic})
+                      ;; Server-side: forward to other subscribers (except the
+                      ;; sender). Re-read the subscriber set after apply while
+                      ;; still holding the same topic boundary used by
+                      ;; unsubscribe.
+                      (let [subscribers (get-subscribers peer topic)]
+                        (when (and topic-config (seq subscribers))
+                          (log/debug :pubsub/forwarding-publish
+                                     {:topic topic :count (count subscribers)})
+                          (let [fwd-msg (proto/publish-msg topic payload)]
+                            (doseq [transport subscribers]
+                              (when (not= transport out)
+                                (try
+                                  ;; Nonparking pending puts retain channel FIFO,
+                                  ;; which makes the later drain ACK a real marker
+                                  ;; on unbuffered transports.
+                                  (put? S transport fwd-msg
+                                        (fn [delivered?]
+                                          (when-not delivered?
+                                            (remove-subscriber!
+                                             peer topic transport))))
+                                  (catch #?(:clj Exception :cljs js/Error) e
+                                    (log/warn :pubsub/forward-failed
+                                              {:topic topic
+                                               :error (str e)}))))))))))))))
             (catch #?(:clj Throwable :cljs :default) e
               {:error e}))))
 
@@ -817,16 +826,21 @@
                     (remove-subscription! peer topic))
                   {:error e}))))))
 
-(defn unsubscribe!
-  "Unsubscribe from topics.
+(defn direct-unsubscribe!
+  "Orderly point-to-point unsubscribe for `topics`.
 
-   Returns channel yielding {:ok true}
-
-   The local subscription state is dropped unconditionally; telling the server
-   is best-effort. See below for why it cannot be anything else."
-  [peer topics]
+  `:out` selects the connection, matching `direct-subscribe!`. When omitted,
+  the connection recorded by the active subscription is preferred over the
+  historical peer-wide `:out` slot. The result settles only after the remote
+  drain marker has passed all earlier topic frames."
+  [peer topics {:keys [out]}]
   (let [pubsub-state (get-pubsub-state peer)
-        out (:out pubsub-state)
+        remembered-outs (into #{} (keep #(get-in pubsub-state
+                                                 [:subscriptions % :out]))
+                              topics)
+        out (or out
+                (when (= 1 (count remembered-outs)) (first remembered-outs))
+                (:out pubsub-state))
         pending (get-in pubsub-state [:unsubscribe-state :pending])]
     (if (and out pending)
       (let [id (random-uuid)
@@ -868,6 +882,22 @@
         (async/offer! result-ch {:ok true})
         (close! result-ch)
         result-ch))))
+
+(defn unsubscribe!
+  "Unsubscribe from topics and await the remote drain marker.
+
+  Active topics must belong to one connection. Call `direct-unsubscribe!`
+  explicitly for each connection when coordinating a multi-source client."
+  [peer topics]
+  (let [pubsub-state (get-pubsub-state peer)
+        outs (into #{} (keep #(get-in pubsub-state [:subscriptions % :out]))
+                   topics)]
+    (if (> (count outs) 1)
+      (doto (chan 1)
+        (put! {:error (ex-info "Topics belong to different connections"
+                               {:topics topics :connections (count outs)})})
+        close!)
+      (direct-unsubscribe! peer topics {:out (first outs)}))))
 
 ;; =============================================================================
 ;; Middleware

@@ -25,6 +25,7 @@
    it here covers the ClojureScript client too."
   (:require [clojure.test :refer [deftest testing is]]
             [kabel.pubsub :as pubsub]
+            [kabel.pubsub.protocol :as proto]
             [superv.async :refer [S]]
             [clojure.core.async :as async :refer [chan timeout close! put! alts!!]]))
 
@@ -183,3 +184,30 @@
       (is (= result-ch port) "the handshake must not lose the immediate ACK")
       (is (:ok result))
       (is (false? @missed?)))))
+
+(deftest checked-producer-failure-never-completes-prefix
+  (let [out (chan 32)
+        items (chan 1)
+        completion (chan 1)
+        pending-acks (atom {})]
+    (put! items :prefix)
+    (close! items)
+    (put! completion {:error (ex-info "snapshot failed" {})})
+    (close! completion)
+    (async/go-loop []
+      (async/<! (timeout 2))
+      (doseq [[_ batches] @pending-acks
+              [_ ack-ch] batches]
+        (put! ack-ch :ack))
+      (recur))
+    (let [source (proto/checked-handshake-source items completion)
+          result (alts!! [(send-handshake! S out :t source
+                                           (assoc pubsub/default-opts
+                                                  :batch-timeout-ms 500)
+                                           pending-acks)
+                          (timeout 2000)])
+          result (first result)
+          msgs (drain-out out 100)]
+      (is (some? (:error result)))
+      (is (= 1 (count (filter #(= :pubsub/handshake-data (:type %)) msgs))))
+      (is (not-any? #(= :pubsub/handshake-complete (:type %)) msgs)))))

@@ -22,14 +22,15 @@
    ```"
   (:require [kabel.authorize :as authz]
             [kabel.metrics :as metrics]
+            [kabel.pubsub.lifecycle :as lifecycle]
             [kabel.pubsub.protocol :as proto]
             [replikativ.logging :as log]
             #?(:clj [superv.async :refer [<? >? put? go-try go-loop-try go-loop-super]]
                :cljs [superv.async :refer [put?]])
             #?(:clj [clojure.core.async :as async
-                     :refer [>! <! chan put! close! timeout pub sub unsub alts!]]
+                     :refer [>! <! chan put! close! timeout alts!]]
                :cljs [clojure.core.async :as async
-                      :refer [>! <! chan put! close! timeout pub sub alts!] :include-macros true]))
+                      :refer [>! <! chan put! close! timeout alts!] :include-macros true]))
   #?(:cljs (:require-macros [superv.async :refer [<? >? go-try go-loop-try go-loop-super]])))
 
 ;; =============================================================================
@@ -114,7 +115,7 @@
   [peer k]
   (get-in (get-pubsub-state peer) [:transport k]))
 
-(declare direct-publish! direct-subscribe!)
+(declare direct-publish! direct-subscribe! topic-apply-lock)
 
 (defn register-topic!
   "Register a topic on the peer for subscription.
@@ -239,50 +240,72 @@
   (let [{{S :supervisor} :volatile} @peer
         pubsub-state (get-pubsub-state peer)
         out (:out pubsub-state)
-        subscribers (get-subscribers peer topic)
-        is-client? (and out (empty? subscribers))]
+        owner? (topic-registered? peer topic)
+        is-client? (and out (not owner?))]
     ;; Use put? (synchronous, callable from any thread) instead of (go (>! ...)).
     ;; With go-try + >?, multiple publish! calls from one thread spawn racing
     ;; go-blocks whose >! puts can reach the out channel out of order. put?
     ;; enqueues directly on the channel's pending-puts FIFO from the calling
     ;; thread, so wire order matches call order.
     (let [msg (proto/publish-msg topic payload)
-          sent (atom 0)
           result-ch (chan 1)]
       (if is-client?
         (do
           (log/debug :pubsub/publish-to-server {:topic topic})
           (put? S out msg)
-          (swap! sent inc))
-        (doseq [transport subscribers]
-          (try
-            ;; Use put?'s callback to detect closed subscriber channels.
-            ;; `async/put!` returns false (and the callback receives false)
-            ;; when the channel is closed. We remove the dead subscriber so
-            ;; subsequent publishes don't visit it and so disconnected
-            ;; clients don't accumulate in the topic's subscriber set.
-            (put? S transport msg
-                  (fn [delivered?]
-                    (when-not delivered?
-                      (log/debug :pubsub/removing-closed-subscriber {:topic topic})
-                      (remove-subscriber! peer topic transport))))
-            (swap! sent inc)
-            (catch #?(:clj Exception :cljs js/Error) e
-              (log/warn :pubsub/publish-failed {:topic topic :error (str e)})))))
-      (async/put! result-ch {:ok true :sent-count @sent})
-      (close! result-ch)
+          (async/offer! result-ch {:ok true :sent-count 1})
+          (close! result-ch))
+        ;; Register the take synchronously. Concurrent publish! calls from one
+        ;; thread therefore enter the peer/topic serializer in call order.
+        (let [lock (topic-apply-lock peer topic)]
+          (async/take!
+           lock
+           (fn [token]
+             (if-not token
+               (do
+                 (async/offer! result-ch
+                               {:error (ex-info "Topic serializer closed"
+                                                {:topic topic})})
+                 (close! result-ch))
+               (let [sent (volatile! 0)]
+                 (try
+                   ;; Subscriber selection and enqueue are one ordered topic
+                   ;; operation. An unsubscribe drain cannot acknowledge in
+                   ;; between these two steps.
+                   (doseq [transport (get-subscribers peer topic)]
+                     ;; Register the transport put without parking. Core.async
+                     ;; preserves pending-put order, so the later drain ACK
+                     ;; cannot overtake this publication even on an unbuffered
+                     ;; connection channel.
+                     (put? S transport msg
+                           (fn [delivered?]
+                             (when-not delivered?
+                               (remove-subscriber! peer topic transport))))
+                     (vswap! sent inc))
+                   (async/offer! result-ch {:ok true :sent-count @sent})
+                   (catch #?(:clj Throwable :cljs :default) e
+                     (async/offer! result-ch {:error e}))
+                   (finally
+                     (async/offer! lock :available)
+                     (close! result-ch)))))))))
       result-ch)))
 
 ;; =============================================================================
 ;; Handshake Logic
 ;; =============================================================================
 
+(declare explicit-success? safe-result! serialized-result!)
+
 (defn- send-handshake!
   "Send handshake items with batching and flow control.
 
    Returns channel yielding {:ok true} or {:error ...}"
-  [S out topic handshake-ch opts pending-acks]
-  (let [{:keys [batch-size batch-timeout-ms item-timeout-ms handshake-timeout-ms]} opts
+  [S out topic handshake-source opts pending-acks]
+  (let [{handshake-ch :items producer-completion :completion}
+        (if (and (map? handshake-source) (contains? handshake-source :items))
+          handshake-source
+          {:items handshake-source})
+        {:keys [batch-size batch-timeout-ms item-timeout-ms handshake-timeout-ms]} opts
         started-ms (now-ms)]
     (go-try S
             ;; `last-progress-ms` is when this handshake last MOVED, not when it
@@ -316,10 +339,31 @@
                 (cond
             ;; Producer finished and nothing left - send complete
                   (and closed? (empty? items))
-                  (do
-                    (log/debug :pubsub/handshake-complete {:topic topic :total-sent total-sent})
-                    (>? S out (proto/handshake-complete-msg topic))
-                    {:ok true})
+                  (let [producer-result
+                        (if producer-completion
+                          (if handshake-timeout-ms
+                            (let [[result port]
+                                  (alts! [producer-completion
+                                          (timeout handshake-timeout-ms)])]
+                              (if (= port producer-completion)
+                                result
+                                {:error (ex-info "Snapshot producer completion timeout"
+                                                 {:topic topic
+                                                  :handshake-timeout-ms
+                                                  handshake-timeout-ms})}))
+                            (<! producer-completion))
+                          ;; Compatibility only. A bare legacy channel cannot
+                          ;; distinguish successful close from a producer that
+                          ;; caught an exception and closed after a prefix.
+                          {:ok true :legacy-close? true})]
+                    (if (explicit-success? producer-result)
+                      (do
+                        (log/debug :pubsub/handshake-complete {:topic topic :total-sent total-sent})
+                        (>? S out (proto/handshake-complete-msg topic))
+                        {:ok true :legacy-close? (:legacy-close? producer-result)})
+                      {:error (or (:error producer-result)
+                                  (ex-info "Snapshot producer did not report success"
+                                           {:topic topic :result producer-result}))}))
 
             ;; QUIET, not finished. Keep waiting.
             ;;
@@ -381,10 +425,13 @@
               ;; Wait for ACK or timeout
                     (let [[result ch] (alts! [ack-ch (timeout batch-timeout-ms)])]
                       (swap! pending-acks update topic dissoc batch-idx)
-                      (if (= ch ack-ch)
+                      (if (and (= ch ack-ch)
+                               (some? result)
+                               (not= :closed result))
                         (recur (inc batch-idx) (+ total-sent (count items)) (now-ms))
                         {:error (ex-info "Handshake batch ack timeout"
-                                         {:topic topic :batch-idx batch-idx})})))))))))
+                                         {:topic topic :batch-idx batch-idx
+                                          :ack-result result})})))))))))
 
 (defn- handle-publish!
   "Apply an inbound `:pubsub/publish` and forward it to the topic's other
@@ -407,40 +454,68 @@
    `:authorize-publish-fn` to separate them."
   [S peer out msg on-publish authorize-publish-fn]
   (go-try S
-          (let [{:keys [topic payload]} msg
-                principal (:kabel/principal msg)
+          (try
+            (let [{:keys [topic payload]} msg
+                  principal (:kabel/principal msg)
           ;; Server-side (topic registered) / client-side (subscribed).
-                topic-config (get-topic-config peer topic)
-                sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
-                strategy (or (:strategy topic-config) (:strategy sub-state))
-                subscribers (get-subscribers peer topic)]
-            (if-not (authorize-publish-fn {:principal principal :topic topic
-                                           :payload payload})
-              (do
-                (log/warn :pubsub/publish-denied {:topic topic})
-                (>? S out {:type :pubsub/error
-                           :topic topic
-                           :error :pubsub/unauthorized
-                           :message "not authorized to publish to this topic"}))
-              (do
-                (log/debug :pubsub/publish-received {:topic topic :subscriber-count (count subscribers)})
+                  topic-config (get-topic-config peer topic)
+                  sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
+                  strategy (or (:strategy topic-config) (:strategy sub-state))]
+              (if-not (authorize-publish-fn {:principal principal :topic topic
+                                             :payload payload})
+                (do
+                  (log/warn :pubsub/publish-denied {:topic topic})
+                  (>? S out {:type :pubsub/error
+                             :topic topic
+                             :error :pubsub/unauthorized
+                             :message "not authorized to publish to this topic"})
+                  {:ok true :denied? true})
+                (let [lock (topic-apply-lock peer topic)]
+                  (<! lock)
+                  (try
+                    (let [apply-result (if strategy
+                                         (<! (safe-result!
+                                              S #(proto/-apply-publish strategy payload)
+                                              {:operation :apply-publish
+                                               :topic topic}))
+                                         {:ok true})]
+                      (if-not (explicit-success? apply-result)
+                        {:error (or (:error apply-result)
+                                    (ex-info "Publish strategy did not report success"
+                                             {:topic topic :result apply-result}))}
+                        (do
+                          (log/debug :pubsub/publish-received {:topic topic})
           ;; Apply locally
-                (when strategy
-                  (<? S (proto/-apply-publish strategy payload)))
-                (when on-publish
-                  (on-publish topic payload))
+                          (when on-publish
+                            (on-publish topic payload))
           ;; Server-side: forward to other subscribers (except the sender).
           ;; Subscribers are the transport channels from connected clients, not
           ;; the peer's own out channel, so `out` identifies the sender.
-                (when (and topic-config (seq subscribers))
-                  (log/debug :pubsub/forwarding-publish {:topic topic :count (count subscribers)})
-                  (let [fwd-msg (proto/publish-msg topic payload)]
-                    (doseq [transport subscribers]
-                      (when (not= transport out)
-                        (try
-                          (>? S transport fwd-msg)
-                          (catch #?(:clj Exception :cljs js/Error) e
-                            (log/warn :pubsub/forward-failed {:topic topic :error (str e)}))))))))))))
+                          ;; Re-read the subscriber set after apply while still
+                          ;; holding the same topic boundary used by unsubscribe.
+                          (let [subscribers (get-subscribers peer topic)]
+                            (when (and topic-config (seq subscribers))
+                              (log/debug :pubsub/forwarding-publish {:topic topic :count (count subscribers)})
+                              (let [fwd-msg (proto/publish-msg topic payload)]
+                                (doseq [transport subscribers]
+                                  (when (not= transport out)
+                                    (try
+                                      ;; Nonparking pending puts retain channel
+                                      ;; FIFO, which makes the later drain ACK
+                                      ;; a real marker on unbuffered transports.
+                                      (put? S transport fwd-msg
+                                            (fn [delivered?]
+                                              (when-not delivered?
+                                                (remove-subscriber!
+                                                 peer topic transport))))
+                                      (catch #?(:clj Exception :cljs js/Error) e
+                                        (log/warn :pubsub/forward-failed
+                                                  {:topic topic :error (str e)}))))))))
+                          {:ok true})))
+                    (finally
+                      (async/offer! lock :available))))))
+            (catch #?(:clj Throwable :cljs :default) e
+              {:error e}))))
 
 (defn- handle-subscription!
   "Handle a subscription request from a client.
@@ -453,97 +528,191 @@
    since publishes fan out to the subscriber set without re-checking.
 
    Returns channel yielding {:ok topics} or {:error ...}"
-  [S peer out msg pending-acks authorize-fn]
-  (go-try S
-          (let [{:keys [id topics client-states]} msg
-                principal (:kabel/principal msg)
-                successful-topics (atom #{})]
-            (log/debug :pubsub/handle-subscription {:topics topics :msg-id id})
+  ([S peer out msg pending-acks authorize-fn]
+   (handle-subscription! S peer out msg pending-acks authorize-fn
+                         (atom #{}) (atom #{})))
+  ([S peer out msg pending-acks authorize-fn retired-topics]
+   (handle-subscription! S peer out msg pending-acks authorize-fn
+                         retired-topics (atom #{})))
+  ([S peer out msg pending-acks authorize-fn retired-topics active-sessions]
+   (go-try S
+           (let [{:keys [id topics client-states]} msg
+                 principal (:kabel/principal msg)]
+             (log/debug :pubsub/handle-subscription {:topics topics :msg-id id})
+             ;; The FIFO router performs this reservation before enqueueing the
+             ;; request. Repeating the idempotent union keeps direct handler
+             ;; tests and embedders safe as well.
+             (swap! active-sessions into topics)
 
-      ;; Process each topic
-            (doseq [topic topics]
-              (cond
+            ;; Version-zero handshake frames carry only a topic, not a session
+            ;; id. A duplicate cannot be correlated safely with the active
+            ;; session, so retire the connection instead of overwriting it.
+             (when-let [duplicate (first (filter #(or (contains? @retired-topics %)
+                                                      (contains? (get-subscribers peer %) out))
+                                                 topics))]
+               (log/warn :pubsub/duplicate-subscription {:topic duplicate :id id})
+               (swap! active-sessions #(apply disj % topics))
+               (close! out)
+               (throw (ex-info "Duplicate version-zero pub/sub session"
+                               {:topic duplicate :id id})))
+
+            ;; Requests on one connection are consumed sequentially by the
+            ;; control runner, making this add-before-snapshot reservation
+            ;; atomic with respect to later v0 requests on that connection.
+             (loop [remaining (seq topics)
+                    successful #{}]
+               (if-let [topic (first remaining)]
+                 (cond
           ;; Topic not registered on this peer
-                (not (get-topic-config peer topic))
-                (do
-                  (log/warn :pubsub/topic-not-found {:topic topic})
-                  (>? S out (proto/error-msg topic "Topic not registered")))
+                   (not (get-topic-config peer topic))
+                   (let [error (ex-info "Topic not registered" {:topic topic})]
+                     (log/warn :pubsub/topic-not-found {:topic topic})
+                     (>? S out (proto/error-msg topic "Topic not registered"))
+                     (>? S out (proto/subscribe-ack-msg id successful))
+                     (doseq [successful-topic successful]
+                       (remove-subscriber! peer successful-topic out))
+                     (swap! active-sessions #(apply disj % topics))
+                     (close! out)
+                     {:error error})
 
           ;; Registered, but the subject may not subscribe
-                (not (authorize-fn {:principal principal :topic topic}))
-                (do
-                  (log/warn :pubsub/subscription-denied {:topic topic})
-                  (>? S out (proto/error-msg topic "Not authorized")))
+                   (not (authorize-fn {:principal principal :topic topic}))
+                   (let [error (ex-info "Not authorized" {:topic topic})]
+                     (log/warn :pubsub/subscription-denied {:topic topic})
+                     (>? S out (proto/error-msg topic "Not authorized"))
+                     (>? S out (proto/subscribe-ack-msg id successful))
+                     (doseq [successful-topic successful]
+                       (remove-subscriber! peer successful-topic out))
+                     (swap! active-sessions #(apply disj % topics))
+                     (close! out)
+                     {:error error})
 
-                :else
-                (let [{:keys [strategy opts]} (get-topic-config peer topic)
-                      client-state (get client-states topic)
-                      handshake-ch (proto/-handshake-items strategy client-state)]
+                   :else
+                   (let [{:keys [strategy opts]} (get-topic-config peer topic)
+                         client-state (get client-states topic)]
 
-            ;; Add as subscriber before handshake
-                  (add-subscriber! peer topic out)
+            ;; Begin live capture before the strategy takes its snapshot. The
+            ;; receiver lane holds these publications behind the snapshot cut.
+                     (add-subscriber! peer topic out)
 
             ;; Send handshake
-                  (let [result (<? S (send-handshake! S out topic handshake-ch opts pending-acks))]
-                    (if (:ok result)
-                      (do
-                        (log/info :pubsub/subscription-complete {:topic topic})
-                        (swap! successful-topics conj topic))
-                      (do
-                        (log/warn :pubsub/subscription-failed {:topic topic :error (:error result)})
-                        (remove-subscriber! peer topic out)))))))
-
-      ;; Send subscribe-ack with successful topics
-            (>? S out (proto/subscribe-ack-msg id @successful-topics))
-            {:ok @successful-topics})))
+                     (let [result (try
+                                    (let [source (proto/-handshake-items strategy client-state)]
+                                      (<! (send-handshake! S out topic source opts pending-acks)))
+                                    (catch #?(:clj Throwable :cljs :default) e
+                                      {:error e}))]
+                       (if (and (map? result) (true? (:ok result)))
+                         (do
+                           (swap! active-sessions disj topic)
+                           (log/info :pubsub/subscription-complete {:topic topic})
+                           (recur (next remaining) (conj successful topic)))
+                         (do
+                           (swap! active-sessions #(apply disj % topics))
+                           (log/warn :pubsub/subscription-failed
+                                     {:topic topic :error (:error result)})
+                           (doseq [added-topic (conj successful topic)]
+                             (remove-subscriber! peer added-topic out))
+                           (close! out)
+                           {:error (or (:error result)
+                                       (ex-info "Snapshot handshake failed"
+                                                {:topic topic :result result}))})))))
+                 (do
+                   (>? S out (proto/subscribe-ack-msg id successful))
+                   {:ok successful})))))))
 
 (defn- handle-unsubscription!
   "Handle an unsubscribe request."
-  [S peer out msg]
+  [S peer out msg retired-topics active-sessions]
   (go-try S
-          (let [{:keys [topics]} msg]
+          (let [{:keys [id topics]} msg]
             (log/debug :pubsub/handle-unsubscription {:topics topics})
-            (doseq [topic topics]
-              (remove-subscriber! peer topic out))
-            {:ok true})))
+            (if-let [joining (first (filter @active-sessions topics))]
+              {:error (ex-info "Cannot drain an active v0 snapshot"
+                               {:topic joining})}
+              (do
+                (doseq [topic topics]
+                  (let [lock (topic-apply-lock peer topic)]
+                    (<! lock)
+                    (try
+                      (remove-subscriber! peer topic out)
+                      (finally
+                        (async/offer! lock :available)))))
+                (when id
+                  (>? S out (proto/unsubscribe-ack-msg id topics)))
+                {:ok true})))))
 
 ;; =============================================================================
 ;; Client-Side API
 ;; =============================================================================
 
-(defn- init-subscription-state!
-  "Initialize client-side subscription state."
-  [peer topic strategy on-handshake-complete]
-  (let [added? (volatile! false)]
+(defn- reserve-subscriptions!
+  "Atomically reserve every requested client topic.
+
+  `subscribe!` may be called concurrently from ordinary threads. Checking and
+  then installing topics in separate swaps allows both calls to send a v0
+  request for the same topic, whose topic-only frames cannot be correlated.
+  Reserve the whole request in one peer-state transaction instead."
+  [peer topics strategies on-handshake-complete out]
+  (let [conflict (volatile! nil)
+        generations (into {} (map (fn [topic] [topic (random-uuid)]) topics))]
     (update-pubsub-state!
      peer
      (fn [state]
-       (when-not (contains? (:subscriptions state) topic)
-         (vreset! added? true))
-       (assoc-in state [:subscriptions topic]
-                 {:strategy strategy
-                  :on-handshake-complete on-handshake-complete
-                  :handshake-complete? false})))
-    (when @added?
-      (metrics/subscription-event! :client :subscribe 1))))
+       (if-let [topic (first (filter #(contains? (:subscriptions state) %) topics))]
+         (do (vreset! conflict topic) state)
+         (reduce (fn [state topic]
+                   (assoc-in state [:subscriptions topic]
+                             {:strategy (get strategies topic)
+                              :on-handshake-complete on-handshake-complete
+                              :generation (get generations topic)
+                              :out out
+                              :handshake-complete? false}))
+                 state
+                 topics))))
+    (if-let [topic @conflict]
+      {:error (ex-info "Topic already has an active subscription" {:topic topic})}
+      (do
+        (doseq [_ topics]
+          (metrics/subscription-event! :client :subscribe 1))
+        {:ok true :generations generations}))))
 
 (defn- remove-subscription!
-  [peer topic]
-  (let [removed? (volatile! false)]
+  ([peer topic]
+   (remove-subscription! peer topic nil))
+  ([peer topic generation]
+   (let [removed? (volatile! false)]
+     (update-pubsub-state!
+      peer
+      (fn [state]
+        (if (and (contains? (:subscriptions state) topic)
+                 (or (nil? generation)
+                     (= generation
+                        (get-in state [:subscriptions topic :generation]))))
+          (do (vreset! removed? true)
+              (update state :subscriptions dissoc topic))
+          state)))
+     (when @removed?
+       (metrics/subscription-event! :client :unsubscribe 1)))))
+
+(defn- mark-handshake-complete!
+  "Atomically mark ready only while `generation` is still active.
+
+  Returning false means unsubscribe, failure cleanup, or a replacement
+  connection won the race. In particular, this never recreates a removed
+  subscription through `assoc-in`."
+  [peer topic generation]
+  (let [marked? (volatile! false)]
     (update-pubsub-state!
      peer
      (fn [state]
-       (if (contains? (:subscriptions state) topic)
-         (do (vreset! removed? true)
-             (update state :subscriptions dissoc topic))
+       (if (and (some? generation)
+                (= generation (get-in state [:subscriptions topic :generation]))
+                (not (get-in state [:subscriptions topic :cancelling?])))
+         (do
+           (vreset! marked? true)
+           (assoc-in state [:subscriptions topic :handshake-complete?] true))
          state)))
-    (when @removed?
-      (metrics/subscription-event! :client :unsubscribe 1))))
-
-(defn- mark-handshake-complete!
-  "Mark handshake as complete for a topic."
-  [peer topic]
-  (update-pubsub-state! peer assoc-in [:subscriptions topic :handshake-complete?] true))
+    @marked?))
 
 (defn subscribe!
   "Subscribe to topics on a remote peer.
@@ -583,25 +752,36 @@
         ;; the historical behaviour.
         out (or out (get-in (get-pubsub-state peer) [:out]))
         id #?(:clj (java.util.UUID/randomUUID)
-              :cljs (random-uuid))]
-    (go-try S
-      ;; Initialize subscription state
-            (doseq [topic topics]
-              (init-subscription-state! peer topic (get strategies topic) on-handshake-complete))
+              :cljs (random-uuid))
+        reservation (reserve-subscriptions! peer topics strategies
+                                            on-handshake-complete out)]
+    (if (:error reservation)
+      (doto (chan 1)
+        (put! reservation)
+        close!)
+      (go-try S
+              (try
 
-      ;; Build client-states (await async init)
-            (let [client-states (loop [topics-seq (seq topics)
-                                       states {}]
-                                  (if-let [topic (first topics-seq)]
-                                    (let [state (<? S (proto/-init-client-state (get strategies topic)))]
-                                      (recur (rest topics-seq) (assoc states topic state)))
-                                    states))]
-        ;; Send subscribe request
-              (log/debug :pubsub/sending-subscribe {:topics topics :id id})
-              (>? S out (proto/subscribe-msg id topics client-states))
+        ;; Build client-states (await async init)
+                (let [client-states (loop [topics-seq (seq topics)
+                                           states {}]
+                                      (if-let [topic (first topics-seq)]
+                                        (let [state (<? S (proto/-init-client-state (get strategies topic)))]
+                                          (recur (rest topics-seq) (assoc states topic state)))
+                                        states))]
+          ;; Send subscribe request
+                  (log/debug :pubsub/sending-subscribe {:topics topics :id id})
+                  (>? S out (proto/subscribe-msg id topics client-states))
 
-        ;; Return - actual handling happens in middleware
-              {:ok topics :id id}))))
+          ;; Return - actual handling happens in middleware
+                  {:ok topics :id id})
+                (catch #?(:clj Throwable :cljs :default) e
+                  ;; No request was put on the wire if client-state creation or
+                  ;; the subscribe put failed, so these reservations are safe
+                  ;; to release locally.
+                  (doseq [topic topics]
+                    (remove-subscription! peer topic))
+                  {:error e}))))))
 
 (defn unsubscribe!
   "Unsubscribe from topics.
@@ -611,57 +791,362 @@
    The local subscription state is dropped unconditionally; telling the server
    is best-effort. See below for why it cannot be anything else."
   [peer topics]
-  (let [{{S :supervisor} :volatile} @peer
-        out (get-in (get-pubsub-state peer) [:out])]
-    (go-try S
-            (doseq [topic topics]
-              (remove-subscription! peer topic))
-            ;; `out` is the CLIENT side of the protocol; a server peer has
-            ;; none. Calling this there used to reach `put!` with a nil port
-            ;; and throw "No implementation of method: :put! ... for class:
-            ;; nil". `publish!` is already nil-safe by construction (its
-            ;; `is-client?` tests `out` for truthiness), so this only brings
-            ;; unsubscribe into line.
-            (when out
-              ;; `put?`, not `>?`, and this is the fix rather than a tidy-up.
-              ;;
-              ;; `>?` parks the go block until the value is accepted. During
-              ;; teardown the consumer of `out` is frequently already gone --
-              ;; the socket closed, the send loop finished -- and the put then
-              ;; parks FOREVER, taking the caller's `unsubscribe!` with it.
-              ;;
-              ;; Found downstream in urd, whose consensus teardown stops the
-              ;; server peer first and then closes each client. Roughly one run
-              ;; in six hung: whether a given client parked depended on whether
-              ;; its out-channel buffer still had room. A thread dump showed no
-              ;; thread holding the hang -- all core.async dispatch threads
-              ;; merely parked -- and step tracing put it here, on the first
-              ;; topic of the first client whose connection had already gone.
-              ;;
-              ;; `publish!` already draws this distinction deliberately
-              ;; (see its comment on `put?`'s callback and
-              ;; `remove-subscriber!`): it must not park on a subscriber that
-              ;; has gone away. Unsubscribe has exactly the same exposure and
-              ;; strictly less reason to wait -- an unsubscribe nobody receives
-              ;; costs a stale subscriber entry, which the server drops anyway
-              ;; when its next publish to that transport fails.
-              (put? S out (proto/unsubscribe-msg topics)
+  (let [pubsub-state (get-pubsub-state peer)
+        out (:out pubsub-state)
+        pending (get-in pubsub-state [:unsubscribe-state :pending])]
+    (if (and out pending)
+      (let [id (random-uuid)
+            result-ch (chan 1)]
+        ;; Mark cancellation before the wire request. Snapshot effects already
+        ;; accepted may drain, but readiness can no longer be published.
+        (update-pubsub-state!
+         peer
+         (fn [state]
+           (reduce (fn [state topic]
+                     (if (contains? (:subscriptions state) topic)
+                       (assoc-in state [:subscriptions topic :cancelling?] true)
+                       state))
+                   state
+                   topics)))
+        (swap! pending assoc id {:channel result-ch
+                                 :remaining topics
+                                 :generations
+                                 (into {} (map (fn [topic]
+                                                 [topic (:generation
+                                                         (subscription peer topic))])
+                                               topics))})
+        (async/put! out (proto/unsubscribe-msg id topics)
                     (fn [delivered?]
                       (when-not delivered?
-                        (log/debug :pubsub/unsubscribe-not-delivered
-                                   {:topics topics})))))
-            {:ok true})))
+                        (when-let [{:keys [channel]} (get @pending id)]
+                          (swap! pending dissoc id)
+                          (async/offer! channel
+                                        {:error (ex-info "Unsubscribe was not delivered"
+                                                         {:topics topics})})
+                          (close! channel)))))
+        result-ch)
+      ;; Compatibility for peers constructed without middleware (and server
+      ;; peers, which have no client-side `out`). There is no remote session to
+      ;; drain in this case.
+      (let [result-ch (chan 1)]
+        (doseq [topic topics]
+          (remove-subscription! peer topic))
+        (async/offer! result-ch {:ok true})
+        (close! result-ch)
+        result-ch))))
 
 ;; =============================================================================
 ;; Middleware
 ;; =============================================================================
 
-(defn- msg-type-dispatch
-  "Dispatch function for routing messages."
-  [{:keys [type]}]
-  (cond
-    (proto/pubsub-msg? {:type type}) type
-    :else :unrelated))
+(defn- estimated-frame-bytes
+  "Use a codec-provided encoded size when available. Legacy codecs do not yet
+  annotate decoded frames, so conservatively upper-bound their printed form.
+  Wire-profile v1 requires the transport to supply the exact encoded size
+  before decode/allocation."
+  [msg]
+  (or (:kabel/encoded-bytes msg)
+      (* 4 (count (pr-str msg)))))
+
+(defn- explicit-success?
+  [result]
+  (and (map? result)
+       (true? (:ok result))
+       (not (contains? result :error))))
+
+(defn- caught-error?
+  [value]
+  #?(:clj (instance? Throwable value)
+     :cljs (instance? js/Error value)))
+
+(defn- safe-result!
+  "Call an async strategy operation and normalize every failure into a value.
+
+  Lifecycle runners must never die between accepting a frame and reporting its
+  result to the pure state machine. `go-try` deliberately puts thrown errors on
+  its result channel; consuming that channel with `<?` would throw again and
+  strand the lane, so this boundary uses `<!` and converts the error explicitly."
+  [S f context]
+  (go-try S
+          (try
+            (let [result (<! (f))]
+              (cond
+                (caught-error? result) {:error result}
+                (explicit-success? result) result
+                :else {:error (ex-info "Pub/sub operation did not report explicit success"
+                                       (assoc context :result result))}))
+            (catch #?(:clj Throwable :cljs :default) e
+              {:error e}))))
+
+(defn- topic-apply-lock
+  "Return the peer-wide serializer for one topic.
+
+  Middleware instances are connection-scoped, but registered strategies and
+  client subscription strategies are peer-scoped. The lock therefore lives in
+  peer state so two connections can never invoke the same strategy at once."
+  [peer topic]
+  (let [candidate (chan 1)
+        chosen (volatile! nil)]
+    (async/offer! candidate :available)
+    (update-pubsub-state!
+     peer
+     (fn [state]
+       (if-let [existing (get-in state [:apply-locks topic])]
+         (do (vreset! chosen existing) state)
+         (do (vreset! chosen candidate)
+             (assoc-in state [:apply-locks topic] candidate)))))
+    @chosen))
+
+(defn- serialized-result!
+  "Run one strategy operation under the peer/topic apply serializer."
+  [S peer topic f context]
+  (let [lock (topic-apply-lock peer topic)]
+    (go-try S
+            (<! lock)
+            (try
+              (<! (safe-result! S f (assoc context :topic topic)))
+              (finally
+                ;; A one-slot semaphore must never park its releasing runner.
+                (async/offer! lock :available))))))
+
+(defn- apply-values!
+  "Apply `values` sequentially. Stop on the first exception, closed result
+  channel, or explicit strategy error."
+  [S apply-fn values]
+  (go-try S
+          (loop [values (seq values)]
+            (if-let [value (first values)]
+              (let [result (<! (safe-result! S #(apply-fn value)
+                                             {:operation :apply-value}))]
+                (if (explicit-success? result)
+                  (recur (next values))
+                  {:error (or (:error result)
+                              (ex-info "Pub/sub strategy did not report success"
+                                       {:result result}))}))
+              {:ok true}))))
+
+(defn- lifecycle-event
+  [msg]
+  (case (:type msg)
+    :pubsub/handshake-data
+    {:type :snapshot/item
+     :value (:data msg)
+     :bytes (estimated-frame-bytes msg)}
+
+    :pubsub/handshake-batch-complete
+    {:type :snapshot/batch
+     :index (:batch-idx msg)
+     :count (:item-count msg)}
+
+    :pubsub/handshake-complete
+    {:type :snapshot/complete}
+
+    :pubsub/publish
+    {:type :live/publication
+     :value msg
+     :bytes (estimated-frame-bytes msg)}
+
+    :pubsub/unsubscribe-drain
+    {:type :close}))
+
+(defn- complete-unsubscribe-topic!
+  [peer id topic generation]
+  (when-let [pending (get-in (get-pubsub-state peer)
+                             [:unsubscribe-state :pending])]
+    (let [completed (volatile! nil)]
+      (swap! pending
+             (fn [requests]
+               (if-let [{:keys [remaining] :as request} (get requests id)]
+                 (let [remaining (disj remaining topic)]
+                   (if (empty? remaining)
+                     (do (vreset! completed request)
+                         (dissoc requests id))
+                     (assoc requests id (assoc request :remaining remaining))))
+                 requests)))
+      (remove-subscription! peer topic generation)
+      (when-let [{:keys [channel]} @completed]
+        (async/offer! channel {:ok true})
+        (close! channel)))))
+
+(defn- invoke-ready-callback
+  [callback topic]
+  (try
+    (when callback
+      (callback topic))
+    {:ok true}
+    (catch #?(:clj Throwable :cljs :default) e
+      {:error e})))
+
+(defn- run-lifecycle-effects!
+  [S peer out opts on-publish authorize-publish-fn topic generation
+   retire-connection! state effects]
+  (go-try S
+          (let [continue! (fn [next-state next-effects]
+                            (run-lifecycle-effects!
+                             S peer out opts on-publish authorize-publish-fn
+                             topic generation retire-connection!
+                             next-state next-effects))
+                effects (seq effects)]
+            (if-let [{:keys [op items values value index failure] :as effect}
+                     (first effects)]
+              (let [remaining (next effects)]
+                (case op
+                  :apply-snapshot-batch
+                  (let [strategy (:strategy (subscription peer topic))
+                        result (if strategy
+                                 (<! (apply-values!
+                                      S
+                                      #(serialized-result!
+                                        S peer topic
+                                        (fn [] (proto/-apply-handshake-item strategy %))
+                                        {:operation :apply-handshake-item})
+                                      items))
+                                 {:error (ex-info "No strategy for snapshot batch"
+                                                  {:topic topic})})
+                        transition (lifecycle/transition
+                                    state
+                                    (if (:ok result)
+                                      {:type :snapshot/batch-result :ok true}
+                                      {:type :snapshot/batch-result
+                                       :error (:error result)}))]
+                    (<! (continue! (:state transition)
+                                   (concat (:effects transition) remaining))))
+
+                  :ack-snapshot-batch
+                  (do
+                    (>? S out (proto/handshake-ack-msg topic index))
+                    (<! (continue! state remaining)))
+
+                  :apply-captured-live
+                  (let [result (<! (apply-values!
+                                    S
+                                    #(handle-publish! S peer out % on-publish
+                                                      authorize-publish-fn)
+                                    values))
+                        transition (lifecycle/transition
+                                    state
+                                    (if (:ok result)
+                                      {:type :snapshot/drain-result :ok true}
+                                      {:type :snapshot/drain-result
+                                       :error (:error result)}))]
+                    (<! (continue! (:state transition)
+                                   (concat (:effects transition) remaining))))
+
+                  :apply-live
+                  (let [result (<! (handle-publish! S peer out value on-publish
+                                                    authorize-publish-fn))
+                        transition (lifecycle/transition
+                                    state
+                                    (if (explicit-success? result)
+                                      {:type :live/result :ok true}
+                                      {:type :live/result
+                                       :error (or (:error result)
+                                                  (ex-info "Publish did not report success"
+                                                           {:topic topic
+                                                            :result result}))}))]
+                    (<! (continue! (:state transition)
+                                   (concat (:effects transition) remaining))))
+
+                  :settle-ready
+                  (if-not (true? (:ok effect))
+                    ;; Error settlement only resolves the lifecycle's internal
+                    ;; ready promise. It must never publish user-visible ready.
+                    (<! (continue! state remaining))
+                    (if-not (and (some? generation)
+                                 (= generation (:generation (subscription peer topic)))
+                                 (not (:cancelling? (subscription peer topic))))
+                      (<! (continue! state remaining))
+                      (let [on-complete
+                            (or (get-in (get-pubsub-state peer)
+                                        [:subscriptions topic
+                                         :on-handshake-complete])
+                                (get opts :on-handshake-complete))
+                            ;; The callback is part of readiness: if it throws,
+                            ;; the session failed and must not be marked ready.
+                            callback-result (invoke-ready-callback on-complete
+                                                                   topic)]
+                        (if (:ok callback-result)
+                          (if (mark-handshake-complete! peer topic generation)
+                            (do
+                              (log/info :pubsub/handshake-complete-received
+                                        {:topic topic})
+                              (<! (continue! state remaining)))
+                            ;; Cancellation won after the callback. Do not
+                            ;; resurrect state or publish readiness.
+                            (<! (continue! state remaining)))
+                          (let [transition (lifecycle/transition
+                                            state
+                                            {:type :abort
+                                             :code :ready-callback-failed
+                                             :error (:error callback-result)})]
+                            (<! (continue!
+                                 (:state transition)
+                                 (concat (:effects transition) remaining))))))))
+
+                  :fail
+                  (do
+                    (log/warn :pubsub/subscription-lifecycle-failed failure)
+                    ;; Version zero cannot isolate or correlate a failed topic
+                    ;; session. Retire the connection so stale frames cannot
+                    ;; contaminate a later subscription.
+                    (retire-connection! {:reason :lifecycle-failed
+                                         :topic topic
+                                         :failure failure})
+                    (<! (continue! state remaining)))
+
+                  (:settle-closed :closed)
+                  (<! (continue! state remaining))
+
+                  (throw (ex-info "Unknown pub/sub lifecycle effect"
+                                  {:effect effect :topic topic}))))
+              state))))
+
+(defn- start-lifecycle-lane!
+  [S peer out opts on-publish authorize-publish-fn topic first-msg
+   retire-connection!]
+  (let [lane (chan (get opts :lifecycle-lane-size 256))
+        generation (:generation (subscription peer topic))
+        limits (select-keys opts [:max-batch-items
+                                  :max-batch-bytes
+                                  :max-pending-publishes
+                                  :max-pending-bytes])
+        initial (if-let [sub (subscription peer topic)]
+                  (if (:handshake-complete? sub)
+                    (lifecycle/initial-live-state topic limits)
+                    (lifecycle/initial-state topic limits))
+                  ;; A publish to an owner or unknown topic has no client-side
+                  ;; snapshot to wait for. Authorization/strategy lookup still
+                  ;; happens in handle-publish!. Handshake frames without a
+                  ;; subscription remain joining and fail validation.
+                  (if (= :pubsub/publish (:type first-msg))
+                    (lifecycle/initial-live-state topic limits)
+                    (lifecycle/initial-state topic limits)))]
+    (go-loop-super S [state initial
+                      msg (<? S lane)]
+                   (if msg
+                     (let [transition (lifecycle/transition state (lifecycle-event msg))
+                           next-state (<? S (run-lifecycle-effects!
+                                             S peer out opts on-publish
+                                             authorize-publish-fn topic
+                                             generation
+                                             retire-connection!
+                                             (:state transition)
+                                             (:effects transition)))]
+                       (if (= :pubsub/unsubscribe-drain (:type msg))
+                         (do
+                           (complete-unsubscribe-topic!
+                            peer (:id msg) topic generation)
+                           (close! lane))
+                         (if (lifecycle/terminal? next-state)
+                           (close! lane)
+                           (recur next-state (<? S lane)))))
+                     (let [transition (lifecycle/transition state {:type :close})]
+                       (<? S (run-lifecycle-effects!
+                              S peer out opts on-publish authorize-publish-fn
+                              topic generation retire-connection!
+                              (:state transition)
+                              (:effects transition))))))
+    lane))
 
 (defn pubsub-middleware
   "Kabel middleware that handles pubsub protocol messages.
@@ -696,140 +1181,178 @@
                                                           :authorize-fn]
                                             :legacy-adapter authz/pubsub-legacy})
           on-publish (get opts :on-publish)
-          pass-in (chan)
+          pass-in (chan (get opts :pass-through-buffer-size 100))
           pass-out (chan)
-          p (pub in msg-type-dispatch)
 
           ;; Per-connection state
           pending-acks (atom {})  ;; {topic -> {batch-idx -> chan}}
-          handshake-items (atom {})  ;; {topic -> [items...]} for client
+          pending-unsubscribes (atom {})
+          active-server-sessions (atom #{})
+          lifecycle-lanes (atom {}) ;; {topic -> {:generation _ :channel _}}
+          retired? (atom false)
+          retired-topics (atom #{})
 
-          ;; Subscribe to pubsub message types
-          ;; Use buffers to prevent race conditions between related messages
+          ;; Control work may park without stopping the input router. Overflow
+          ;; retires the connection; silently dropping protocol control would
+          ;; be indistinguishable from a successful but incomplete session.
           subscribe-ch (chan 10)
-          subscribe-ack-ch (chan 10)
           unsubscribe-ch (chan 10)
-          handshake-data-ch (chan 100)  ;; Larger buffer for handshake data
-          batch-complete-ch (chan 10)
-          handshake-ack-ch (chan 10)
-          handshake-complete-ch (chan 10)
-          publish-ch (chan 100)  ;; Larger buffer for publishes
-          unrelated-ch (chan 100)]
+          lifecycle-types #{:pubsub/handshake-data
+                            :pubsub/handshake-batch-complete
+                            :pubsub/handshake-complete
+                            :pubsub/publish}]
 
       ;; Store output channel in peer state for client-side operations
-      (update-pubsub-state! peer assoc :out out)
+      (update-pubsub-state! peer assoc
+                            :out out
+                            :unsubscribe-state {:out out
+                                                :pending pending-unsubscribes})
 
-      ;; Subscribe to message types
-      (sub p :pubsub/subscribe subscribe-ch)
-      (sub p :pubsub/subscribe-ack subscribe-ack-ch)
-      (sub p :pubsub/unsubscribe unsubscribe-ch)
-      (sub p :pubsub/handshake-data handshake-data-ch)
-      (sub p :pubsub/handshake-batch-complete batch-complete-ch)
-      (sub p :pubsub/handshake-ack handshake-ack-ch)
-      (sub p :pubsub/handshake-complete handshake-complete-ch)
-      (sub p :pubsub/publish publish-ch)
-      (sub p :unrelated unrelated-ch)
+      (letfn [(retire-connection! [reason]
+                (when (compare-and-set! retired? false true)
+                  (log/warn :pubsub/retiring-v0-connection reason)
+                  (doseq [[_ batches] @pending-acks
+                          [_ ack-ch] batches]
+                    (async/offer! ack-ch :closed)
+                    (close! ack-ch))
+                  (reset! pending-acks {})
+                  (doseq [[_ {:keys [channel]}] @pending-unsubscribes]
+                    (async/offer! channel
+                                  {:error (ex-info "Connection closed before unsubscribe drain"
+                                                   reason)})
+                    (close! channel))
+                  (reset! pending-unsubscribes {})
+                  (reset! active-server-sessions #{})
+                  (doseq [[_ {:keys [channel]}] @lifecycle-lanes]
+                    (close! channel))
+                  (doseq [topic (keys (:topics (get-pubsub-state peer)))]
+                    (remove-subscriber! peer topic out))
+                  (doseq [[topic sub-state] (subscriptions peer)]
+                    (when (= out (:out sub-state))
+                      (remove-subscription! peer topic)))
+                  (close! subscribe-ch)
+                  (close! unsubscribe-ch)
+                  (close! pass-in)
+                  (close! out)))
 
-      ;; Handle subscribe requests (server-side)
-      (go-loop-super S [msg (<? S subscribe-ch)]
-                     (when msg
-                       (handle-subscription! S peer out msg pending-acks authorize-fn)
-                       (recur (<? S subscribe-ch))))
+              (offer-or-retire! [ch value kind]
+                (when-not (async/offer! ch value)
+                  (retire-connection! {:reason :router-overflow :kind kind})))
 
-      ;; Handle subscribe-ack (client-side)
-      (go-loop-super S [msg (<? S subscribe-ack-ch)]
-                     (when msg
-                       (log/debug :pubsub/subscribe-ack-received {:topics (:topics msg) :id (:id msg)})
-                       (recur (<? S subscribe-ack-ch))))
+              (route-lifecycle! [msg]
+                (let [topic (:topic msg)
+                      generation (:generation (subscription peer topic))
+                      existing (get @lifecycle-lanes topic)
+                      lane (if (and existing
+                                    (= generation (:generation existing)))
+                             (:channel existing)
+                             (let [lane (start-lifecycle-lane!
+                                         S peer out opts on-publish
+                                         authorize-publish-fn topic msg
+                                         retire-connection!)]
+                               (when-let [old (:channel existing)]
+                                 (close! old))
+                               (swap! lifecycle-lanes assoc topic
+                                      {:generation generation :channel lane})
+                               lane))]
+                  (offer-or-retire! lane msg :lifecycle)))]
 
-      ;; Handle unsubscribe (server-side)
-      (go-loop-super S [msg (<? S unsubscribe-ch)]
-                     (when msg
-                       (handle-unsubscription! S peer out msg)
-                       (recur (<? S unsubscribe-ch))))
-
-      ;; Handle handshake data and batch-complete (client-side)
-      ;; Process batch-complete messages, waiting for all data items to arrive
-      (let [pending-batches (atom {})] ;; {topic -> {:batch-idx N :expected-count M}}
-        ;; Process data items - accumulate for current batch
-        (go-loop-super S [msg (<? S handshake-data-ch)]
+        ;; Subscribe requests are deliberately serialized for this connection.
+        ;; The input router below remains free to deliver ACKs while a snapshot
+        ;; sender waits, but a second subscribe cannot race the first topic
+        ;; reservation.
+        (go-loop-super S [msg (<? S subscribe-ch)]
                        (when msg
-                         (let [{:keys [topic data]} msg]
-                           (log/debug :pubsub/handshake-data-received {:topic topic})
-                           (swap! handshake-items update topic (fnil conj []) data))
-                         (recur (<? S handshake-data-ch))))
+                         (let [result (<! (handle-subscription!
+                                           S peer out msg pending-acks authorize-fn
+                                           retired-topics active-server-sessions))]
+                           (when (or (caught-error? result) (:error result))
+                             (retire-connection!
+                              {:reason :subscribe-failed
+                               :error (if (caught-error? result)
+                                        result
+                                        (:error result))})))
+                         (recur (<? S subscribe-ch))))
 
-        ;; Process batch-complete - wait for all items, then apply
-        (go-loop-super S [msg (<? S batch-complete-ch)]
+        (go-loop-super S [msg (<? S unsubscribe-ch)]
                        (when msg
-                         (let [{:keys [topic batch-idx item-count]} msg]
-              ;; Wait until we have all items for this batch
-                           (loop [wait-count 0]
-                             (let [current-items (get @handshake-items topic [])]
-                               (when (and (< (count current-items) item-count)
-                                          (< wait-count 100)) ;; max 100 * 10ms = 1s wait
-                                 (<? S (timeout 10))
-                                 (recur (inc wait-count)))))
-                           (let [items (get @handshake-items topic [])
-                                 sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
-                                 strategy (:strategy sub-state)]
-                             (log/debug :pubsub/batch-complete-received {:topic topic :batch-idx batch-idx :item-count (count items)})
-                ;; Apply all items
-                             (when strategy
-                               (doseq [item items]
-                                 (<? S (proto/-apply-handshake-item strategy item))))
-                ;; Clear accumulated items
-                             (swap! handshake-items assoc topic [])
-                ;; Send ack
-                             (>? S out (proto/handshake-ack-msg topic batch-idx))))
-                         (recur (<? S batch-complete-ch)))))
+                         (let [result (<! (handle-unsubscription!
+                                           S peer out msg retired-topics
+                                           active-server-sessions))]
+                           (when (or (caught-error? result) (:error result))
+                             (retire-connection!
+                              {:reason :unsubscribe-failed
+                               :error (if (caught-error? result)
+                                        result
+                                        (:error result))})))
+                         (when-not @retired?
+                           (recur (<? S unsubscribe-ch)))))
 
-      ;; Handle handshake-ack (server-side)
-      (go-loop-super S [msg (<? S handshake-ack-ch)]
-                     (when msg
-                       (let [{:keys [topic batch-idx]} msg]
-                         (log/debug :pubsub/handshake-ack-received {:topic topic :batch-idx batch-idx})
-            ;; Signal waiting send-handshake!
-                         (when-let [ack-ch (get-in @pending-acks [topic batch-idx])]
-                           (put! ack-ch :ack)
-                           (close! ack-ch)))
-                       (recur (<? S handshake-ack-ch))))
+        ;; Lightweight FIFO router. It never parks on application work and it
+        ;; never silently drops: every bounded destination is an immediate
+        ;; offer whose failure retires this uncorrelatable v0 connection.
+        (go-loop-super S [msg (<? S in)]
+                       (if-not msg
+                         (retire-connection! {:reason :input-closed})
+                         (do
+                           (case (:type msg)
+                             :pubsub/subscribe
+                             (let [topics (:topics msg)]
+                               ;; Reserve at the FIFO observation point, before
+                               ;; the independent control runner can be
+                               ;; overtaken by a following unsubscribe.
+                               (if-let [topic (first (filter @active-server-sessions
+                                                             topics))]
+                                 (retire-connection!
+                                  {:reason :duplicate-active-subscribe
+                                   :topic topic})
+                                 (do
+                                   (swap! active-server-sessions into topics)
+                                   (offer-or-retire! subscribe-ch msg :subscribe))))
 
-      ;; Handle handshake-complete (client-side)
-      (go-loop-super S [msg (<? S handshake-complete-ch)]
-                     (when msg
-                       (let [{:keys [topic]} msg
-                             ;; Prefer the PER-SUBSCRIPTION callback registered by `subscribe!`,
-                             ;; falling back to a peer-wide one from the middleware opts. Only the
-                             ;; middleware-level opt used to be read, so an :on-handshake-complete
-                             ;; passed to `subscribe!` — which its docstring advertises — was
-                             ;; destructured and silently dropped, and never fired.
-                             on-complete (or (get-in (get-pubsub-state peer)
-                                                     [:subscriptions topic :on-handshake-complete])
-                                             (get opts :on-handshake-complete))]
-                         (log/info :pubsub/handshake-complete-received {:topic topic})
-                         (mark-handshake-complete! peer topic)
-                         (when on-complete
-                           (on-complete topic)))
-                       (recur (<? S handshake-complete-ch))))
+                             :pubsub/subscribe-ack
+                             (log/debug :pubsub/subscribe-ack-received
+                                        {:topics (:topics msg) :id (:id msg)})
 
-      ;; Handle publish (both sides)
-      (go-loop-super S [msg (<? S publish-ch)]
-                     (when msg
-                       (<? S (handle-publish! S peer out msg on-publish authorize-publish-fn))
-                       (recur (<? S publish-ch))))
+                             :pubsub/unsubscribe
+                             (offer-or-retire! unsubscribe-ch msg :unsubscribe)
 
-      ;; Pass through unrelated messages
-      (go-loop-super S [msg (<? S unrelated-ch)]
-                     (when msg
-                       (>? S pass-in msg)
-                       (recur (<? S unrelated-ch))))
+                             :pubsub/unsubscribe-ack
+                             (doseq [topic (:topics msg)]
+                               (route-lifecycle!
+                                {:type :pubsub/unsubscribe-drain
+                                 :topic topic
+                                 :id (:id msg)}))
+
+                             :pubsub/handshake-ack
+                             (let [{:keys [topic batch-idx]} msg]
+                               (log/debug :pubsub/handshake-ack-received
+                                          {:topic topic :batch-idx batch-idx})
+                               (when-let [ack-ch (get-in @pending-acks
+                                                         [topic batch-idx])]
+                                 (async/offer! ack-ch :ack)
+                                 (close! ack-ch)))
+
+                             :pubsub/error
+                             (retire-connection! {:reason :remote-error
+                                                  :topic (:topic msg)
+                                                  :error (:error msg)
+                                                  :message (:message msg)})
+
+                             (if (contains? lifecycle-types (:type msg))
+                               (route-lifecycle! msg)
+                               (offer-or-retire! pass-in msg :pass-through)))
+                           (when-not @retired?
+                             (recur (<? S in)))))))
 
       ;; Pass through outgoing messages
       (go-loop-super S [msg (<? S pass-out)]
                      (when msg
-                       (>? S out msg)
-                       (recur (<? S pass-out))))
+                       (if @retired?
+                         (close! pass-out)
+                         (do
+                           (>? S out msg)
+                           (recur (<? S pass-out))))))
 
       [S peer [pass-in pass-out]])))
 

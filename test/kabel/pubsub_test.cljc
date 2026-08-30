@@ -6,7 +6,8 @@
             #?(:clj [superv.async :refer [S go-try <? <??]]
                :cljs [superv.async :refer [S go-try <?]])
             #?(:clj [clojure.core.async :as async :refer [go <! >! chan put! close! timeout alts!]]
-               :cljs [clojure.core.async :as async :refer [chan put! close! timeout go <! >! alts!]])))
+               :cljs [clojure.core.async :as async :refer [chan put! close! timeout go <! >! alts!]])
+            #?(:clj [clojure.core.async.impl.protocols :as async-proto])))
 
 ;; =============================================================================
 ;; Test Helpers
@@ -191,6 +192,240 @@
     ;; For now, verify middleware can be created
     (let [middleware-fn (pubsub/make-pubsub-peer-middleware {})]
       (is (fn? middleware-fn)))))
+
+#?(:clj
+   (deftest duplicate-local-subscription-is-rejected-before-send-test
+     (let [peer (make-test-peer)
+           out (chan 10)
+           strategy (proto/pub-sub-only-strategy nil)]
+       (swap! peer assoc :pubsub
+              {:out out
+               :topics {}
+               :subscriptions {:t {:strategy strategy
+                                   :generation (random-uuid)
+                                   :handshake-complete? false}}})
+       (let [result (<?? S (pubsub/direct-subscribe!
+                            peer #{:t} {:strategies {:t strategy}}))]
+         (is (some? (:error result)))
+         (is (nil? (async/poll! out)) "no duplicate request reaches the wire")))))
+
+#?(:clj
+   (deftest concurrent-local-subscription-reservation-test
+     (let [peer (make-test-peer)
+           out (chan 10)
+           strategy (proto/pub-sub-only-strategy nil)]
+       (swap! peer assoc :pubsub {:out out :topics {} :subscriptions {}})
+       (let [start (promise)
+             call (fn []
+                    @start
+                    (<?? S (pubsub/direct-subscribe!
+                            peer #{:t} {:strategies {:t strategy}})))
+             a (future (call))
+             b (future (call))]
+         (deliver start true)
+         (let [results [@a @b]
+               wire-msgs (remove nil? [(async/poll! out) (async/poll! out)])]
+           (is (= 1 (count (filter :error results))))
+           (is (= 1 (count (filter :ok results))))
+           (is (= 1 (count (filter #(= :pubsub/subscribe (:type %)) wire-msgs)))
+               "one atomic reservation produces exactly one v0 request"))))))
+
+#?(:clj
+   (deftest explicit-strategy-success-is-required-test
+     (let [explicit-success? @#'pubsub/explicit-success?]
+       (is (true? (explicit-success? {:ok true})))
+       (doseq [result [{:ok false} {:ok nil} {} nil
+                       {:ok true :error (ex-info "both" {})}]]
+         (is (false? (explicit-success? result)) (pr-str result))))
+
+     (let [handle-publish! @#'pubsub/handle-publish!
+           peer (make-test-peer)
+           sender (chan 10)
+           other (chan 10)
+           callbacks (atom 0)
+           strategy (reify proto/PSyncStrategy
+                      (-apply-publish [_ _]
+                        (doto (chan 1) (put! {:ok false}) close!)))]
+       (pubsub/register-topic! peer :t {:strategy strategy})
+       (@#'pubsub/add-subscriber! peer :t other)
+       (let [result (<?? S (handle-publish!
+                            S peer sender (proto/publish-msg :t {:v 1})
+                            (fn [_ _] (swap! callbacks inc)) (constantly true)))]
+         (is (some? (:error result)))
+         (is (zero? @callbacks))
+         (is (nil? (async/poll! other))
+             "failed apply is neither observed nor forwarded")))))
+
+#?(:clj
+   (deftest throwing-ready-callback-never-establishes-readiness-test
+     (let [peer (make-test-peer)
+           [in out] (make-channel-pair)
+           generation (random-uuid)
+           attempts (atom 0)
+           publishes (atom 0)
+           strategy (reify proto/PSyncStrategy
+                      (-apply-publish [_ _]
+                        (swap! publishes inc)
+                        (doto (chan 1) (put! {:ok true}) close!)))]
+       (swap! peer assoc :pubsub
+              {:topics {}
+               :subscriptions
+               {:t {:strategy strategy
+                    :generation generation
+                    :handshake-complete? false
+                    :on-handshake-complete
+                    (fn [_]
+                      (swap! attempts inc)
+                      (throw (ex-info "ready observer failed" {})))}}})
+       ((pubsub/make-pubsub-peer-middleware {}) [S peer [in out]])
+       (put! in (proto/handshake-complete-msg :t))
+       (loop [remaining 50]
+         (when (and (zero? @attempts) (pos? remaining))
+           (Thread/sleep 10)
+           (recur (dec remaining))))
+       (is (= 1 @attempts))
+       (is (not (true? (get-in @peer
+                               [:pubsub :subscriptions :t
+                                :handshake-complete?]))))
+       (loop [remaining 50]
+         (when (and (not (async-proto/closed? out)) (pos? remaining))
+           (Thread/sleep 10)
+           (recur (dec remaining))))
+       (is (false? (async/offer! out :probe)) "v0 connection is retired")
+       (put! in (proto/publish-msg :t {:late true}))
+       (Thread/sleep 50)
+       (is (zero? @publishes))
+       (is (= 1 @attempts) "later traffic cannot revive readiness"))))
+
+#?(:clj
+   (deftest unsubscribe-before-empty-snapshot-completion-cannot-resurrect-test
+     (let [peer (make-test-peer)
+           [in out] (make-channel-pair)
+           callbacks (atom 0)
+           strategy (proto/pub-sub-only-strategy nil)]
+       (swap! peer assoc :pubsub
+              {:topics {}
+               :subscriptions
+               {:t {:strategy strategy
+                    :generation (random-uuid)
+                    :handshake-complete? false
+                    :on-handshake-complete (fn [_] (swap! callbacks inc))}}})
+       ((pubsub/make-pubsub-peer-middleware {}) [S peer [in out]])
+       (let [result-ch (pubsub/unsubscribe! peer #{:t})
+             request (async/poll! out)]
+         ;; This is the dangerous stale v0 frame. It precedes the server's
+         ;; drain marker, but local cancellation must suppress readiness.
+         (put! in (proto/handshake-complete-msg :t))
+         (put! in (proto/unsubscribe-ack-msg (:id request) #{:t}))
+         (is (:ok (<?? S result-ch)))
+         (is (nil? (pubsub/subscription peer :t)))
+         (is (zero? @callbacks))
+         (is (true? (async/offer! out :probe))
+             "an acknowledged drain keeps unrelated topics usable")))))
+
+#?(:clj
+   (deftest shared-strategy-is-serialized-across-connections-test
+     (let [peer (make-test-peer)
+           [in-a out-a] (make-channel-pair)
+           [in-b out-b] (make-channel-pair)
+           entered (chan 10)
+           release (chan 10)
+           in-flight (atom 0)
+           max-in-flight (atom 0)
+           applied (atom [])
+           strategy
+           (reify proto/PSyncStrategy
+             (-apply-publish [_ payload]
+               (go
+                 (let [active (swap! in-flight inc)]
+                   (swap! max-in-flight max active)
+                   (swap! applied conj payload)
+                   (>! entered payload)
+                   (<! release)
+                   (swap! in-flight dec)
+                   {:ok true}))))]
+       (pubsub/register-topic! peer :t {:strategy strategy})
+       ((pubsub/make-pubsub-peer-middleware {}) [S peer [in-a out-a]])
+       ((pubsub/make-pubsub-peer-middleware {}) [S peer [in-b out-b]])
+       (put! in-a (proto/publish-msg :t :a))
+       (put! in-b (proto/publish-msg :t :b))
+       (let [[first-value first-port] (async/alts!! [entered (timeout 500)])]
+         (is (= entered first-port))
+         (is (contains? #{:a :b} first-value)))
+       (let [[_ second-port] (async/alts!! [entered (timeout 100)])]
+         (is (not= entered second-port)
+             "the second connection cannot enter the shared strategy yet"))
+       (put! release true)
+       (let [[second-value second-port] (async/alts!! [entered (timeout 500)])]
+         (is (= entered second-port))
+         (is (contains? #{:a :b} second-value)))
+       (put! release true)
+       (Thread/sleep 50)
+       (is (= 1 @max-in-flight))
+       (is (= #{:a :b} (set @applied)))
+       (close! in-a)
+       (close! in-b))))
+
+#?(:clj
+   (deftest unsubscribe-ack-is-after-in-flight-publish-test
+     (let [handle-publish! @#'pubsub/handle-publish!
+           handle-unsubscription! @#'pubsub/handle-unsubscription!
+           peer (make-test-peer)
+           sender (chan 10)
+           client-out (chan 10)
+           entered (chan 1)
+           release (chan 1)
+           strategy (reify proto/PSyncStrategy
+                      (-apply-publish [_ _]
+                        (go
+                          (>! entered true)
+                          (<! release)
+                          {:ok true})))]
+       (pubsub/register-topic! peer :t {:strategy strategy})
+       (@#'pubsub/add-subscriber! peer :t client-out)
+       (let [publish-result (handle-publish!
+                             S peer sender (proto/publish-msg :t :v)
+                             nil (constantly true))]
+         (is (= true (<?? S entered)))
+         (let [unsubscribe-result
+               (handle-unsubscription!
+                S peer client-out (proto/unsubscribe-msg :u #{:t})
+                (atom #{}) (atom #{}))]
+           (Thread/sleep 50)
+           (is (nil? (async/poll! client-out))
+               "the drain ACK waits behind the in-flight publish")
+           (put! release true)
+           (is (:ok (<?? S publish-result)))
+           (is (:ok (<?? S unsubscribe-result)))
+           (is (= [:pubsub/publish :pubsub/unsubscribe-ack]
+                  (mapv :type [(async/poll! client-out)
+                               (async/poll! client-out)]))))))))
+
+#?(:clj
+   (deftest immediate-unsubscribe-cannot-overtake-subscribe-reservation-test
+     (let [peer (make-test-peer)
+           [in out] (make-channel-pair)
+           never-finished (chan)
+           strategy (reify proto/PSyncStrategy
+                      (-handshake-items [_ _] never-finished))]
+       (pubsub/register-topic! peer :t
+                               {:strategy strategy
+                                :item-timeout-ms 5
+                                :handshake-timeout-ms 50})
+       ((pubsub/make-pubsub-peer-middleware {}) [S peer [in out]])
+       (put! in (proto/subscribe-msg :s #{:t} {}))
+       (put! in (proto/unsubscribe-msg :u #{:t}))
+       (loop [remaining 100]
+         (when (and (not (async-proto/closed? out)) (pos? remaining))
+           (Thread/sleep 10)
+           (recur (dec remaining))))
+       (let [messages (loop [messages []]
+                        (if-let [message (async/poll! out)]
+                          (recur (conj messages message))
+                          messages))]
+         (is (async-proto/closed? out))
+         (is (not-any? #(= :pubsub/unsubscribe-ack (:type %)) messages)
+             "an active v0 snapshot cannot be acknowledged as drained")))))
 
 ;; =============================================================================
 ;; Subscribe authorization gate (:authorize-fn)

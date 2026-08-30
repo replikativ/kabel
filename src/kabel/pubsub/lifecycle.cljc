@@ -27,6 +27,16 @@
     :closed-status :pending
     :limits (merge default-limits limits)}))
 
+(defn initial-live-state
+  "Create a lane that has no initial snapshot, such as a registered topic on
+  the owner/server side."
+  ([topic]
+   (initial-live-state topic {}))
+  ([topic limits]
+   (assoc (initial-state topic limits)
+          :phase :live
+          :ready-status :succeeded)))
+
 (defn terminal?
   [state]
   (contains? #{:failed :closed} (:phase state)))

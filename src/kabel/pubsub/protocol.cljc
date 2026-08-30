@@ -34,9 +34,14 @@
      Parameters:
      - client-state: The state client sent in subscribe message
 
-     Returns: core.async channel that yields handshake items.
-              Close channel when done. Items can be any EDN value.
-              Core pubsub handles batching and flow control.")
+     Returns, for legacy strategies: a core.async channel that yields handshake
+              items and closes when done.
+
+              Checked strategies return `(checked-handshake-source items
+              completion)`. `completion` yields `{:ok true}` or `{:error e}`;
+              closing the item stream alone cannot report successful snapshot
+              production. Items can be any EDN value. Core pubsub handles
+              batching and flow control.")
 
   (-apply-handshake-item [this item]
     "Client-side: Apply a received handshake item.
@@ -52,8 +57,18 @@
      Parameters:
      - payload: The payload from :pubsub/publish message
 
-     Returns: core.async channel yielding {:ok <result>} or {:error <ex>}
-              Result can include strategy-specific data."))
+     Returns: core.async channel yielding {:ok true} or {:error <ex>}.
+              Strategy-specific data may use additional map keys; only the
+              literal value `true` at `:ok` commits the operation."))
+
+(defn checked-handshake-source
+  "Pair a snapshot item stream with its independent terminal result.
+
+  `completion` MUST yield exactly one `{:ok true}` or `{:error e}`. Kabel sends
+  `handshake-complete` only after the item stream closes, completion succeeds,
+  and every transmitted batch has been acknowledged."
+  [items completion]
+  {:items items :completion completion})
 
 ;; =============================================================================
 ;; Message Helpers
@@ -76,8 +91,21 @@
 
 (defn unsubscribe-msg
   "Create an unsubscribe message."
-  [topics]
-  {:type :pubsub/unsubscribe
+  ([topics]
+   {:type :pubsub/unsubscribe
+    :topics topics})
+  ([id topics]
+   {:type :pubsub/unsubscribe
+    :id id
+    :topics topics}))
+
+(defn unsubscribe-ack-msg
+  "Confirm that every earlier server-to-client frame for `topics` is on the
+  wire before this marker. The client completes cancellation only after this
+  marker drains through each local topic lane."
+  [id topics]
+  {:type :pubsub/unsubscribe-ack
+   :id id
    :topics topics})
 
 (defn handshake-data-msg

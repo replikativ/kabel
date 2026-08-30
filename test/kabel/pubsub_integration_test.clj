@@ -6,7 +6,7 @@
             [kabel.peer :as peer]
             [kabel.http-kit :as http-kit]
             [superv.async :refer [<?? S]]
-            [clojure.core.async :refer [<!! >! go chan put! close! timeout]]))
+            [clojure.core.async :refer [<!! <! >! go chan put! close! timeout]]))
 
 ;; =============================================================================
 ;; Test Infrastructure
@@ -16,7 +16,7 @@
 (def ^:dynamic *client-peer* nil)
 (def ^:dynamic *server-url* nil)
 
-(def ^:private port-counter (atom 47300))
+(def ^:private port-counter (atom 49300))
 
 (defn unique-port
   "Ports from a monotone counter, not `rand-int`.
@@ -26,8 +26,9 @@
   test landing on that port inherits a stranger's connection attempts. A
   counter removes the race rather than making it rarer.
 
-  Uses a disjoint range from `kabel.overlay.integration-test` (48300+) so the
-  two suites cannot collide with each other either."
+  Uses a disjoint range from `kabel.overlay.integration-test` (48300+) and the
+  auth integration fixtures (47310-47314), so a full-suite run cannot collide
+  with a server another namespace is still tearing down."
   []
   (swap! port-counter inc))
 
@@ -185,6 +186,61 @@
 
         (is (= [:hs-topic] @completed)
             "subscribe!'s :on-handshake-complete fires once with the topic")))))
+
+(deftest publish-during-snapshot-is-applied-after-snapshot-test
+  (testing "capture begins before snapshot and live waits behind its commit"
+    (with-peers
+      (let [snapshot-started (chan 1)
+            ready (chan 1)
+            client-value (atom nil)
+            applied (atom [])
+            ok (fn [] (doto (chan 1) (put! {:ok true}) close!))
+            server-strategy
+            (reify proto/PSyncStrategy
+              (-init-client-state [_] (doto (chan 1) close!))
+              (-handshake-items [_ _]
+                (let [items (chan 1)
+                      completion (chan 1)]
+                  ;; Signal after the snapshot value is captured but before it
+                  ;; is transferred. The test publishes in this interval.
+                  (put! snapshot-started true)
+                  (go
+                    (>! items {:key :head :value 0})
+                    (<! (timeout 200))
+                    (close! items)
+                    (>! completion {:ok true})
+                    (close! completion))
+                  (proto/checked-handshake-source items completion)))
+              (-apply-handshake-item [_ _] (ok))
+              (-apply-publish [_ _] (ok)))
+            client-strategy
+            (reify proto/PSyncStrategy
+              (-init-client-state [_] (doto (chan 1) close!))
+              (-handshake-items [_ _] (doto (chan 1) close!))
+              (-apply-handshake-item [_ {:keys [value]}]
+                (let [result (chan 1)]
+                  (go
+                    ;; Make overtaking easy to reproduce if lifecycle frames
+                    ;; ever return to independent consumers.
+                    (<! (timeout 150))
+                    (reset! client-value value)
+                    (swap! applied conj [:snapshot value])
+                    (>! result {:ok true})
+                    (close! result))
+                  result))
+              (-apply-publish [_ {:keys [value]}]
+                (reset! client-value value)
+                (swap! applied conj [:live value])
+                (ok)))]
+        (pubsub/register-topic! *server-peer* :cut {:strategy server-strategy})
+        (<?? S (pubsub/subscribe! *client-peer* #{:cut}
+                                  {:strategies {:cut client-strategy}
+                                   :on-handshake-complete #(put! ready %)}))
+        (<?? S snapshot-started)
+        (<?? S (pubsub/publish! *server-peer* :cut {:key :head :value 1}))
+        (is (= :cut (<?? S ready)))
+        (is (= [[:snapshot 0] [:live 1]] @applied))
+        (is (= 1 @client-value))))))
 
 (deftest multiple-topics-integration-test
   (testing "Subscribe to multiple topics with different data"

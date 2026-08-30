@@ -4,9 +4,29 @@
             [goog.net.WebSocket]
             [goog.Uri]
             [goog.events :as events]
+            [goog.crypt :as crypt]
             [clojure.core.async :as async :refer (take! put! close! chan buffer timeout go) :include-macros true]
             [superv.async :refer [-error]]
             [replikativ.logging :as log]))
+
+(def default-max-frame-bytes (* 5 1024 1024))
+(def default-out-buffer-items 16)
+
+(defn- encoded-bytes [value]
+  (cond
+    (string? value) (count (crypt/stringToUtf8ByteArray value))
+    (and (exists? js/Blob) (instance? js/Blob value)) (.-size value)
+    (some? (.-byteLength value)) (.-byteLength value)
+    :else (.-length value)))
+
+(defn- check-frame-size! [url direction value]
+  (let [size (encoded-bytes value)]
+    (when (> size default-max-frame-bytes)
+      (throw (ex-info "WebSocket application message exceeds Kabel's limit"
+                      {:type :kabel/frame-too-large :url url
+                       :direction direction :bytes size
+                       :max-bytes default-max-frame-bytes})))
+    value))
 
 (when (on-node?)
   (.log js/console "Patching global env for: W3C WebSocket API.")
@@ -26,7 +46,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                    (goog.net.WebSocket. false))
          in-buffer (buffer 1024) ;; standard size
          in (chan in-buffer)
-         out (chan)
+         out (chan (buffer default-out-buffer-items))
          opener (chan)
          host (.getDomain (goog.Uri. (.replace url "ws" "http")))]
      (log/info :connecting-to {:url url})
@@ -35,20 +55,30 @@ Only supports websocket at the moment, but is supposed to dispatch on
                       (fn [evt]
                         (let [v (.. evt -message)]
                           (try
-                            (when (> (count in-buffer) 1000)
-                              (.close channel)
-                              (throw (ex-info
-                                      (str "incoming buffer for " url
-                                           " too full:" (count in-buffer))
-                                      {:url url
-                                       :count (count in-buffer)})))
+                            (check-frame-size! url :in v)
                             (if (string? v)
-                              (put! in {:kabel/serialization :string
-                                        :kabel/payload v})
+                              (when-not
+                               (async/offer!
+                                in {:kabel/serialization :string
+                                    :kabel/payload v})
+                                (throw (ex-info "Incoming Kabel queue is full"
+                                                {:type :kabel/inbound-overloaded
+                                                 :url url})))
                               (from-binary v
-                                           #(put! in (if (map? %)
-                                                       (assoc % :kabel/host host)
-                                                       %))))
+                                           #(when-not
+                                             (async/offer!
+                                              in (if (map? %)
+                                                   (assoc % :kabel/host host)
+                                                   %))
+                                              (let [e
+                                                    (ex-info
+                                                     "Incoming Kabel queue is full"
+                                                     {:type :kabel/inbound-overloaded
+                                                      :url url})]
+                                                (log/error :cannot-read-message
+                                                           {:error e})
+                                                (put! (-error S) e)
+                                                (.close channel)))))
                             (catch js/Error e
                               (log/error :cannot-read-message {:error e})
                               (.close channel)
@@ -59,6 +89,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                         (let [e (ex-info "Connection closed!" {:event evt})]
                           (log/info :connection-closed {:url url})
                           (close! in)
+                          (close! out)
                           (put! (-error S) e)
                           (try (put! opener e) (catch js/Object e))
                           (.close channel)
@@ -69,6 +100,7 @@ Only supports websocket at the moment, but is supposed to dispatch on
                       (fn [evt]
                         (let [e (ex-info "Connection error!" {:event evt})]
                           (log/error :websocket-error {:url url})
+                          (close! out)
                           (put! (-error S) e) ;; TODO needs happen first for replikativ.connect
                           (try (put! opener e) (catch js/Object e))
                           (close! opener))))
@@ -85,16 +117,21 @@ Only supports websocket at the moment, but is supposed to dispatch on
                (fn [m]
                  (if m
                    (go
-                     (while (pos? (.getBufferedAmount channel))
+                     (while (and (.isOpen channel)
+                                 (pos? (.getBufferedAmount channel)))
                        (log/debug :output-blocked {:buffered-amount (.getBufferedAmount channel)})
                        (<! (timeout 100)))
                      (try
-                       (if (= (:kabel/serialization m) :string)
-                         (.send channel (:kabel/payload m))
-                         (.send channel (to-binary m)))
+                       (let [payload (if (= (:kabel/serialization m) :string)
+                                       (:kabel/payload m)
+                                       (to-binary m))]
+                         (check-frame-size! url :out payload)
+                         (.send channel payload))
                        (catch js/Error e
-                         (log/error :cannot-send-transit-message {:error e})
-                         (put! (-error S) e)))
+                         (log/error :cannot-send-message {:error e})
+                         (put! (-error S) e)
+                         (close! out)
+                         (.close channel)))
 
                      (sender))
                    (.close channel))))))

@@ -26,7 +26,8 @@
             ;; The real adapters, not copies of them: a parity test that
             ;; reimplements the thing it is testing proves nothing.
             [org.httpkit.server :as http-kit]
-            [kabel.http-kit :as kabel-http-kit]))
+            [kabel.http-kit :as kabel-http-kit]
+            [ring.websocket.protocols :as wsp]))
 
 (def ^:private jetty
   "`kabel.jetty`'s two public fns, or nil when the adapter is absent."
@@ -67,7 +68,9 @@
     (try
       (<?? S (peer/start speer))
       (<?? S (peer/connect S cpeer url))
-      (first (clojure.core.async/alts!! [got (timeout 8000)]))
+      {:reply (first (clojure.core.async/alts!! [got (timeout 8000)]))
+       :async? (satisfies? wsp/AsyncSocket
+                           (ffirst @(:channel-hub handler)))}
       (finally (<?? S (peer/stop speer))))))
 
 (deftest ring-ws-works-on-both-adapters
@@ -75,11 +78,13 @@
             implementations. Passing on http-kit and failing on Jetty would
             mean kabel.ring-ws is still coupled to http-kit."
     (testing "http-kit"
-      (is (= "ping" (roundtrip-over 47411 http-kit/run-server))))
+      (is (= {:reply "ping" :async? false}
+             (roundtrip-over 47411 http-kit/run-server))))
     (testing "Jetty 12"
       (if-not jetty
         (skip! "ring-ws-works-on-both-adapters/Jetty 12")
-        (is (= "ping" (roundtrip-over 47412 (:run-server jetty))))))))
+        (is (= {:reply "ping" :async? true}
+               (roundtrip-over 47412 (:run-server jetty))))))))
 
 (deftest create-handler-entry-points-agree
   (testing "the two namespaces a user actually calls, not just the run-server
@@ -88,10 +93,11 @@
             servers is a one-line change."
     (when-not jetty
       (skip! "create-handler-entry-points-agree/kabel.jetty"))
-    (doseq [[nm port create!] (cond-> [["kabel.http-kit" 47415
-                                        kabel-http-kit/create-http-kit-handler!]]
-                                jetty (conj ["kabel.jetty" 47416
-                                             (:create-handler! jetty)]))]
+    (doseq [[nm port create! async?]
+            (cond-> [["kabel.http-kit" 47415
+                      kabel-http-kit/create-http-kit-handler! false]]
+              jetty (conj ["kabel.jetty" 47416
+                           (:create-handler! jetty) true]))]
       (testing nm
         (let [sid (java.util.UUID/randomUUID)
               cid (java.util.UUID/randomUUID)
@@ -115,4 +121,8 @@
             (<?? S (peer/connect S cpeer url))
             (is (= "ping" (first (clojure.core.async/alts!! [got (timeout 8000)])))
                 (str nm " round-trips"))
+            (is (= async?
+                   (satisfies? wsp/AsyncSocket
+                               (ffirst @(:channel-hub handler))))
+                (str nm " completion capability is explicit"))
             (finally (<?? S (peer/stop speer)))))))))

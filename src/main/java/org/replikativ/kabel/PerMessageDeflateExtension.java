@@ -359,8 +359,13 @@ public class PerMessageDeflateExtension implements ExtendedExtension {
     /** Convenience for registration:
      *  {@code (.extensions builder [(PerMessageDeflateExtension/offer)])}. */
     public static List<Extension> offer() {
+        return offer(5 * 1024 * 1024);
+    }
+
+    /** Register the extension with an explicit post-inflation message bound. */
+    public static List<Extension> offer(int maxSize) {
         List<Extension> exts = new ArrayList<Extension>(1);
-        exts.add(new PerMessageDeflateExtension());
+        exts.add(new PerMessageDeflateExtension(maxSize));
         return exts;
     }
 }

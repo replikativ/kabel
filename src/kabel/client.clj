@@ -14,7 +14,8 @@
            [org.replikativ.kabel MessageHandlerString MessageHandlerBinary
             PerMessageDeflateExtension]
            [org.glassfish.tyrus.client ClientManager]
-           [java.nio ByteBuffer]))
+           [java.nio ByteBuffer]
+           [java.nio.charset StandardCharsets]))
 
 ;; Example taken from https://tyrus.java.net/documentation/1.13.1/index/getting-started.html
 
@@ -35,6 +36,29 @@
   memory matters more than bandwidth -- context takeover keeps a deflate and an
   inflate window alive for the life of each connection."
   true)
+
+(def default-max-frame-bytes
+  "Default WebSocket application-message ceiling, before compression and after
+  decompression. The four-byte Kabel binary codec prefix is included."
+  (* 5 1024 1024))
+
+(def default-out-buffer-items
+  "Encoded messages retained by the raw client transport in addition to its
+  single completion-awaited socket write."
+  16)
+
+(def ^:dynamic *max-frame-bytes* default-max-frame-bytes)
+(def ^:dynamic *out-buffer-items* default-out-buffer-items)
+
+(defn- text-bytes [^String value]
+  (alength (.getBytes value StandardCharsets/UTF_8)))
+
+(defn- check-frame-size! [url direction size max-frame-bytes]
+  (when (> size max-frame-bytes)
+    (throw (ex-info "WebSocket application message exceeds Kabel's limit"
+                    {:type :kabel/frame-too-large
+                     :url url :direction direction
+                     :bytes size :max-bytes max-frame-bytes}))))
 
 ;; TODO make header configurable
 (def cec
@@ -58,11 +82,11 @@
   captured `*compression?*` at load time and binding the var around
   `client-connect!` -- exactly what its docstring tells you to do -- had no
   effect whatsoever."
-  []
+  [max-frame-bytes]
   (let [b (ClientEndpointConfig$Builder/create)]
     (.configurator b (.getConfigurator ^ClientEndpointConfig cec))
     (when *compression?*
-      (.extensions b (PerMessageDeflateExtension/offer)))
+      (.extensions b (PerMessageDeflateExtension/offer max-frame-bytes)))
     (.build b)))
 
 (def ^:dynamic *max-buffer-size* 10000)
@@ -78,34 +102,50 @@
    (defonce singleton-http-client (ClientManager/createClient))
    (client-connect! S url peer-id read-handlers write-handlers singleton-http-client))
   ([S url peer-id read-handlers write-handlers http-client]
-   (let [in-buffer (buffer 1024) ;; standard size
+   (let [max-frame-bytes *max-frame-bytes*
+         out-buffer-items *out-buffer-items*
+         in-buffer (buffer 1024) ;; standard size
          in (chan in-buffer)
-         out (chan)
+         out (chan (buffer out-buffer-items))
          opener (chan)
          websockets (atom #{})
          host (.getHost (java.net.URL. (.replace url "ws" "http")))]
-     ;; TODO this is only a temporary setting to allow large initial metadata payloads
-     ;; we want to break them apart with a hitchhiker tree or similar datastructure
      (.put (.getProperties http-client) "org.glassfish.tyrus.incomingBufferSize"
-           (* 100 1024 1024))
+           max-frame-bytes)
      (try
        (.connectToServer
         http-client
         (proxy [Endpoint] []
           (onOpen [session config]
             (log/info :websocket-opened {:url url})
+            (.setMaxBinaryMessageBufferSize session max-frame-bytes)
+            (.setMaxTextMessageBufferSize session max-frame-bytes)
             (go-loop-super S [m (<? S out)] ;; ensure draining out on disconnect
                            (if m
                              (do
                                (if (@websockets session)
-                                 (do
+                                 (try
                                    (log/debug :client-sending-message {:url url})
-                      ;; special case: use websocket wire-level string type 
+                                   ;; Awaiting the Tyrus future is deliberate:
+                                   ;; only one socket write may be outstanding.
                                    (if (= (:kabel/serialization m) :string)
-                                     @(.sendText (.getAsyncRemote session) (:kabel/payload m))
-                                     @(.sendBinary (.getAsyncRemote session)
-                                                   (ByteBuffer/wrap (to-binary m))))
-                                   #_(prn "cli send" m))
+                                     (let [payload (:kabel/payload m)]
+                                       (check-frame-size! url :out
+                                                          (text-bytes payload)
+                                                          max-frame-bytes)
+                                       @(.sendText (.getAsyncRemote session) payload))
+                                     (let [payload (to-binary m)]
+                                       (check-frame-size! url :out
+                                                          (alength payload)
+                                                          max-frame-bytes)
+                                       @(.sendBinary (.getAsyncRemote session)
+                                                     (ByteBuffer/wrap payload))))
+                                   (catch Exception e
+                                     (log/error :cannot-send-message
+                                                {:url url :error (pr-str e)})
+                                     (put! (-error S) e)
+                                     (close! out)
+                                     (.close session)))
                                  (log/warn :dropping-msg-because-of-closed-channel {:url url :message m}))
                                (recur (<? S out)))
                              (.close session)))
@@ -118,16 +158,16 @@
                                   (proxy [MessageHandlerString] []
                                     (onMessage [message]
                                       (try
-                                        (let [in-count (count in-buffer)]
-                                          (when (> in-count *max-buffer-size*)
-                                            (throw (ex-info
-                                                    (str "incoming buffer for " url
-                                                         " too full: " in-count)
-                                                    {:url url
-                                                     :count (count in-buffer)})))
-                                          (log/debug :received-byte-message {:url url :in-buffer-count in-count}))
-                                        (async/put! in {:kabel/serialization :string
-                                                        :kabel/payload message})
+                                        (check-frame-size! url :in
+                                                           (text-bytes message)
+                                                           max-frame-bytes)
+                                        (when-not
+                                         (async/offer!
+                                          in {:kabel/serialization :string
+                                              :kabel/payload message})
+                                          (throw (ex-info "Incoming Kabel queue is full"
+                                                          {:type :kabel/inbound-overloaded
+                                                           :url url})))
                                         (catch Exception e
                                           (let [e (ex-info "Cannot receive data." {:url url
                                                                                    :data message
@@ -139,18 +179,24 @@
                                   (proxy [MessageHandlerBinary] []
                                     (onMessage [message]
                                       (try
-                                        (let [in-count (count in-buffer)]
-                                          (when (> in-count *max-buffer-size*)
-                                            (throw (ex-info
-                                                    (str "incoming buffer for " url
-                                                         " too full: " in-count)
-                                                    {:url url
-                                                     :count in-count})))
-                                          (log/debug :received-byte-message {:url url :in-buffer-count (count in-buffer)}))
-                                        (let [m (from-binary (.array message))]
-                                          (async/put! in (if (map? m)
-                                                           (assoc m :kabel/host host)
-                                                           m)))
+                                        (let [^ByteBuffer source (.duplicate
+                                                                  ^ByteBuffer message)
+                                              size (.remaining source)
+                                              bytes (byte-array size)]
+                                          (check-frame-size! url :in size
+                                                             max-frame-bytes)
+                                          (.get source bytes)
+                                          (let [m (from-binary bytes)
+                                                admitted
+                                                (async/offer!
+                                                 in (if (map? m)
+                                                      (assoc m :kabel/host host)
+                                                      m))]
+                                            (when-not admitted
+                                              (throw
+                                               (ex-info "Incoming Kabel queue is full"
+                                                        {:type :kabel/inbound-overloaded
+                                                         :url url})))))
                                         (catch Exception e
                                           (let [e (ex-info "Cannot receive data." {:url url
                                                                                    :data message
@@ -165,6 +211,7 @@
             (let [e (ex-info "Connection closed!" {:reason reason})]
               (log/debug :closing-connection {:url url :reason (pr-str reason)})
               (close! in)
+              (close! out)
               (go-try S (while (<! in))) ;; flush
               (swap! websockets disj session)
               (put! (-error S) e)
@@ -178,7 +225,7 @@
               (put! (-error S) e)
               (log/error :websocket-error {:url url :error (pr-str err)})
               (.close session))))
-        (client-endpoint-config)
+        (client-endpoint-config max-frame-bytes)
         (java.net.URI. url))
        (catch Exception e
          (log/error :client-connect-error {:url url :error (pr-str e)})
@@ -299,5 +346,3 @@
 
   (<?? S (peer/start speer))
   (<?? S (peer/stop speer)))
-
-

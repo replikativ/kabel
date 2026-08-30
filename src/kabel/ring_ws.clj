@@ -27,6 +27,46 @@
             [clojure.core.async :as async
              :refer [<! chan put! close! buffer]]))
 
+(def default-max-frame-bytes
+  "Default WebSocket application-message ceiling. Binary size includes Kabel's
+  four-byte serialization prefix; text is counted as UTF-8."
+  (* 5 1024 1024))
+
+(def default-out-buffer-items
+  "Encoded messages retained by a raw server transport in addition to its one
+  completion-awaited socket write."
+  16)
+
+(defn- encoded-frame [message max-frame-bytes]
+  (let [[data size]
+        (if (= (:kabel/serialization message) :string)
+          (let [payload (:kabel/payload message)]
+            [payload (alength (.getBytes ^String payload
+                                         java.nio.charset.StandardCharsets/UTF_8))])
+          (let [payload (to-binary message)]
+            [(java.nio.ByteBuffer/wrap payload) (alength payload)]))]
+    (when (> size max-frame-bytes)
+      (throw (ex-info "WebSocket application message exceeds Kabel's limit"
+                      {:type :kabel/frame-too-large
+                       :direction :out :bytes size
+                       :max-bytes max-frame-bytes})))
+    data))
+
+(defn- send-async! [socket message max-frame-bytes]
+  (let [completion (chan 1)]
+    (try
+      (let [data (encoded-frame message max-frame-bytes)]
+        (if (satisfies? wsp/AsyncSocket socket)
+          (wsp/-send-async socket data
+                           #(async/offer! completion {:ok true})
+                           #(async/offer! completion {:error %}))
+          (do
+            (wsp/-send socket data)
+            (async/offer! completion {:ok true}))))
+      (catch Exception e
+        (async/offer! completion {:error e})))
+    completion))
+
 (defn- port-of
   "The port from a ws:// or wss:// url. Unchanged from the http-kit handler,
   including its tolerance of a url with no explicit port (nil, which the server
@@ -55,6 +95,9 @@
     :annotate-msg  (fn [msg request ctx] -> msg), on every inbound message
                    after deserialisation and the default `:kabel/host`
                    annotation. Defaults to identity.
+    :max-frame-bytes WebSocket application-message ceiling (default 5 MiB).
+    :out-buffer-items encoded messages queued per socket (default 16); one
+                   additional write may be in flight.
 
   The socket doubles as the `channel-hub` key, as the http-kit channel did."
   ([S url peer-id]
@@ -62,9 +105,12 @@
   ([S url peer-id read-handlers write-handlers]
    (create-ws-handler! S url peer-id read-handlers write-handlers {}))
   ([S url _peer-id _read-handlers _write-handlers
-    {:keys [on-connect annotate-msg run-server server-opts]
+    {:keys [on-connect annotate-msg run-server server-opts max-frame-bytes
+            out-buffer-items]
      :or {on-connect (constantly nil)
           annotate-msg (fn [msg _req _ctx] msg)
+          max-frame-bytes default-max-frame-bytes
+          out-buffer-items default-out-buffer-items
           server-opts {}}}]
    (let [channel-hub (atom {})
          context-hub (atom {})
@@ -73,7 +119,7 @@
          (fn [request]
            (let [in-buffer (buffer 1024)
                  in (chan in-buffer)
-                 out (chan)]
+                 out (chan (buffer out-buffer-items))]
              (async/put! conns [in out])
              {:ring.websocket/listener
               (reify wsp/Listener
@@ -97,18 +143,24 @@
                   (go-loop-super S [m (<? S out)]
                                  (if m
                                    (if (@channel-hub socket)
-                                     (do (log/debug :sending-msg {})
-                                         ;; Ring's contract is String for text
-                                         ;; and ByteBuffer for binary. http-kit
-                                         ;; gave us a byte[] and took a byte[];
-                                         ;; Ring adapters call .remaining/.get
-                                         ;; on what they are handed, so a byte[]
-                                         ;; here silently sends nothing.
-                                         (wsp/-send socket
-                                                    (if (= (:kabel/serialization m) :string)
-                                                      (:kabel/payload m)
-                                                      (java.nio.ByteBuffer/wrap (to-binary m))))
-                                         (recur (<? S out)))
+                                     (let [result
+                                           (<! (send-async! socket m
+                                                            max-frame-bytes))]
+                                       (if (= true (:ok result))
+                                         (recur (<? S out))
+                                         (do
+                                           (log/warn :websocket-send-failed
+                                                     {:url url
+                                                      :error (str (:error result))})
+                                           (put! (-error S) (:error result))
+                                           (close! out)
+                                           (wsp/-close
+                                            socket
+                                            (if (= :kabel/frame-too-large
+                                                   (:type (ex-data
+                                                           (:error result))))
+                                              1009 1011)
+                                            "kabel: send failed"))))
                                      (do (log/warn :dropping-msg-because-of-closed-channel
                                                    {:url url})
                                          (close! out)))
@@ -119,11 +171,6 @@
                         ctx (@context-hub socket)]
                     (try
                       (log/debug :received-byte-message {})
-                      (when (> (count in-buffer) 100)
-                        (wsp/-close socket 1009 "incoming buffer full")
-                        (throw (ex-info (str "incoming buffer for " host
-                                             " too full:" (count in-buffer))
-                                        {:url url :count (count in-buffer)})))
                       ;; Only binary associative messages get :kabel/host by
                       ;; default; string messages stay plain. annotate-msg can
                       ;; add more per caller policy.
@@ -138,18 +185,36 @@
                                      (.get b a)
                                      a)
                                    data))
+                            size (if text?
+                                   (alength (.getBytes ^String data
+                                                       java.nio.charset.StandardCharsets/UTF_8))
+                                   (alength ^bytes bs))
+                            _ (when (> size max-frame-bytes)
+                                (throw
+                                 (ex-info "WebSocket application message exceeds Kabel's limit"
+                                          {:type :kabel/frame-too-large
+                                           :direction :in :bytes size
+                                           :max-bytes max-frame-bytes})))
                             base (if text?
                                    {:kabel/serialization :string :kabel/payload data}
                                    (from-binary bs))
                             with-host (if (and (not text?) (associative? base))
                                         (assoc base :kabel/host host)
                                         base)]
-                        (async/put! in (annotate-msg with-host request ctx)))
+                        (when-not (async/offer!
+                                   in (annotate-msg with-host request ctx))
+                          (throw (ex-info "Incoming Kabel queue is full"
+                                          {:type :kabel/inbound-overloaded
+                                           :url url}))))
                       (catch Exception e
                         (put! (-error S)
                               (ex-info "Cannot receive data."
                                        {:data data :host host :error e}))
-                        (wsp/-close socket 1011 "kabel: receive failed")))))
+                        (wsp/-close socket
+                                    (if (= :kabel/frame-too-large
+                                           (:type (ex-data e)))
+                                      1009 1013)
+                                    "kabel: receive rejected")))))
 
                 (on-pong [_ _socket _data] nil)
 
@@ -178,11 +243,8 @@
                         (assoc :stop-fn
                                (run-server handler
                                            (merge {:port (port-of url)
-                                                   ;; TODO temporary, to allow large initial
-                                                   ;; metadata payloads; we want to break them
-                                                   ;; apart with a hitchhiker tree or similar.
-                                                   :max-body (* 100 1024 1024)
-                                                   :max-ws (* 100 1024 1024)}
+                                                   :max-body max-frame-bytes
+                                                   :max-ws max-frame-bytes}
                                                   server-opts))))))
       :url url
       :handler handler})))

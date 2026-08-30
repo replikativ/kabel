@@ -1,6 +1,17 @@
 # Change Log
 
 ## Unreleased
+ - **Bounded WebSocket transport.** JVM, JavaScript, http-kit and Jetty paths
+   enforce a 5 MiB application-message ceiling; permessage-deflate uses the
+   same post-inflation bound. Raw input uses nonblocking admission into a
+   1,024-item lane, raw output retains 16 encoded messages, disconnect closes
+   both directions, and oversize/overload failures close visibly instead of
+   accumulating pending puts.
+ - Server writes use Ring `AsyncSocket` completions where available, with one
+   write in flight. Jetty provides that contract. Released http-kit 2.8.x does
+   not and retains an unbounded internal socket queue, so public deployments
+   must use Jetty or the byte-ceiling work in http-kit PR #619 until that lower
+   layer ships.
  - **Opt-in transport metrics.** `kabel.metrics/messages` counts logical
    messages by direction and type; `kabel.metrics/wire` counts WebSocket
    application bytes outside the codec; connection/reconnection/disconnection

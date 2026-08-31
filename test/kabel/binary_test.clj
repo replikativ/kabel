@@ -1,5 +1,6 @@
 (ns kabel.binary-test
-  (:require [kabel.binary :refer [to-binary from-binary]]
+  (:require [boring.core :as boring]
+            [kabel.binary :refer [to-binary from-binary]]
             [clojure.test :refer :all]))
 
 (deftest to-binary-test
@@ -13,6 +14,14 @@
   (is (= [0 0 0 14 1 2 3]
          (vec (to-binary {:kabel/serialization :cbor
                           :kabel/payload (byte-array [1 2 3])})))))
+
+(deftest python-cbor-known-answer
+  (testing "Python and the JVM emit the same complete serializer-14 frame"
+    (is (= [0 0 0 14 161 97 110 7]
+           (mapv #(bit-and 0xff %)
+                 (to-binary {:kabel/serialization :cbor
+                             :kabel/payload
+                             (boring/encode {"n" 7} {:stringref false})}))))))
 
 (deftest older-peers-keep-working-test
   (testing "a frame built by HAND, not by to-binary, must still decode as

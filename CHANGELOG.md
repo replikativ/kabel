@@ -11,6 +11,10 @@
  - ClojureScript advanced compilation now sees the `superv.async` runtime used
    by `kabel.metrics` macro expansions explicitly, removing undeclared-var
    warnings in downstream optimized builds.
+ - **Language-neutral carrier.** `WIRE.md` freezes the uint32-big-endian
+   serializer envelope and CBOR profile. The `kabel-protocol` Python alpha
+   package implements bounded framing, serializer 14, keyword/set tags, and an
+   optional asyncio WebSocket adapter, with a shared JVM/Python known answer.
  - **Bounded WebSocket transport.** JVM, JavaScript, http-kit and Jetty paths
    enforce a 5 MiB application-message ceiling; permessage-deflate uses the
    same post-inflation bound. Raw input uses nonblocking admission into a

@@ -74,17 +74,24 @@
         (throw e)))))
 
 (defn connect
-  "Connect peer to url."
-  [S peer url]
-  (go-try S
-          (let [{{:keys [read-handlers write-handlers]} :volatile
-                 :keys [id]} @peer
-                [c-in c-out] (<? S (client-connect! S url
-                                                    id
-                                                    read-handlers
-                                                    write-handlers))]
-            (run-connection! S peer [c-in c-out] :initiator
-                             {::transport/dial-address url}))))
+  "Connect peer to url.
+
+  The optional `attributes` map adds dial-local connection context such as
+  `::transport/expected-target`. It is per physical connection rather than
+  peer-wide because one client peer may dial many authenticated authorities.
+  The actual dial address is transport-owned and cannot be overridden."
+  ([S peer url]
+   (connect S peer url {}))
+  ([S peer url attributes]
+   (go-try S
+           (let [{{:keys [read-handlers write-handlers]} :volatile
+                  :keys [id]} @peer
+                 [c-in c-out] (<? S (client-connect! S url
+                                                     id
+                                                     read-handlers
+                                                     write-handlers))]
+             (run-connection! S peer [c-in c-out] :initiator
+                              (assoc attributes ::transport/dial-address url))))))
 
 (defn client-peer
   "Creates a client-side peer only.

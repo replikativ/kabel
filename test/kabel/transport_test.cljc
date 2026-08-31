@@ -2,6 +2,7 @@
   (:require #?(:clj [clojure.core.async :refer [chan close! >!! <!! timeout]]
                :cljs [clojure.core.async :refer [chan close!]])
             [clojure.test :refer [deftest is testing]]
+            #?(:clj [kabel.client :as client])
             #?(:clj [kabel.peer :as peer])
             [kabel.transport :as transport]
             #?(:clj [superv.async :refer [S]])))
@@ -98,4 +99,32 @@
        (close! new-conns)
        (<!! (timeout 50))
        (is (empty? (transport/connections p)))
+       (peer/unregister-peer! (:id @p)))))
+
+#?(:clj
+   (deftest client-connect-context-is-per-dial
+     (let [raw-in (chan)
+           raw-out (chan)
+           observed (promise)
+           p (peer/client-peer
+              S (random-uuid) identity identity (atom {}) (atom {})
+              {:transport-middleware
+               (fn [connection]
+                 (deliver observed @(transport/connection-context connection))
+                 connection)})]
+       (with-redefs [client/client-connect!
+                     (fn [_ _ _ _ _]
+                       (let [result (chan 1)]
+                         (clojure.core.async/put! result [raw-in raw-out])
+                         result))]
+         (peer/connect S p "wss://peer.example/netz"
+                       {::transport/expected-target :authority/alice})
+         (let [context (deref observed 1000 ::timeout)]
+           (is (not= ::timeout context))
+           (is (= :authority/alice (::transport/expected-target context)))
+           (is (= "wss://peer.example/netz"
+                  (::transport/dial-address context)))))
+       (close! raw-in)
+       (close! raw-out)
+       (<!! (timeout 50))
        (peer/unregister-peer! (:id @p)))))

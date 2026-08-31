@@ -13,7 +13,11 @@
   (:require [clojure.core.async :refer [chan close!]]
             #?(:cljs [hasch.platform :refer [utf8]])
             [replikativ.metrics :as metrics]
-            #?(:clj [superv.async :refer [<? >? go-loop-super]]))
+            #?(:clj [superv.async :refer [<? >? go-loop-super]]
+               ;; `go-loop-super` expands to protocol functions in this
+               ;; namespace. Requiring the runtime init makes those generated
+               ;; references explicit under Closure :advanced compilation.
+               :cljs [superv.async :refer [superv-init]]))
   #?(:cljs (:require-macros [superv.async :refer [<? >? go-loop-super]])))
 
 (def descriptions

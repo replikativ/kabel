@@ -1,6 +1,16 @@
 # Change Log
 
 ## Unreleased
+ - **Connection transport boundary.** `client-peer` and `server-peer` accept an
+   optional `:transport-middleware` outside serialization, suitable for an
+   authenticated Noise upgrade without changing application middleware or
+   pub/sub. Every physical connection gets a unique mutable context containing
+   initiator/responder role, expected/observed remote address and negotiated
+   identity/capability slots; `kabel.transport` preserves it across legacy
+   middleware and exposes active connection lifecycle state on the peer.
+ - ClojureScript advanced compilation now sees the `superv.async` runtime used
+   by `kabel.metrics` macro expansions explicitly, removing undeclared-var
+   warnings in downstream optimized builds.
  - **Bounded WebSocket transport.** JVM, JavaScript, http-kit and Jetty paths
    enforce a 5 MiB application-message ceiling; permessage-deflate uses the
    same post-inflation bound. Raw input uses nonblocking admission into a

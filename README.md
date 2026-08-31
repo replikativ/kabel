@@ -233,6 +233,41 @@ not usually possible, so `kabel.middleware.dual` makes it two deploys:
 - **Handler** (`kabel.middleware.handler`): Generic callback middleware for custom transforms
 - **WAMP** (`kabel.middleware.wamp`): Experimental WAMP protocol client
 
+### Connection transport middleware
+
+Peers have an optional middleware boundary outside serialization. It is meant
+for connection protocols such as Noise that must authenticate and protect the
+encoded frames before application middleware can observe them:
+
+```clojure
+(:require [kabel.transport :as transport])
+
+(defn authenticated-transport [remote-authority]
+  (fn [connection]
+    ;; A real implementation performs its handshake before forwarding frames.
+    (transport/update!
+      connection
+      {::transport/authenticated-authority remote-authority
+       ::transport/negotiated-capabilities #{:netz/v1}})
+    connection))
+
+(peer/client-peer S client-id app-middleware cbor/cbor
+                  (atom {}) (atom {})
+                  {:transport-middleware
+                   (authenticated-transport remote-authority)
+                   :connection-context
+                   {::transport/expected-target expected-authority}})
+```
+
+Inbound order is socket, transport, serialization, application; outbound order
+is the reverse. Existing middleware still accepts and returns exactly
+`[S peer [in out]]`. `kabel.transport/connection-context` obtains the
+connection-local context atom, and Kabel preserves it even when legacy
+middleware returns fresh channels without metadata. Contexts have unique ids,
+initiator/responder roles and lifecycle entries in
+`(kabel.transport/connections peer)`; authentication middleware owns the
+authenticated remote and negotiated capability values.
+
 ### Transport metrics
 
 `kabel.metrics` records into the shared `replikativ.metrics` registry without

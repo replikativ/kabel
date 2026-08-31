@@ -5,6 +5,7 @@
             #?(:clj [superv.async :refer [<? <<? go-try go-loop-try alt?
                                           go-loop-super]])
             [kabel.client :refer [client-connect!]]
+            [kabel.transport :as transport]
             [kabel.middleware.transit :refer [transit]]
             #?(:cljs [superv.async :refer [throw-if-exception
                                            -track-exception -free-exception
@@ -48,35 +49,67 @@
                    (recur (<? S in))
                    (close! out))))
 
+(defn- run-connection!
+  [S peer channels role attributes]
+  (let [{{:keys [middleware serialization-middleware transport-middleware
+                 connection-context]} :volatile} @peer
+        context (transport/new-context role (merge connection-context attributes))]
+    (transport/register! peer context)
+    (try
+      (let [pipeline (->> (transport/with-context [S peer channels] context)
+                          (transport/apply-middleware transport-middleware)
+                          (transport/apply-middleware serialization-middleware)
+                          (transport/apply-middleware middleware))
+            done (drain pipeline)]
+        ;; Registration follows a physical connection, not a peer. Keeping
+        ;; cleanup beside `drain` also covers middleware-initiated shutdown.
+        (go-try S
+                (try
+                  (<? S done)
+                  (finally
+                    (transport/unregister! peer context))))
+        done)
+      (catch #?(:clj Throwable :cljs :default) e
+        (transport/unregister! peer context)
+        (throw e)))))
+
 (defn connect
   "Connect peer to url."
   [S peer url]
   (go-try S
-          (let [{{:keys [middleware serialization-middleware
-                         read-handlers write-handlers]} :volatile
+          (let [{{:keys [read-handlers write-handlers]} :volatile
                  :keys [id]} @peer
                 [c-in c-out] (<? S (client-connect! S url
                                                     id
                                                     read-handlers
                                                     write-handlers))]
-            (-> [S peer [c-in c-out]]
-                serialization-middleware
-                middleware
-                drain))))
+            (run-connection! S peer [c-in c-out] :initiator
+                             {::transport/dial-address url}))))
 
 (defn client-peer
-  "Creates a client-side peer only."
+  "Creates a client-side peer only.
+
+  The final optional map accepts `:transport-middleware`, applied outside the
+  serialization middleware, and a base `:connection-context` map. Earlier
+  arities retain their exact behavior."
   ([S id middleware]
    (client-peer S id middleware transit))
   ([S id middleware serialization-middleware]
    (client-peer S id middleware serialization-middleware (atom {}) (atom {})))
   ([S id middleware serialization-middleware read-handlers write-handlers]
+   (client-peer S id middleware serialization-middleware read-handlers
+                write-handlers {}))
+  ([S id middleware serialization-middleware read-handlers write-handlers
+    {:keys [transport-middleware connection-context]
+     :or {transport-middleware identity connection-context {}}}]
    (let [log (atom {})
          bus-in (chan)
          bus-out (pub bus-in :type)
          peer (atom {:volatile {:log log
                                 :middleware middleware
                                 :serialization-middleware serialization-middleware
+                                :transport-middleware transport-middleware
+                                :connection-context connection-context
                                 :read-handlers read-handlers
                                 :write-handlers write-handlers
                                 :supervisor S
@@ -85,12 +118,21 @@
      (register-peer! peer))))
 
 (defn server-peer
-  "Constructs a listening peer."
+  "Constructs a listening peer.
+
+  The final optional map accepts `:transport-middleware`, applied outside the
+  serialization middleware, and a base `:connection-context` map. Earlier
+  arities retain their exact behavior."
   ([S handler id middleware]
    (server-peer S handler id middleware transit))
   ([S handler id middleware serialization-middleware]
    (server-peer S handler id middleware serialization-middleware (atom {}) (atom {})))
   ([S handler id middleware serialization-middleware read-handlers write-handlers]
+   (server-peer S handler id middleware serialization-middleware read-handlers
+                write-handlers {}))
+  ([S handler id middleware serialization-middleware read-handlers write-handlers
+    {:keys [transport-middleware connection-context]
+     :or {transport-middleware identity connection-context {}}}]
    (let [{:keys [new-conns url]} handler
          log (atom {})
          bus-in (chan)
@@ -98,6 +140,8 @@
          peer (atom {:volatile (merge handler
                                       {:middleware middleware
                                        :serialization-middleware serialization-middleware
+                                       :transport-middleware transport-middleware
+                                       :connection-context connection-context
                                        :read-handlers read-handlers
                                        :write-handlers write-handlers
                                        :log log
@@ -105,9 +149,12 @@
                                        :chans [bus-in bus-out]})
                      :addresses #{(:url handler)}
                      :id id})]
-     (go-loop-super S [[in out] (<? S new-conns)]
-                    (drain (middleware (serialization-middleware [S peer [in out]])))
-                    (recur (<? S new-conns)))
+     (go-loop-super S [connection (<? S new-conns)]
+                    (when connection
+                      (let [[in out attributes] connection]
+                        (run-connection! S peer [in out] :responder
+                                         (or attributes {})))
+                      (recur (<? S new-conns))))
      (register-peer! peer))))
 
 (defn start [peer]
@@ -139,4 +186,3 @@
           ;; Unregister from global registry
                 (unregister-peer! (:id @peer))
                 true)))))
-

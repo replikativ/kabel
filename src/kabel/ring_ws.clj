@@ -120,7 +120,13 @@
            (let [in-buffer (buffer 1024)
                  in (chan in-buffer)
                  out (chan (buffer out-buffer-items))]
-             (async/put! conns [in out])
+             ;; The third entry is additive: legacy consumers destructuring
+             ;; `[in out]` keep working, while `kabel.peer/server-peer` uses
+             ;; these facts to seed a connection-local transport context.
+             (async/put! conns
+                         [in out {:kabel.transport/transport :websocket
+                                  :kabel.transport/remote-address
+                                  (:remote-addr request)}])
              {:ring.websocket/listener
               (reify wsp/Listener
                 (on-open [_ socket]

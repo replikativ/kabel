@@ -13,6 +13,8 @@
 ## Features
 
 - **Cross-platform**: Works on JVM, browser, Node.js, and React-Native
+- **Language-neutral carrier**: A documented four-byte framing profile and a
+  small Python CBOR/WebSocket package
 - **Symmetric peers**: Server and client use identical patterns, enabling true P2P architectures
 - **Pluggable serialization**: CBOR, Transit, Fressian, JSON, or EDN out of the box
 - **Pluggable server**: http-kit by default or Jetty 12, behind one Ring-based
@@ -226,6 +228,27 @@ not usually possible, so `kabel.middleware.dual` makes it two deploys:
 2. once no peer predates step 1, switch writers to `dual-read-cbor-write`.
 
 [boring]: https://github.com/replikativ/boring
+
+### Python and other runtimes
+
+[`WIRE.md`](WIRE.md) specifies the stable binary carrier independently of
+Clojure. The Python reference package lives in `interop/python`:
+
+```sh
+python3 -m pip install ./interop/python
+python3 -m pip install './interop/python[websocket]'  # optional asyncio client
+```
+
+```python
+from kabel_protocol import encode_cbor_frame, decode_cbor_frame
+
+frame = encode_cbor_frame({"type": "ping", "n": 7})
+assert decode_cbor_frame(frame) == {"type": "ping", "n": 7}
+```
+
+This is intentionally a carrier API, not a Python transcription of Clojure
+protocol objects. Netz and other application protocols define portable pub/sub
+and synchronization semantics above it.
 
 ### Utility Middlewares
 

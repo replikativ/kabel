@@ -95,6 +95,20 @@ jobs:
           paths:
             - replikativ
 
+  test-python:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - attach_workspace:
+          at: /home/circleci
+      - run:
+          name: Build and test Python carrier
+          command: |
+            cd interop/python
+            python -m pip install --user .
+            python -m unittest discover -s tests -v
+            python -m pip wheel . --no-deps --wheel-dir /tmp/kabel-python-dist
+
   deploy:
     executor: tools/clojurecli
     steps:
@@ -125,6 +139,9 @@ workflows:
           context: dockerhub-deploy
           requires:
             - setup
+      - test-python:
+          requires:
+            - setup
       - deploy:
           context:
             - dockerhub-deploy
@@ -136,4 +153,5 @@ workflows:
             - format-check
             - test-clj
             - test-cljs
+            - test-python
             - build

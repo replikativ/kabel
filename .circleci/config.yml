@@ -98,6 +98,7 @@ jobs:
   test-python:
     docker:
       - image: cimg/python:3.12
+    working_directory: /home/circleci/replikativ
     steps:
       - attach_workspace:
           at: /home/circleci

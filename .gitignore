@@ -27,3 +27,10 @@ node_modules/
 /resources/public/js/
 /resources/private/js/
 /.internal
+
+# Python interop build/test output
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/

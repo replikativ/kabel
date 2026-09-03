@@ -15,6 +15,33 @@
    serializer envelope and CBOR profile. The `kabel-protocol` Python alpha
    package implements bounded framing, serializer 14, keyword/set tags, and an
    optional asyncio WebSocket adapter, with a shared JVM/Python known answer.
+ - **Remote invocation** (`kabel.remote`). The request/response runtime that
+   `is.simm.distributed-scope` built its macros on now lives in kabel:
+   `register!`, `serve` with an `:authorize` gate in the `kabel.authorize`
+   shape, `invoke`, and a connection middleware that announces the peer. The
+   frames are specified in doc/remote-invocation.md; the distributed-scope
+   dialect is accepted and answered in kind, so peers upgrade one at a time.
+   Results are correlated per request rather than by scanning the bus, a call
+   in flight fails with `:kabel.remote/disconnected` when its connection
+   closes, `:timeout-ms` bounds a call, and errors travel typed instead of as
+   printed strings. Functions receive the principal under `:kabel/principal`
+   in their argument map instead of a dynamic binding.
+ - **Reconnection** (`kabel.peer/maintain`). A client peer stays connected with
+   exponential backoff, reporting `:connecting`, `:connected`, `:disconnected`,
+   `:failed` and `:stopped` on its bus as `:kabel.peer/status` and to an
+   `:on-status` callback. `peer/status!` publishes such a status for any
+   layer, `peer/disconnect!` closes the current connection, and `peer/connect`
+   now yields a channel that closes with the connection.
+ - **Token refresh and expiry** (`kabel.auth.websocket`). The client's `:token`
+   may be a function or an atom, read at every connection so a reconnection
+   carries the current token; `refresh-token!` replaces the token on the live
+   connection; a JWT with `exp` from such a source is refreshed automatically
+   before it expires. The validating side now watches the accepted token's
+   `exp` and, by default, closes a connection whose token expired without a
+   refresh (`:on-expiry :close`; `:anonymous` and `:ignore` are the
+   alternatives). **Behaviour change:** before, an accepted token was never
+   re-examined and a connection outlived its expiry indefinitely. `kabel.auth.jwt/claims`
+   decodes a token's payload without verifying it, for reading `exp`.
  - **Bounded WebSocket transport.** JVM, JavaScript, http-kit and Jetty paths
    enforce a 5 MiB application-message ceiling; permessage-deflate uses the
    same post-inflation bound. Raw input uses nonblocking admission into a

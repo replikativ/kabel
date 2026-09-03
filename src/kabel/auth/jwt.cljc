@@ -100,6 +100,14 @@
        :sig (codec/b64url->bytes s)
        :signing-input (codec/str->bytes (str h "." p))})))
 
+(defn claims
+  "The payload of `token` WITHOUT verifying it, or nil when it is not a JWT.
+   For reading `:exp` on a token one holds; never for trusting one."
+  [token]
+  (try
+    (:payload (parse-token token))
+    (catch #?(:clj Exception :cljs :default) _ nil)))
+
 (defn- now-epoch []
   #?(:clj  (long (/ (.getTime (Date.)) 1000))
      :cljs (long (/ (.now js/Date) 1000))))

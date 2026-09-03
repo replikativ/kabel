@@ -94,6 +94,32 @@ upstream coordinate, exclude it at that dependency.
 (<?? S (peer/connect S client url))
 ```
 
+## Reconnection
+
+`peer/connect` makes one connection and yields a channel that closes when it
+does. `peer/maintain` keeps a client connected: it reconnects with exponential
+backoff when the connection drops or an attempt fails, and reports every
+transition on the peer's bus as `{:type :kabel.peer/status :status ...}` and to
+an `:on-status` callback.
+
+```clojure
+(def link
+  (peer/maintain S client url
+    {:on-status (fn [{:keys [status attempt error]}]
+                  (println status attempt error))
+     :backoff {:initial-ms 500 :max-ms 30000 :factor 2 :jitter 0.2}}))
+
+;; statuses: :connecting :connected :disconnected :failed :authenticated :stopped
+((:stop! link))
+```
+
+Every reconnection runs the peer's middleware stack again, so the layers above
+see it exactly as they saw the first connection: the auth middleware
+authenticates with a freshly read token, `kabel.remote` announces the peer
+again, and pub/sub subscriptions have to be made again. `peer/disconnect!`
+closes the current connection; under `maintain` that is a reconnect, after
+`:stop!` it is the end.
+
 ## Pub/Sub
 
 kabel includes a topic-based publish/subscribe system with built-in backpressure for initial synchronization.
@@ -185,6 +211,39 @@ For scenarios requiring initial state synchronization (e.g., syncing a database)
     ;; Handle incremental publish
     (go (save-item! store payload) {:ok true})))
 ```
+
+## Remote invocation
+
+`kabel.remote` lets a peer serve named functions and a connected peer call
+them with an argument map. It is the runtime `distributed-scope`'s
+`defn-go-remote` macros are built on, moved here so the protocol has one home
+and reconnection, authentication and authorization apply to it. The frames
+are specified in [doc/remote-invocation.md](doc/remote-invocation.md).
+
+```clojure
+(require '[kabel.remote :as remote])
+
+;; both peers compose the middleware, inside the codec
+(def server (peer/server-peer S handler server-id (comp app-middleware remote/middleware) cbor))
+(def client (peer/client-peer S client-id (comp app-middleware remote/middleware) cbor))
+
+;; the serving side registers functions and serves, behind a gate
+(remote/register! 'my.app/add (fn [{:keys [a b]}] (+ a b)))
+(remote/serve server {:authorize (fn [{:keys [op principal fn-name arg-map]}]
+                                   (some? principal))})
+
+;; the calling side
+(<?? S (remote/connect S client url))                        ;; => server-id
+(<?? S (remote/invoke client server-id 'my.app/add {:a 1 :b 2})) ;; => 3
+```
+
+A function returns a value or a channel yielding one. It receives the
+connection's principal under `:kabel/principal` when the connection is
+authenticated. Errors arrive typed: `:kabel.remote/unknown-function`,
+`:kabel.remote/not-authorized`, `:kabel.remote/authentication-required`, or the
+`:type` of the exception the function threw. A call issued before the
+connection exists waits for it; one in flight when the connection closes fails
+with `:kabel.remote/disconnected`, and `:timeout-ms` bounds either wait.
 
 ## Middlewares
 
@@ -356,6 +415,34 @@ Authenticated messages carry `:kabel/principal` (the JWT claims). HS256 signing
 (`jwt/sign-hs256`) and verification work identically on the JVM and in
 ClojureScript (browser/Node), so a CLJS peer can both mint and verify tokens.
 RS256 verification is JVM-only.
+
+### Tokens on a live connection
+
+`kabel.auth.websocket/auth-middleware` authenticates a connection with a token
+and validates the other side's. Tokens expire, so:
+
+```clojure
+;; client: the token source is read at every connection, and again for refreshes
+(auth/auth-middleware
+  {:authenticate {:token (fn [] (current-access-token))   ;; string, atom, or fn
+                  :on-auth (fn [principal] ...)
+                  :on-error (fn [error] ...)}              ;; rejection, or "token-expired"
+   :permissive true})
+
+;; refresh on the live connection, explicitly
+(<?? S (auth/refresh-token! client new-token))            ;; => the accepted principal
+
+;; server
+(auth/auth-middleware
+  {:validate {:jwt {:alg :HS256 :secret secret :leeway-seconds 60}
+              :on-expiry :close}})                         ;; or :anonymous, or :ignore
+```
+
+When the token is a JWT with `exp` and comes from a function or atom, the
+client refreshes it on the live connection a minute before expiry
+(`:refresh-before-ms`). The server watches the accepted token's `exp` too: with
+`:on-expiry :close` (the default) a connection whose token expired without a
+refresh is told so and closed; `:anonymous` keeps it open without a principal.
 
 ### Trusted-issuer registry + external providers (JWKS)
 

@@ -10,25 +10,35 @@
 
    Both roles can be enabled independently for true P2P auth.
 
+   Tokens expire. The client side reads its token from a function or an atom
+   at every connection, so a reconnection carries a fresh one, refreshes it on
+   the live connection before a JWT's `exp` (`refresh-token!`), and the
+   server side ends, or downgrades, a connection whose token expired without
+   a refresh.
+
    Usage:
      (require '[kabel.auth.websocket :as auth])
 
      ;; Server-only (validates incoming, doesn't auth outgoing)
-     (auth/auth-middleware {:server {:jwt {...}}})
+     (auth/auth-middleware {:validate {:jwt {...}}})
 
      ;; Client-only (authenticates to remote, permits all incoming)
-     (auth/auth-middleware {:client {:token \"...\"}})
+     (auth/auth-middleware {:authenticate {:token (fn [] (current-token))}
+                            :permissive true})
 
      ;; Bidirectional (both sides authenticate)
      (auth/auth-middleware
-       {:client {:token \"my-token\"}
-        :server {:jwt {...}}})"
-  (:require #?(:clj [kabel.auth.jwt :as jwt])
+       {:authenticate {:token \"my-token\"}
+        :validate {:jwt {...}}})"
+  (:require #?(:clj [kabel.auth.jwt :as jwt]
+               :cljs [kabel.auth.jwt :as jwt])
+            [kabel.peer :as peer]
             [clojure.core.async :as async :refer [chan promise-chan <! >! close! put! alts! timeout go go-loop]]
+            [clojure.core.async.impl.protocols :as async-proto]
             [replikativ.logging :refer [warn info debug]]
-            [superv.async :refer [go-try go-loop-try <? S]])
+            [superv.async :refer [go-try go-loop-try <? put? S]])
   #?(:cljs (:require-macros [clojure.core.async :refer [go go-loop]]
-                            [superv.async :refer [go-try go-loop-try <? S]])))
+                            [superv.async :refer [go-try go-loop-try <? put? S]])))
 
 ;; Connection state
 
@@ -45,6 +55,12 @@
 
 (def default-auth-timeout-ms 10000)
 (def default-auth-pending-limit 1000)
+(def default-refresh-before-ms 60000)
+(def default-leeway-seconds 60)
+
+(defn- now-ms []
+  #?(:clj (System/currentTimeMillis)
+     :cljs (.now js/Date)))
 
 (defn- invoke-callback!
   "Invoke a lifecycle callback without letting consumer code strand protocol
@@ -69,6 +85,10 @@
            (warn {:event :token-validation-failed :error (.getMessage e)})
            nil)))))
 
+;; =============================================================================
+;; Inbound validation (verify the REMOTE peer)
+;; =============================================================================
+
 (defn validate-middleware
   "Kabel middleware that validates auth FROM a remote peer.
 
@@ -80,10 +100,19 @@
 
    Options:
      :jwt - JWT configuration for token validation
-            {:secret \"...\" :alg :HS256} or {:public-key \"...\" :alg :RS256}
+            {:secret \"...\" :alg :HS256} or {:public-key \"...\" :alg :RS256};
+            its :leeway-seconds (default 60) also pads token expiry below
      :dev-mode - When true, skip token validation
      :dev-principal - Principal to use in dev mode
      :on-auth - Optional callback (fn [principal]) called on successful auth
+     :on-refresh - Optional callback (fn [principal]) called on a successful refresh
+     :on-expiry - What happens when the accepted token's `exp` passes without
+                  a refresh (default :close):
+                    :close     send :kabel/auth-error \"token-expired\" and close
+                               the connection
+                    :anonymous send the same error and keep the connection,
+                               without a principal from then on
+                    :ignore    the pre-0.3.130 behaviour, expiry is not watched
 
    Messages:
      Remote -> {:type :kabel/auth :token \"access_token\"}
@@ -91,16 +120,48 @@
             or {:type :kabel/auth-error :error \"message\"}
 
      Remote -> {:type :kabel/auth-refresh :token \"new_access_token\"}
-     Me     -> {:type :kabel/auth-ok}"
-  [{:keys [jwt dev-mode dev-principal on-auth]}]
+     Me     -> {:type :kabel/auth-ok :principal {...}}
+            or {:type :kabel/auth-error :error \"message\"}
+
+     Me     -> {:type :kabel/auth-error :error \"token-expired\"} when the
+               token expired without a refresh"
+  [{:keys [jwt dev-mode dev-principal on-auth on-refresh on-expiry]
+    :or {on-expiry :close}}]
   (let [default-dev-principal {:sub "dev-user"
                                :email "dev@localhost"
-                               :name "Developer"}]
+                               :name "Developer"}
+        leeway-ms (* 1000 (get jwt :leeway-seconds default-leeway-seconds))]
     (fn [[S peer [in out]]]
       (let [new-in (chan)
             new-out (chan)
             ;; Per-connection principal state
-            principal-atom (atom nil)]
+            principal-atom (atom nil)
+            ;; The watch on the accepted token's expiry; closed when replaced
+            expiry-cancel (atom nil)
+            validate (fn [token]
+                       #?(:clj (if dev-mode
+                                 (or dev-principal default-dev-principal)
+                                 (validate-token jwt token))
+                          :cljs (or dev-principal default-dev-principal)))
+            expired! (fn []
+                       (warn {:event :token-expired :on-expiry on-expiry})
+                       (put! out {:type auth-error-msg-type
+                                  :error "token-expired"
+                                  :message "Token expired without a refresh"})
+                       (case on-expiry
+                         :close (close! out)
+                         :anonymous (reset! principal-atom nil)
+                         nil))
+            watch-expiry! (fn [principal]
+                            (when-let [old @expiry-cancel]
+                              (close! old))
+                            (when-let [exp (and (not= on-expiry :ignore) (:exp principal))]
+                              (let [cancel (promise-chan)
+                                    delay (max 0 (- (+ (* 1000 exp) leeway-ms) (now-ms)))]
+                                (reset! expiry-cancel cancel)
+                                (go (let [[_ port] (alts! [cancel (timeout delay)])]
+                                      (when (not= port cancel)
+                                        (expired!)))))))]
 
         ;; Process incoming messages
         (go-loop-try S [msg (<? S in)]
@@ -110,14 +171,11 @@
                            (cond
                 ;; Initial authentication
                              (= msg-type auth-msg-type)
-                             (let [token (:token msg)
-                                   principal #?(:clj (if dev-mode
-                                                       (or dev-principal default-dev-principal)
-                                                       (validate-token jwt token))
-                                                :cljs (or dev-principal default-dev-principal))]
+                             (let [principal (validate (:token msg))]
                                (if principal
                                  (do
                                    (reset! principal-atom principal)
+                                   (watch-expiry! principal)
                                    (invoke-callback! :validate-auth-callback-failed on-auth principal)
                                    (info {:event :auth-success :email (:email principal)})
                                    (>! out {:type auth-ok-msg-type :principal principal}))
@@ -129,30 +187,31 @@
 
                 ;; Refresh authentication
                              (= msg-type auth-refresh-msg-type)
-                             (let [token (:token msg)
-                                   principal #?(:clj (if dev-mode
-                                                       (or dev-principal default-dev-principal)
-                                                       (validate-token jwt token))
-                                                :cljs (or dev-principal default-dev-principal))]
+                             (let [principal (validate (:token msg))]
                                (if principal
                                  (do
                                    (reset! principal-atom principal)
+                                   (watch-expiry! principal)
+                                   (invoke-callback! :validate-refresh-callback-failed on-refresh principal)
                                    (info {:event :auth-refresh-success :email (:email principal)})
-                                   (>! out {:type auth-ok-msg-type}))
+                                   (>! out {:type auth-ok-msg-type :principal principal}))
                                  (do
                                    (warn {:event :auth-refresh-failed})
                                    (>! out {:type auth-error-msg-type
                                             :error "invalid-token"
                                             :message "Token is invalid or expired"}))))
 
-                ;; Regular message - add principal if authenticated
+                ;; Regular message - the principal is ours to say, never the
+                ;; remote's: stamp it when authenticated, strip it otherwise.
                              :else
                              (let [current-principal @principal-atom]
                                (>! new-in (if current-principal
                                             (assoc msg :kabel/principal current-principal)
-                                            msg)))))
+                                            (dissoc msg :kabel/principal))))))
                          (recur (<? S in)))
                        (do
+                         (when-let [cancel @expiry-cancel]
+                           (close! cancel))
                          (close! new-in)
                          (close! new-out)
                          (close! out))))
@@ -175,6 +234,65 @@
 ;; Outbound Authentication (authenticate TO peer)
 ;; =============================================================================
 
+#?(:cljs
+   (defn- promise->chan [p]
+     (let [ch (promise-chan)]
+       (.then p
+              (fn [v] (put! ch (if (nil? v) ::nil v)))
+              (fn [e] (put! ch (if (instance? js/Error e) e (ex-info (str e) {:error e})))))
+       ch)))
+
+(defn resolve-token
+  "The token to send now. `token` is a string, an atom (or anything
+   dereferenceable), or a function of no arguments returning a string, a
+   channel yielding one, or in ClojureScript a promise of one. Yields the
+   string, or an exception."
+  [S token]
+  (go-try S
+          (let [t (cond
+                    (string? token) token
+                    (nil? token) nil
+                    (fn? token) (token)
+                    :else @token)
+                t #?(:cljs (if (instance? js/Promise t) (promise->chan t) t)
+                     :clj t)
+                t (if (satisfies? async-proto/ReadPort t) (<? S t) t)]
+            (if (= t ::nil) nil t))))
+
+(defn- refresh-in-ms
+  "How long until `token` should be refreshed, or nil when it carries no `exp`."
+  [token before-ms]
+  (when-let [exp (:exp (jwt/claims token))]
+    (max 1000 (- (* 1000 exp) before-ms (now-ms)))))
+
+(defn refresh-token!
+  "Send a new token on `peer`'s current connection and yield the server's
+   answer: the principal it accepted, or an exception. Without `token` the
+   configured token source is read again.
+
+   The server's validator replaces the connection's principal; nothing else
+   about the connection changes."
+  ([peer] (refresh-token! peer nil))
+  ([peer token]
+   (let [{:keys [out source timeout-ms pending S]} (::client @peer)]
+     (go-try S
+             (when-not out
+               (throw (ex-info "Peer has no authenticated connection to refresh"
+                               {:type :kabel.auth/not-connected})))
+             (let [t (<? S (resolve-token S (or token source)))
+                   reply (promise-chan)]
+               (reset! pending reply)
+               (put? S out {:type auth-refresh-msg-type :token t})
+               (let [[v port] (alts! [reply (timeout timeout-ms)])]
+                 (cond
+                   (not= port reply)
+                   (throw (ex-info "Token refresh timed out"
+                                   {:type :kabel.auth/refresh-timeout :timeout-ms timeout-ms}))
+                   (= auth-error-msg-type (:type v))
+                   (throw (ex-info (or (:message v) "Token refresh rejected")
+                                   (assoc v :type :kabel.auth/refresh-rejected)))
+                   :else (:principal v))))))))
+
 (defn authenticate-middleware
   "Kabel middleware that authenticates TO a remote peer.
 
@@ -187,21 +305,31 @@
    Uses lexical scope for in/out channels - no global state needed.
 
    Options:
-     :token - Authentication token (required in production, default: \"dev-token\")
-     :on-auth - Optional callback (fn [principal]) on successful auth
-     :on-error - Optional callback (fn [error]) on auth failure
+     :token - The token to send: a string, an atom, or a function returning a
+              string, a channel or (ClojureScript) a promise. A function or
+              atom is read at every connection, so a reconnection carries the
+              current token. Required in production, default: \"dev-token\".
+     :on-auth - Optional callback (fn [principal]) on successful auth or refresh
+     :on-error - Optional callback (fn [error]) on auth failure, a rejected
+                 refresh, or the server reporting the token expired
      :timeout-ms - Maximum handshake duration (default: 10000)
      :pending-limit - Maximum buffered frames per direction (default: 1000)
+     :auto-refresh? - When the token is a JWT with `exp` and comes from a
+                      function or atom, read it again and refresh on the live
+                      connection `:refresh-before-ms` (default 60000) before
+                      expiry. Default true.
 
    Usage:
      (peer/client-peer S client-id
        (comp other-middleware
-             (ws-auth/authenticate-middleware {:token \"my-jwt-token\"}))
+             (ws-auth/authenticate-middleware {:token (fn [] (session-token))}))
        serialization-middleware)"
-  [{:keys [token on-auth on-error timeout-ms pending-limit] :as opts
+  [{:keys [token on-auth on-error timeout-ms pending-limit auto-refresh? refresh-before-ms] :as opts
     :or {token "dev-token"
          timeout-ms default-auth-timeout-ms
-         pending-limit default-auth-pending-limit}}]
+         pending-limit default-auth-pending-limit
+         auto-refresh? true
+         refresh-before-ms default-refresh-before-ms}}]
   (fn [[S peer [in out]]]
     (let [new-in (chan 1000)
           new-out (chan 1000)
@@ -209,6 +337,8 @@
           auth-deadline (timeout timeout-ms)
           bidirectional? (::bidirectional? opts)
           settlement (atom nil)
+          pending-refresh (atom nil)
+          closed (promise-chan)
           fail! (fn [error]
                   (let [won? (compare-and-set! settlement nil :rejected)]
                     (when won?
@@ -219,16 +349,54 @@
                       (close! in)
                       (close! out)
                       (invoke-callback! :client-auth-error-callback-failed on-error error))
-                    won?))]
+                    won?))
+          answer-refresh! (fn [msg]
+                            (if-let [reply @pending-refresh]
+                              (do (reset! pending-refresh nil)
+                                  (put! reply msg))
+                              (when (= auth-error-msg-type (:type msg))
+                                (warn {:event :client-auth-error :error (:error msg)})))
+                            (when (= auth-error-msg-type (:type msg))
+                              (invoke-callback! :client-auth-error-callback-failed on-error msg))
+                            (when (and (= auth-ok-msg-type (:type msg)) (:principal msg))
+                              (invoke-callback! :client-auth-callback-failed on-auth (:principal msg))))
+          auto-refresh! (fn auto-refresh! [current]
+                          (when-let [wait (and auto-refresh?
+                                               (not (string? token))
+                                               (refresh-in-ms current refresh-before-ms))]
+                            (go (let [[_ port] (alts! [closed (timeout wait)])]
+                                  (when (not= port closed)
+                                    (let [next (try (<? S (resolve-token S token))
+                                                    (catch #?(:clj Throwable :cljs :default) e e))]
+                                      (if (string? next)
+                                        (let [r (try (<? S (refresh-token! peer next))
+                                                     (catch #?(:clj Throwable :cljs :default) e e))]
+                                          (if (instance? #?(:clj Throwable :cljs js/Error) r)
+                                            (warn {:event :auto-refresh-failed :error (ex-message r)})
+                                            (auto-refresh! next)))
+                                        (warn {:event :auto-refresh-no-token
+                                               :error (some-> next ex-message)}))))))))]
+      (when peer
+        (swap! peer assoc ::client {:out out :source token :timeout-ms timeout-ms
+                                    :pending pending-refresh :S S}))
       ;; Send auth immediately, but make the write itself part of the bounded
       ;; handshake. A transport whose output is never consumed must not park us
       ;; before we can observe the deadline.
       (go-try S
-              (let [[written? port]
-                    (alts! [auth-deadline
-                            [out {:type auth-msg-type :token token}]]
-                           :priority true)]
+              (let [current (try (<? S (resolve-token S token))
+                                 (catch #?(:clj Throwable :cljs :default) e e))
+                    [written? port]
+                    (if (string? current)
+                      (alts! [auth-deadline
+                              [out {:type auth-msg-type :token current}]]
+                             :priority true)
+                      [::no-token nil])]
                 (cond
+                  (= written? ::no-token)
+                  (fail! {:type auth-error-msg-type
+                          :error "no-token"
+                          :message (or (some-> current ex-message) "Token source returned no token")})
+
                   (= port auth-deadline)
                   (fail! {:type auth-error-msg-type
                           :error "auth-timeout"
@@ -265,14 +433,25 @@
                               (info {:event :client-auth-success :email (get-in msg [:principal :email])})
                               (>! auth-ready :authenticated)
                               (invoke-callback! :client-auth-callback-failed on-auth (:principal msg))
+                              (when peer
+                                (peer/status! peer :authenticated :principal (:principal msg)))
+                              (auto-refresh! current)
                               (doseq [pending-msg pending]
                                 (>! new-in pending-msg))
                               (loop []
                                 (if-let [next-msg (<? S in)]
                                   (do
-                                    (>! new-in next-msg)
+                                    ;; Auth answers after the handshake are
+                                    ;; replies to a refresh, or the server
+                                    ;; reporting expiry: protocol, not traffic.
+                                    (if (contains? #{auth-ok-msg-type auth-error-msg-type} (:type next-msg))
+                                      (answer-refresh! next-msg)
+                                      (>! new-in next-msg))
                                     (recur))
                                   (do
+                                    (close! closed)
+                                    (when peer
+                                      (swap! peer update ::client #(when (not= out (:out %)) %)))
                                     (close! new-in)
                                     (close! new-out)
                                     (close! out)))))
@@ -373,7 +552,8 @@
 
    Options:
      :authenticate - Prove MY identity to the remote peer (send auth)
-       :token - JWT or dev token to send
+       :token - JWT or dev token to send: a string, an atom or a function,
+                see `authenticate-middleware`
        :on-auth - Callback (fn [principal]) when remote accepts my auth
        :on-error - Callback (fn [error]) on auth failure
 
@@ -382,6 +562,7 @@
        :dev-mode - Skip token validation (default false)
        :dev-principal - Principal for dev mode
        :on-auth - Callback (fn [principal]) on successful validation
+       :on-expiry - :close (default), :anonymous or :ignore, see `validate-middleware`
 
      :permissive - When true, explicitly allow not validating incoming messages.
                    Required when using :authenticate without :validate.

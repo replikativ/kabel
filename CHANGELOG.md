@@ -5,10 +5,12 @@
    keep: it runs inside a go block and must not block — a synchronous
    database call there holds one of the dispatch pool's few threads, and a
    handful of them in flight deadlock the process — so blocking work goes on
-   `clojure.core.async/thread`. `serve` takes `:blocking-handlers? true` for a
-   host that knowingly serves blocking functions and wants each invocation on
-   its own thread; it is not the default, since a thread per invocation has
-   no bound and hides the mistake.
+   `clojure.core.async/thread`, whose channel the function returns.
+ - The `:blocking-handlers?` option of `serve`, released for a few hours in
+   0.3.131, is gone again before anyone could depend on it: a thread per
+   invocation has no bound and stops working under load, and an option that
+   makes a blocking handler look fine contradicts the contract above. Nothing
+   in the stack used it.
  - `kabel.pubsub/unsubscribe!` is idempotent: a topic whose cancellation is
    already in flight is not asked for again — the caller settles with the
    request in flight — and a topic with no subscription is already done. A

@@ -233,8 +233,9 @@ are specified in [doc/remote-invocation.md](doc/remote-invocation.md).
                                    (some? principal))})
 
 ;; the calling side
-(<?? S (remote/connect S client url))                        ;; => server-id
-(<?? S (remote/invoke client server-id 'my.app/add {:a 1 :b 2})) ;; => 3
+(go-try S
+  (<? S (remote/connect S client url))                            ;; => server-id
+  (<? S (remote/invoke client server-id 'my.app/add {:a 1 :b 2}))) ;; => 3
 ```
 
 A function returns a value or a channel yielding one. It receives the
@@ -430,7 +431,8 @@ and validates the other side's. Tokens expire, so:
    :permissive true})
 
 ;; refresh on the live connection, explicitly
-(<?? S (auth/refresh-token! client new-token))            ;; => the accepted principal
+(go-try S
+  (<? S (auth/refresh-token! client new-token)))          ;; => the accepted principal
 
 ;; server
 (auth/auth-middleware

@@ -206,3 +206,16 @@
                      :scope (:id @b) :request-scope old-id :request-id 2
                      :fn-name 'kabel.remote-test/missing :arg-map {}})
          (is (string? (:error (<! from-b)))))))))
+
+#?(:clj
+   (deftest blocking-handlers-on-request-test
+     (testing "with :blocking-handlers? a served function may block, on its own thread"
+       (remote/register! 'kabel.remote-test/blocking
+                         (fn [_] (Thread/sleep 50) (.getName (Thread/currentThread))))
+       (let [{:keys [a b]} (pair {:blocking-handlers? true})]
+         (run-async
+          (<? S (wait-for-ready a b))
+          (let [thread-name (<? S (remote/invoke a (:id @b) 'kabel.remote-test/blocking {}))]
+            (is (string? thread-name))
+            (is (not (re-find #"async-dispatch" thread-name))
+                "not one of the go dispatch pool's threads")))))))

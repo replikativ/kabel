@@ -87,7 +87,13 @@
   "Register `f` under `fn-name`, a namespaced symbol or a string. `f` receives
    the argument map, with the caller's principal under `:kabel/principal` when
    the connection is authenticated, and returns a value or a channel yielding
-   one. An exception, thrown or yielded, is reported to the caller as an error."
+   one. An exception, thrown or yielded, is reported to the caller as an error.
+
+   `f` runs inside a go block and must not block: a synchronous database
+   call, a socket read or a `<!!` there holds one of the dispatch pool's few
+   threads, and a handful of them in flight deadlock the process. Work that
+   has to block goes on `clojure.core.async/thread`, whose channel `f`
+   returns."
   [fn-name f]
   (swap! functions assoc fn-name f)
   fn-name)
@@ -274,6 +280,12 @@
    A denied call without a principal fails with `:kabel.remote/authentication-required`,
    one with a principal with `:kabel.remote/not-authorized`. The handler never runs.
 
+   `:blocking-handlers? true` runs every invocation on its own thread on the
+   JVM instead of a go block, for a host that knowingly serves functions
+   which block. It is a deliberate choice, not the default: a thread per
+   invocation has no bound, and it hides a blocking handler instead of
+   surfacing it.
+
    Serving ends with `:stop!` or when the peer's supervisor aborts; neither is
    an error. Returns `{:stop! (fn []) :done ch}`, `:done` closing once serving
    has ended."
@@ -283,6 +295,7 @@
          gate (authz/gate opts {:op :invoke
                                 :legacy-keys [:authorize-fn]
                                 :legacy-adapter legacy-gate})
+         blocking? (:blocking-handlers? opts)
          [_ bus-out] (get-in @peer [:volatile :chans])
          invoke-ch (chan 1000)
          done (promise-chan)
@@ -331,24 +344,30 @@
                              (assoc :error (error-info res fn-name))
                              (not (throwable? res))
                              (assoc :result res)))]
-             ;; On the JVM every invocation runs on its own thread: a function
-             ;; may block (a database call, a socket) without holding one of
-             ;; the go dispatch pool's few threads, which is how a handful of
-             ;; blocking handlers deadlock a whole process.
-             #?(:clj
-                (async/thread
-                  (let [res (if (= decision ::call)
-                              (try (<?? S (call S fn-name args))
-                                   (catch Throwable e e))
-                              decision)]
-                    (async/>!! reply-out (respond res))))
-                :cljs
-                (async/go
-                  (let [res (if (= decision ::call)
-                              (try (<? S (call S fn-name args))
-                                   (catch :default e e))
-                              decision)]
-                    (async/>! reply-out (respond res)))))))
+             ;; A go block, as the contract on `register!` says: a function
+             ;; must not block here. The thread executor is the host's
+             ;; explicit choice for functions that do.
+             (if #?(:clj blocking? :cljs false)
+               #?(:clj
+                  (async/thread
+                    ;; The function itself runs on this thread; `call` would
+                    ;; put it back on the dispatch pool.
+                    (let [res (if (= decision ::call)
+                                (try (if-let [f (lookup fn-name)]
+                                       (let [v (f args)]
+                                         (if (channel? v) (<?? S v) v))
+                                       (throw (ex-info "Remote function not found"
+                                                       {:type ::unknown-function :fn-name fn-name})))
+                                     (catch Throwable e e))
+                                decision)]
+                      (async/>!! reply-out (respond res))))
+                  :cljs nil)
+               (async/go
+                 (let [res (if (= decision ::call)
+                             (try (<? S (call S fn-name args))
+                                  (catch #?(:clj Throwable :cljs :default) e e))
+                             decision)]
+                   (async/>! reply-out (respond res)))))))
          (recur (async/<! invoke-ch))))
      {:stop! stop! :done done})))
 

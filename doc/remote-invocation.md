@@ -54,9 +54,10 @@ Field types:
    function ran.
 
 Invocations are concurrent: a server MAY run several at once and MAY answer
-them out of order. The requester correlates by `:request-id`. The reference
-implementation runs each invocation on its own thread on the JVM, so a served
-function may block; in ClojureScript it runs on the event loop and must not.
+them out of order. The requester correlates by `:request-id`. A served
+function must not block the thread it is invoked on: in the reference
+implementation it runs inside a core.async go block, and blocking work is
+offloaded to a thread whose channel the function returns.
 
 ## 4. Errors
 

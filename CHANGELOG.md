@@ -1,6 +1,9 @@
 # Change Log
 
 ## Unreleased
+ - `kabel.remote/serve` ends quietly when its peer's supervisor aborts instead
+   of reporting the abort as an error, returns `:done` next to `:stop!`, and
+   answers an invoke that reached the bus without a dialect in the kabel one.
  - **Connection transport boundary.** `client-peer` and `server-peer` accept an
    optional `:transport-middleware` outside serialization, suitable for an
    authenticated Noise upgrade without changing application middleware or

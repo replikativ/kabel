@@ -1,6 +1,12 @@
 # Change Log
 
 ## Unreleased
+ - An authorization predicate (`:authorize` on `kabel.remote/serve` and on
+   the pub/sub middleware) may return a core.async channel instead of a
+   boolean; the gate takes the decision from it. A policy that consults
+   storage — a permission graph in a database — decides on a thread and hands
+   back its channel, keeping that work off the go dispatch pool.
+   `kabel.authorize/decision` gives any layer a channel to take from.
  - `kabel.remote/register!` states the contract a served function has to
    keep: it runs inside a go block and must not block — a synchronous
    database call there holds one of the dispatch pool's few threads, and a

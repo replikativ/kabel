@@ -219,3 +219,16 @@
             (is (string? thread-name))
             (is (not (re-find #"async-dispatch" thread-name))
                 "the blocking part never ran on the go dispatch pool")))))))
+
+(deftest gate-may-decide-on-a-channel-test
+  (remote/register! 'kabel.remote-test/whoami (fn [{:keys [:kabel/principal]}] (:sub principal)))
+  (testing "a gate that answers with a channel is awaited, allow and deny alike"
+    (let [{:keys [a b]} (pair {:principal {:sub "alice"}
+                               :authorize (fn [{:keys [fn-name]}]
+                                            (go (<! (timeout 10))
+                                                (= 'kabel.remote-test/whoami fn-name)))})]
+      (run-async
+       (<? S (wait-for-ready a b))
+       (is (= "alice" (<? S (remote/invoke a (:id @b) 'kabel.remote-test/whoami {}))))
+       (let [e (<! (caught (remote/invoke a (:id @b) 'kabel.remote-test/add {:x 1 :y 2})))]
+         (is (= ::remote/not-authorized (:type (ex-data e)))))))))

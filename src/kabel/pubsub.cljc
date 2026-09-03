@@ -907,13 +907,24 @@
 ;; =============================================================================
 
 (defn- estimated-frame-bytes
-  "Use a codec-provided encoded size when available. Legacy codecs do not yet
-  annotate decoded frames, so conservatively upper-bound their printed form.
-  Wire-profile v1 requires the transport to supply the exact encoded size
-  before decode/allocation."
+  "Use a codec-provided encoded size when available: the CBOR codec records it
+  as `:kabel/encoded-bytes` in the decoded frame's METADATA, never as a key a
+  peer could forge or a relay could leak. Legacy codecs do not annotate, so
+  their frames are upper-bounded by their printed form. Printing is the
+  application's code and may fail — a Datahike index node loads children from
+  storage when printed — and a failed estimate must never take the receive
+  lane down with it, so it counts as zero and is logged. Wire-profile v1
+  requires the transport to supply the exact encoded size before
+  decode/allocation."
   [msg]
-  (or (:kabel/encoded-bytes msg)
-      (* 4 (count (pr-str msg)))))
+  (or (:kabel/encoded-bytes (meta msg))
+      (:kabel/encoded-bytes msg)
+      (try
+        (* 4 (count (pr-str msg)))
+        (catch #?(:clj Throwable :cljs :default) e
+          (log/debug :pubsub/frame-size-estimate-failed
+                     {:type (:type msg) :error (ex-message e)})
+          0))))
 
 (defn- explicit-success?
   [result]
@@ -1296,6 +1307,12 @@
                     (remove-subscriber! peer topic out))
                   (doseq [[topic sub-state] (subscriptions peer)]
                     (when (= out (:out sub-state))
+                      (when-not (:handshake-complete? sub-state)
+                        ;; The subscriber's completion callback will never
+                        ;; fire; say so, since a silent removal looks exactly
+                        ;; like a slow handshake from the outside.
+                        (log/warn :pubsub/subscription-retired-before-ready
+                                  {:topic topic :reason reason}))
                       (remove-subscription! peer topic)))
                   (close! subscribe-ch)
                   (close! unsubscribe-ch)

@@ -762,3 +762,22 @@
                         {:op :publish :legacy-keys []
                          :legacy-adapter authz/pubsub-legacy})]
       (is (true? (g {:topic :t}))))))
+
+;; =============================================================================
+;; Frame size estimates
+;; =============================================================================
+
+(deftype Unprintable []
+  #?@(:clj [] :cljs [IPrintWithWriter (-pr-writer [_ _ _] (throw (ex-info "cannot print" {})))]))
+
+#?(:clj (defmethod print-method Unprintable [_ _] (throw (ex-info "cannot print" {}))))
+
+(deftest estimated-frame-bytes-test
+  (let [estimate #'pubsub/estimated-frame-bytes]
+    (testing "the codec's exact size travels in metadata and wins"
+      (is (= 689 (estimate (with-meta {:type :pubsub/handshake-data :data (range 1000)}
+                             {:kabel/encoded-bytes 689})))))
+    (testing "a legacy frame is bounded by its printed form"
+      (is (pos? (estimate {:type :pubsub/publish :payload [1 2 3]}))))
+    (testing "a frame whose value cannot be printed does not throw, and counts as nothing"
+      (is (= 0 (estimate {:type :pubsub/handshake-data :data {:value (Unprintable.)}}))))))

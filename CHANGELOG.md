@@ -1,6 +1,17 @@
 # Change Log
 
 ## Unreleased
+ - **Fix: pub/sub read the decoded frame size from the wrong place.** The CBOR
+   codec records `:kabel/encoded-bytes` in the decoded frame's metadata; the
+   subscription lifecycle looked for a map key, found nothing, and estimated
+   every frame by printing it. Printing is application code: a Datahike index
+   head loads children from storage when printed and threw, which killed the
+   receive lane, so the batch was never acknowledged and the server retired
+   the connection after 30 s. Since 0.3.113 every Datahike client handshake
+   over CBOR hung this way. The estimate now reads the metadata, and a failed
+   fallback estimate counts as zero instead of taking the lane down. A
+   connection retired with handshakes still pending now logs a warning, since
+   the subscriber's completion callback will never fire.
  - `kabel.remote/serve` ends quietly when its peer's supervisor aborts instead
    of reporting the abort as an error, returns `:done` next to `:stop!`, and
    answers an invoke that reached the bus without a dialect in the kabel one.

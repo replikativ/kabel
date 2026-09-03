@@ -208,14 +208,14 @@
          (is (string? (:error (<! from-b)))))))))
 
 #?(:clj
-   (deftest blocking-handlers-on-request-test
-     (testing "with :blocking-handlers? a served function may block, on its own thread"
-       (remote/register! 'kabel.remote-test/blocking
-                         (fn [_] (Thread/sleep 50) (.getName (Thread/currentThread))))
-       (let [{:keys [a b]} (pair {:blocking-handlers? true})]
+   (deftest blocking-work-goes-on-a-thread-test
+     (testing "a function that has to block offloads to a thread and returns its channel"
+       (remote/register! 'kabel.remote-test/offloaded
+                         (fn [_] (async/thread (Thread/sleep 50) (.getName (Thread/currentThread)))))
+       (let [{:keys [a b]} (pair)]
          (run-async
           (<? S (wait-for-ready a b))
-          (let [thread-name (<? S (remote/invoke a (:id @b) 'kabel.remote-test/blocking {}))]
+          (let [thread-name (<? S (remote/invoke a (:id @b) 'kabel.remote-test/offloaded {}))]
             (is (string? thread-name))
             (is (not (re-find #"async-dispatch" thread-name))
-                "not one of the go dispatch pool's threads")))))))
+                "the blocking part never ran on the go dispatch pool")))))))

@@ -40,7 +40,7 @@
             [kabel.peer :as peer]
             [hasch.core :refer [uuid]]
             [replikativ.logging :as log]
-            #?(:clj [superv.async :as superv :refer [<? <?? >? put? go-try go-loop-super go-super]]
+            #?(:clj [superv.async :as superv :refer [<? >? put? go-try go-loop-super go-super]]
                :cljs [superv.async :as superv :refer [put?]])
             #?(:clj [clojure.core.async :as async
                      :refer [chan promise-chan put! close! sub unsub timeout alts!]]
@@ -280,12 +280,6 @@
    A denied call without a principal fails with `:kabel.remote/authentication-required`,
    one with a principal with `:kabel.remote/not-authorized`. The handler never runs.
 
-   `:blocking-handlers? true` runs every invocation on its own thread on the
-   JVM instead of a go block, for a host that knowingly serves functions
-   which block. It is a deliberate choice, not the default: a thread per
-   invocation has no bound, and it hides a blocking handler instead of
-   surfacing it.
-
    Serving ends with `:stop!` or when the peer's supervisor aborts; neither is
    an error. Returns `{:stop! (fn []) :done ch}`, `:done` closing once serving
    has ended."
@@ -295,7 +289,6 @@
          gate (authz/gate opts {:op :invoke
                                 :legacy-keys [:authorize-fn]
                                 :legacy-adapter legacy-gate})
-         blocking? (:blocking-handlers? opts)
          [_ bus-out] (get-in @peer [:volatile :chans])
          invoke-ch (chan 1000)
          done (promise-chan)
@@ -345,29 +338,14 @@
                              (not (throwable? res))
                              (assoc :result res)))]
              ;; A go block, as the contract on `register!` says: a function
-             ;; must not block here. The thread executor is the host's
-             ;; explicit choice for functions that do.
-             (if #?(:clj blocking? :cljs false)
-               #?(:clj
-                  (async/thread
-                    ;; The function itself runs on this thread; `call` would
-                    ;; put it back on the dispatch pool.
-                    (let [res (if (= decision ::call)
-                                (try (if-let [f (lookup fn-name)]
-                                       (let [v (f args)]
-                                         (if (channel? v) (<?? S v) v))
-                                       (throw (ex-info "Remote function not found"
-                                                       {:type ::unknown-function :fn-name fn-name})))
-                                     (catch Throwable e e))
-                                decision)]
-                      (async/>!! reply-out (respond res))))
-                  :cljs nil)
-               (async/go
-                 (let [res (if (= decision ::call)
-                             (try (<? S (call S fn-name args))
-                                  (catch #?(:clj Throwable :cljs :default) e e))
-                             decision)]
-                   (async/>! reply-out (respond res)))))))
+             ;; must not block here; one that has to offloads to a thread and
+             ;; returns its channel.
+             (async/go
+               (let [res (if (= decision ::call)
+                           (try (<? S (call S fn-name args))
+                                (catch #?(:clj Throwable :cljs :default) e e))
+                           decision)]
+                 (async/>! reply-out (respond res))))))
          (recur (async/<! invoke-ch))))
      {:stop! stop! :done done})))
 

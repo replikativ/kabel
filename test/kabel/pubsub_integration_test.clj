@@ -478,3 +478,22 @@
         ;; All 50 should be received
         (is (= 50 (count @client-received)))
         (is (= (set (range 50)) (set (map :id @client-received))))))))
+
+(deftest unsubscribe-is-idempotent-test
+  (testing "a second unsubscribe while the first drains settles with it; an unknown topic is already done"
+    (with-peers
+      (let [server-strategy (make-stateful-strategy {:a 1 :b 2})
+            _ (pubsub/register-topic! *server-peer* :idem-topic {:strategy server-strategy})
+            client-strategy (make-stateful-strategy {})]
+        (<?? S (pubsub/subscribe! *client-peer* #{:idem-topic}
+                                  {:strategies {:idem-topic client-strategy}}))
+        (<?? S (timeout 500))
+        (let [first-ch (pubsub/unsubscribe! *client-peer* #{:idem-topic})
+              second-ch (pubsub/unsubscribe! *client-peer* #{:idem-topic})
+              settle (fn [ch] (let [[v port] (clojure.core.async/alts!! [ch (timeout 3000)])]
+                                (if (= port ch) v :timeout)))]
+          (is (= {:ok true} (settle first-ch)) "the request in flight settles")
+          (is (= {:ok true} (settle second-ch)) "the second caller settles with it, not after a second frame")
+          (is (nil? (pubsub/subscription *client-peer* :idem-topic)))
+          (is (= {:ok true} (settle (pubsub/unsubscribe! *client-peer* #{:idem-topic})))
+              "a topic with no subscription is already done"))))))

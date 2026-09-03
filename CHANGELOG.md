@@ -1,6 +1,13 @@
 # Change Log
 
 ## Unreleased
+ - `kabel.pubsub/unsubscribe!` is idempotent: a topic whose cancellation is
+   already in flight is not asked for again — the caller settles with the
+   request in flight — and a topic with no subscription is already done. A
+   second unsubscribe used to send a second request the server never
+   answers, leaving the caller waiting forever; consumers that release a
+   subscription from two places (a connection's shutdown and its owner) no
+   longer have to coordinate.
  - **Fix: pub/sub read the decoded frame size from the wrong place.** The CBOR
    codec records `:kabel/encoded-bytes` in the decoded frame's metadata; the
    subscription lifecycle looked for a map key, found nothing, and estimated

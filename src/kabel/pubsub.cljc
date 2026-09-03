@@ -833,17 +833,49 @@
   `:out` selects the connection, matching `direct-subscribe!`. When omitted,
   the connection recorded by the active subscription is preferred over the
   historical peer-wide `:out` slot. The result settles only after the remote
-  drain marker has passed all earlier topic frames."
+  drain marker has passed all earlier topic frames.
+
+  Idempotent: a topic whose cancellation is already under way is not asked
+  for again — the result attaches to the request in flight — and a topic
+  with no subscription is already done. A second caller therefore settles
+  when the first one does, instead of waiting for an answer the server never
+  sends twice."
   [peer topics {:keys [out]}]
   (let [pubsub-state (get-pubsub-state peer)
-        remembered-outs (into #{} (keep #(get-in pubsub-state
-                                                 [:subscriptions % :out]))
-                              topics)
+        subs (:subscriptions pubsub-state)
+        cancelling (into #{} (filter #(get-in subs [% :cancelling?])) topics)
+        active (into #{} (filter #(and (contains? subs %) (not (cancelling %)))) topics)
+        remembered-outs (into #{} (keep #(get-in subs [% :out])) active)
         out (or out
                 (when (= 1 (count remembered-outs)) (first remembered-outs))
                 (:out pubsub-state))
-        pending (get-in pubsub-state [:unsubscribe-state :pending])]
-    (if (and out pending)
+        pending (get-in pubsub-state [:unsubscribe-state :pending])
+        done (fn [v] (doto (chan 1) (async/offer! v) close!))]
+    (cond
+      ;; Nothing left to ask for: every topic is gone, or a request for it is
+      ;; already in flight. Attach to those requests.
+      (and pending (empty? active))
+      (let [attached (volatile! [])]
+        (swap! pending
+               (fn [requests]
+                 (reduce-kv (fn [requests id {:keys [remaining] :as request}]
+                              (if (some cancelling remaining)
+                                (let [w (chan 1)]
+                                  (vswap! attached conj w)
+                                  (assoc requests id (update request :waiters (fnil conj []) w)))
+                                requests))
+                            requests
+                            requests)))
+        (if (empty? @attached)
+          (done {:ok true})
+          (let [{{S :supervisor} :volatile} @peer]
+            (go-try S
+                    (loop [ws (seq @attached)]
+                      (if-let [w (first ws)]
+                        (do (<! w) (recur (next ws)))
+                        {:ok true}))))))
+
+      (and out pending)
       (let [id (random-uuid)
             result-ch (chan 1)]
         ;; Mark cancellation before the wire request. Snapshot effects already
@@ -852,37 +884,38 @@
          peer
          (fn [state]
            (reduce (fn [state topic]
-                     (if (contains? (:subscriptions state) topic)
-                       (assoc-in state [:subscriptions topic :cancelling?] true)
-                       state))
+                     (assoc-in state [:subscriptions topic :cancelling?] true))
                    state
-                   topics)))
+                   active)))
         (swap! pending assoc id {:channel result-ch
-                                 :remaining topics
+                                 :remaining active
                                  :generations
                                  (into {} (map (fn [topic]
                                                  [topic (:generation
                                                          (subscription peer topic))])
-                                               topics))})
-        (async/put! out (proto/unsubscribe-msg id topics)
+                                               active))})
+        (async/put! out (proto/unsubscribe-msg id active)
                     (fn [delivered?]
                       (when-not delivered?
-                        (when-let [{:keys [channel]} (get @pending id)]
+                        (when-let [{:keys [channel waiters]} (get @pending id)]
                           (swap! pending dissoc id)
-                          (async/offer! channel
-                                        {:error (ex-info "Unsubscribe was not delivered"
-                                                         {:topics topics})})
-                          (close! channel)))))
+                          (let [error {:error (ex-info "Unsubscribe was not delivered"
+                                                       {:topics active})}]
+                            (async/offer! channel error)
+                            (close! channel)
+                            (doseq [w waiters]
+                              (async/offer! w error)
+                              (close! w)))))))
         result-ch)
+
       ;; Compatibility for peers constructed without middleware (and server
       ;; peers, which have no client-side `out`). There is no remote session to
       ;; drain in this case.
-      (let [result-ch (chan 1)]
+      :else
+      (do
         (doseq [topic topics]
           (remove-subscription! peer topic))
-        (async/offer! result-ch {:ok true})
-        (close! result-ch)
-        result-ch))))
+        (done {:ok true})))))
 
 (defn unsubscribe!
   "Unsubscribe from topics and await the remote drain marker.
@@ -1042,9 +1075,14 @@
                      (assoc requests id (assoc request :remaining remaining))))
                  requests)))
       (remove-subscription! peer topic generation)
-      (when-let [{:keys [channel]} @completed]
+      (when-let [{:keys [channel waiters]} @completed]
         (async/offer! channel {:ok true})
-        (close! channel)))))
+        (close! channel)
+        ;; Later unsubscribes of the same topics attached here instead of
+        ;; sending a second request; settle them with the same answer.
+        (doseq [w waiters]
+          (async/offer! w {:ok true})
+          (close! w))))))
 
 (defn- invoke-ready-callback
   [callback topic]

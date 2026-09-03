@@ -274,7 +274,9 @@
    A denied call without a principal fails with `:kabel.remote/authentication-required`,
    one with a principal with `:kabel.remote/not-authorized`. The handler never runs.
 
-   Returns `{:stop! (fn [])}`."
+   Serving ends with `:stop!` or when the peer's supervisor aborts; neither is
+   an error. Returns `{:stop! (fn []) :done ch}`, `:done` closing once serving
+   has ended."
   ([peer] (serve peer {}))
   ([peer opts]
    (let [S (get-in @peer [:volatile :supervisor])
@@ -282,54 +284,60 @@
                                 :legacy-keys [:authorize-fn]
                                 :legacy-adapter legacy-gate})
          [_ bus-out] (get-in @peer [:volatile :chans])
-         invoke-ch (chan 1000)]
+         invoke-ch (chan 1000)
+         done (promise-chan)
+         stop! (fn []
+                 (update-state! peer assoc :serving? false)
+                 (unsub bus-out ::invoke invoke-ch)
+                 (close! invoke-ch)
+                 (close! done))]
      (update-state! peer assoc :serving? true)
      (sub bus-out ::invoke invoke-ch)
-     (go-loop-super S [{:keys [fn-name arg-map request-id request-scope scope] :as msg} (<? S invoke-ch)]
-                    (when msg
-                      (let [principal (:kabel/principal msg)
-                            reply-out (::reply-out msg)
-                            dialect (::dialect msg)]
-                        (go-super S
-                                  (let [res (try
-                                              (cond
-                                                (not= scope (:id @peer))
-                                                (ex-info "Invoke addressed to another peer"
-                                                         {:type ::wrong-peer :fn-name fn-name :scope scope})
+     ;; Not a supervised loop: an abort is the signal to stop, not a failure to
+     ;; report. Each invocation is supervised on its own below.
+     (async/go (async/<! (superv/-abort S)) (stop!))
+     (async/go-loop [{:keys [fn-name arg-map request-id request-scope scope] :as msg} (async/<! invoke-ch)]
+       (when msg
+         (let [principal (:kabel/principal msg)
+               reply-out (::reply-out msg)
+               dialect (or (::dialect msg) :kabel)]
+           (async/go
+             (let [res (try
+                         (cond
+                           (not= scope (:id @peer))
+                           (ex-info "Invoke addressed to another peer"
+                                    {:type ::wrong-peer :fn-name fn-name :scope scope})
 
-                                                (not (gate {:principal principal
-                                                            :fn-name fn-name
-                                                            :arg-map arg-map
-                                                            :remote request-scope}))
-                                                (if principal
-                                                  (ex-info "Not authorized"
-                                                           {:type ::not-authorized :fn-name fn-name})
-                                                  (ex-info "Authentication required"
-                                                           {:type ::authentication-required :fn-name fn-name}))
+                           (not (gate {:principal principal
+                                       :fn-name fn-name
+                                       :arg-map arg-map
+                                       :remote request-scope}))
+                           (if principal
+                             (ex-info "Not authorized"
+                                      {:type ::not-authorized :fn-name fn-name})
+                             (ex-info "Authentication required"
+                                      {:type ::authentication-required :fn-name fn-name}))
 
-                                                :else
-                                                (<? S (call S fn-name
-                                                            (cond-> arg-map
-                                                              principal (assoc :kabel/principal principal)))))
-                                              (catch #?(:clj Throwable :cljs :default) e e))
-                                        response (cond-> {:type (wire-type dialect :result)
-                                                          :scope request-scope
-                                                          :request-id request-id}
-                                                   (and (throwable? res) (= dialect :legacy))
-                                                   (assoc :error (pr-str res))
-                                                   (and (throwable? res) (= dialect :kabel))
-                                                   (assoc :error (error-info res fn-name))
-                                                   (not (throwable? res))
-                                                   (assoc :result res))]
-                                    (when (throwable? res)
-                                      (log/debug :kabel.remote/invocation-failed
-                                                 {:fn-name fn-name :type (:type (ex-data res))}))
-                                    (>? S reply-out response))))
-                      (recur (<? S invoke-ch))))
-     {:stop! (fn []
-               (update-state! peer assoc :serving? false)
-               (unsub bus-out ::invoke invoke-ch)
-               (close! invoke-ch))})))
+                           :else
+                           (<? S (call S fn-name
+                                       (cond-> arg-map
+                                         principal (assoc :kabel/principal principal)))))
+                         (catch #?(:clj Throwable :cljs :default) e e))
+                   response (cond-> {:type (wire-type dialect :result)
+                                     :scope request-scope
+                                     :request-id request-id}
+                              (and (throwable? res) (= dialect :legacy))
+                              (assoc :error (pr-str res))
+                              (and (throwable? res) (= dialect :kabel))
+                              (assoc :error (error-info res fn-name))
+                              (not (throwable? res))
+                              (assoc :result res))]
+               (when (throwable? res)
+                 (log/debug :kabel.remote/invocation-failed
+                            {:fn-name fn-name :type (:type (ex-data res))}))
+               (async/>! reply-out response))))
+         (recur (async/<! invoke-ch))))
+     {:stop! stop! :done done})))
 
 ;; =============================================================================
 ;; Invoking

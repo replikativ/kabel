@@ -1,6 +1,10 @@
 # Change Log
 
 ## Unreleased
+ - `kabel.remote/serve` runs each invocation on its own thread on the JVM.
+   A served function may block (a database call, a socket) without holding
+   one of the go dispatch pool's few threads; before, a handful of blocking
+   handlers could deadlock the whole process.
  - `kabel.pubsub/unsubscribe!` is idempotent: a topic whose cancellation is
    already in flight is not asked for again — the caller settles with the
    request in flight — and a topic with no subscription is already done. A

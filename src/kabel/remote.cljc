@@ -40,7 +40,7 @@
             [kabel.peer :as peer]
             [hasch.core :refer [uuid]]
             [replikativ.logging :as log]
-            #?(:clj [superv.async :as superv :refer [<? >? put? go-try go-loop-super go-super]]
+            #?(:clj [superv.async :as superv :refer [<? <?? >? put? go-try go-loop-super go-super]]
                :cljs [superv.async :as superv :refer [put?]])
             #?(:clj [clojure.core.async :as async
                      :refer [chan promise-chan put! close! sub unsub timeout alts!]]
@@ -301,41 +301,54 @@
          (let [principal (:kabel/principal msg)
                reply-out (::reply-out msg)
                dialect (or (::dialect msg) :kabel)]
-           (async/go
-             (let [res (try
-                         (cond
-                           (not= scope (:id @peer))
-                           (ex-info "Invoke addressed to another peer"
-                                    {:type ::wrong-peer :fn-name fn-name :scope scope})
+           (let [decision (cond
+                            (not= scope (:id @peer))
+                            (ex-info "Invoke addressed to another peer"
+                                     {:type ::wrong-peer :fn-name fn-name :scope scope})
 
-                           (not (gate {:principal principal
-                                       :fn-name fn-name
-                                       :arg-map arg-map
-                                       :remote request-scope}))
-                           (if principal
-                             (ex-info "Not authorized"
-                                      {:type ::not-authorized :fn-name fn-name})
-                             (ex-info "Authentication required"
-                                      {:type ::authentication-required :fn-name fn-name}))
+                            (not (gate {:principal principal
+                                        :fn-name fn-name
+                                        :arg-map arg-map
+                                        :remote request-scope}))
+                            (if principal
+                              (ex-info "Not authorized"
+                                       {:type ::not-authorized :fn-name fn-name})
+                              (ex-info "Authentication required"
+                                       {:type ::authentication-required :fn-name fn-name}))
 
-                           :else
-                           (<? S (call S fn-name
-                                       (cond-> arg-map
-                                         principal (assoc :kabel/principal principal)))))
-                         (catch #?(:clj Throwable :cljs :default) e e))
-                   response (cond-> {:type (wire-type dialect :result)
-                                     :scope request-scope
-                                     :request-id request-id}
-                              (and (throwable? res) (= dialect :legacy))
-                              (assoc :error (pr-str res))
-                              (and (throwable? res) (= dialect :kabel))
-                              (assoc :error (error-info res fn-name))
-                              (not (throwable? res))
-                              (assoc :result res))]
-               (when (throwable? res)
-                 (log/debug :kabel.remote/invocation-failed
-                            {:fn-name fn-name :type (:type (ex-data res))}))
-               (async/>! reply-out response))))
+                            :else ::call)
+                 args (cond-> arg-map principal (assoc :kabel/principal principal))
+                 respond (fn [res]
+                           (when (throwable? res)
+                             (log/debug :kabel.remote/invocation-failed
+                                        {:fn-name fn-name :type (:type (ex-data res))}))
+                           (cond-> {:type (wire-type dialect :result)
+                                    :scope request-scope
+                                    :request-id request-id}
+                             (and (throwable? res) (= dialect :legacy))
+                             (assoc :error (pr-str res))
+                             (and (throwable? res) (= dialect :kabel))
+                             (assoc :error (error-info res fn-name))
+                             (not (throwable? res))
+                             (assoc :result res)))]
+             ;; On the JVM every invocation runs on its own thread: a function
+             ;; may block (a database call, a socket) without holding one of
+             ;; the go dispatch pool's few threads, which is how a handful of
+             ;; blocking handlers deadlock a whole process.
+             #?(:clj
+                (async/thread
+                  (let [res (if (= decision ::call)
+                              (try (<?? S (call S fn-name args))
+                                   (catch Throwable e e))
+                              decision)]
+                    (async/>!! reply-out (respond res))))
+                :cljs
+                (async/go
+                  (let [res (if (= decision ::call)
+                              (try (<? S (call S fn-name args))
+                                   (catch :default e e))
+                              decision)]
+                    (async/>! reply-out (respond res)))))))
          (recur (async/<! invoke-ch))))
      {:stop! stop! :done done})))
 

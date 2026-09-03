@@ -1,6 +1,14 @@
 # Change Log
 
 ## Unreleased
+ - `kabel.remote/register!` states the contract a served function has to
+   keep: it runs inside a go block and must not block — a synchronous
+   database call there holds one of the dispatch pool's few threads, and a
+   handful of them in flight deadlock the process — so blocking work goes on
+   `clojure.core.async/thread`. `serve` takes `:blocking-handlers? true` for a
+   host that knowingly serves blocking functions and wants each invocation on
+   its own thread; it is not the default, since a thread per invocation has
+   no bound and hides the mistake.
  - `kabel.pubsub/unsubscribe!` is idempotent: a topic whose cancellation is
    already in flight is not asked for again — the caller settles with the
    request in flight — and a topic with no subscription is already done. A

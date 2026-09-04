@@ -28,9 +28,22 @@
 
   Uses a disjoint range from `kabel.overlay.integration-test` (48300+) and the
   auth integration fixtures (47310-47314), so a full-suite run cannot collide
-  with a server another namespace is still tearing down."
+  with a server another namespace is still tearing down. A port some other
+  process on the machine happens to hold (an outgoing connection's ephemeral
+  port lands in this range now and then) is skipped."
   []
-  (swap! port-counter inc))
+  (loop []
+    (let [port (swap! port-counter inc)]
+      ;; Bind the way http-kit will: every address, no address reuse. With
+      ;; reuse the probe passes on a port an outgoing connection holds, and
+      ;; the server then fails on it.
+      (if (try (with-open [s (java.net.ServerSocket.)]
+                 (.setReuseAddress s false)
+                 (.bind s (java.net.InetSocketAddress. (int port)))
+                 true)
+               (catch java.io.IOException _ false))
+        port
+        (recur)))))
 
 (defmacro with-peers
   "Execute body with server and client peers set up."
@@ -497,3 +510,49 @@
           (is (nil? (pubsub/subscription *client-peer* :idem-topic)))
           (is (= {:ok true} (settle (pubsub/unsubscribe! *client-peer* #{:idem-topic})))
               "a topic with no subscription is already done"))))))
+
+(deftest stale-drain-leaves-a-resubscription-alone-test
+  (testing "a drain frame for a request this side no longer holds does not remove the current subscription"
+    (with-peers
+      (let [server-strategy (make-stateful-strategy {:a 1})
+            _ (pubsub/register-topic! *server-peer* :stale-topic {:strategy server-strategy})
+            client-strategy (make-stateful-strategy {})]
+        (<?? S (pubsub/subscribe! *client-peer* #{:stale-topic}
+                                  {:strategies {:stale-topic client-strategy}}))
+        (<?? S (timeout 300))
+        (let [before (pubsub/subscription *client-peer* :stale-topic)]
+          (is (some? before))
+          (is (nil? (#'pubsub/complete-unsubscribe-topic! *client-peer* (random-uuid) :stale-topic))
+              "an unknown request id is a stale drain")
+          (is (= (:generation before) (:generation (pubsub/subscription *client-peer* :stale-topic)))
+              "the subscription in place is untouched"))))))
+
+(deftest concurrent-unsubscribes-then-resubscribe-test
+  (testing "two callers releasing a topic at the same instant send one request, and a
+            subscription made right after the release completes its handshake"
+    (with-peers
+      (let [server-strategy (make-stateful-strategy {:a 1 :b 2})
+            _ (pubsub/register-topic! *server-peer* :race-topic {:strategy server-strategy})
+            settle (fn [ch] (let [[v port] (clojure.core.async/alts!! [ch (timeout 3000)])]
+                              (if (= port ch) v :timeout)))]
+        (dotimes [_ 5]
+          (<?? S (pubsub/subscribe! *client-peer* #{:race-topic}
+                                    {:strategies {:race-topic (make-stateful-strategy {})}}))
+          (<?? S (timeout 200))
+          (let [pending (get-in (:pubsub @*client-peer*) [:unsubscribe-state :pending])
+                gate (promise)
+                fire (fn [] (future (deref gate) (pubsub/unsubscribe! *client-peer* #{:race-topic})))
+                a (fire) b (fire)
+                _ (deliver gate true)
+                results [(settle @a) (settle @b)]]
+            (is (= [{:ok true} {:ok true}] results))
+            (is (empty? @pending) "no request left in flight")
+            (is (nil? (pubsub/subscription *client-peer* :race-topic)))
+            ;; resubscribe at once: a second drain, if one had been sent, would
+            ;; arrive during this handshake
+            (<?? S (pubsub/subscribe! *client-peer* #{:race-topic}
+                                      {:strategies {:race-topic (make-stateful-strategy {})}}))
+            (<?? S (timeout 300))
+            (is (:handshake-complete? (pubsub/subscription *client-peer* :race-topic))
+                "the new subscription completed its handshake")
+            (is (= {:ok true} (settle (pubsub/unsubscribe! *client-peer* #{:race-topic}))))))))))

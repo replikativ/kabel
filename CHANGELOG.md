@@ -7,6 +7,15 @@
    storage — a permission graph in a database — decides on a thread and hands
    back its channel, keeping that work off the go dispatch pool.
    `kabel.authorize/decision` gives any layer a channel to take from.
+ - The idempotent unsubscribe claims its topics in the same state transition
+   that reads them. Two callers releasing a topic at the same instant (a
+   connection's shutdown and its owner) could each send a wire request; the
+   second drain then arrived while a subscription made since was handshaking,
+   was routed into its lane and removed it, and the handshake failed with
+   "No strategy for snapshot batch". A drain now removes only the
+   subscription of the request it belongs to, pinned to the generation that
+   request recorded, and a lane ignores a drain for a request this side no
+   longer holds.
  - `kabel.remote/register!` states the contract a served function has to
    keep: it runs inside a go block and must not block — a synchronous
    database call there holds one of the dispatch pool's few threads, and a

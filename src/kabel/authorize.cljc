@@ -43,10 +43,40 @@
   `:authorize` is the new option and takes precedence when both are given. New
   code should use it; existing code has no reason to change.
 
+  ## A decision may take time
+
+  A predicate may return a core.async channel instead of a boolean; the layer
+  asking takes the decision from it. That is how a policy that has to consult
+  storage (a permission graph in a database, say) keeps that work off the go
+  dispatch pool: it decides on a thread and hands back the thread's channel.
+  A predicate that answers from memory returns the boolean as before.
+
   There is deliberately no positional variant for layers that have not shipped
   -- a second spelling nobody depends on is a divergence invented rather than
   inherited."
-  (:refer-clojure :exclude [resolve]))
+  (:refer-clojure :exclude [resolve])
+  (:require [clojure.core.async :as async]
+            [clojure.core.async.impl.protocols :as async-proto]))
+
+(defn channel?
+  "Is `x` a core.async channel, i.e. a decision still to be taken?"
+  [x]
+  (satisfies? async-proto/ReadPort x))
+
+(defn- settle
+  "A predicate's answer as the caller receives it: a channel as it is, for the
+   caller to take from; anything else as a boolean."
+  [v]
+  (if (channel? v) v (boolean v)))
+
+(defn decision
+  "A channel yielding the boolean decision behind `v`, whether `v` is a
+   channel or already a boolean, so a caller inside a go block can always
+   take. A channel that closes without a value decides false."
+  [v]
+  (if (channel? v)
+    (async/map boolean [v])
+    (doto (async/promise-chan) (async/put! (boolean v)))))
 
 (defn pubsub-legacy
   "Adapt `kabel.pubsub`'s historical `(fn [principal topic])`."
@@ -69,8 +99,8 @@
   permit-all."
   [opts {:keys [op legacy-keys legacy-adapter]}]
   (if-let [f (:authorize opts)]
-    (fn [ctx] (boolean (f (assoc ctx :op op))))
+    (fn [ctx] (settle (f (assoc ctx :op op))))
     (if-let [legacy (some #(get opts %) legacy-keys)]
       (let [adapted (legacy-adapter legacy)]
-        (fn [ctx] (boolean (adapted ctx))))
+        (fn [ctx] (settle (adapted ctx))))
       (constantly true))))

@@ -515,8 +515,8 @@
                   topic-config (get-topic-config peer topic)
                   sub-state (get-in (get-pubsub-state peer) [:subscriptions topic])
                   strategy (or (:strategy topic-config) (:strategy sub-state))]
-              (if-not (authorize-publish-fn {:principal principal :topic topic
-                                             :payload payload})
+              (if-not (<! (authz/decision (authorize-publish-fn {:principal principal :topic topic
+                                                                 :payload payload})))
                 (do
                   (log/warn :pubsub/publish-denied {:topic topic})
                   (>? S out {:type :pubsub/error
@@ -620,7 +620,7 @@
                      {:error error})
 
           ;; Registered, but the subject may not subscribe
-                   (not (authorize-fn {:principal principal :topic topic}))
+                   (not (<! (authz/decision (authorize-fn {:principal principal :topic topic}))))
                    (let [error (ex-info "Not authorized" {:topic topic})]
                      (log/warn :pubsub/subscription-denied {:topic topic})
                      (>? S out (proto/error-msg topic "Not authorized"))

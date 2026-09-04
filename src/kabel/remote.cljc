@@ -307,23 +307,7 @@
          (let [principal (:kabel/principal msg)
                reply-out (::reply-out msg)
                dialect (or (::dialect msg) :kabel)]
-           (let [decision (cond
-                            (not= scope (:id @peer))
-                            (ex-info "Invoke addressed to another peer"
-                                     {:type ::wrong-peer :fn-name fn-name :scope scope})
-
-                            (not (gate {:principal principal
-                                        :fn-name fn-name
-                                        :arg-map arg-map
-                                        :remote request-scope}))
-                            (if principal
-                              (ex-info "Not authorized"
-                                       {:type ::not-authorized :fn-name fn-name})
-                              (ex-info "Authentication required"
-                                       {:type ::authentication-required :fn-name fn-name}))
-
-                            :else ::call)
-                 args (cond-> arg-map principal (assoc :kabel/principal principal))
+           (let [args (cond-> arg-map principal (assoc :kabel/principal principal))
                  respond (fn [res]
                            (when (throwable? res)
                              (log/debug :kabel.remote/invocation-failed
@@ -339,9 +323,27 @@
                              (assoc :result res)))]
              ;; A go block, as the contract on `register!` says: a function
              ;; must not block here; one that has to offloads to a thread and
-             ;; returns its channel.
+             ;; returns its channel. The gate may do the same.
              (async/go
-               (let [res (if (= decision ::call)
+               (let [allowed? (async/<! (authz/decision
+                                         (gate {:principal principal
+                                                :fn-name fn-name
+                                                :arg-map arg-map
+                                                :remote request-scope})))
+                     decision (cond
+                                (not= scope (:id @peer))
+                                (ex-info "Invoke addressed to another peer"
+                                         {:type ::wrong-peer :fn-name fn-name :scope scope})
+
+                                (not allowed?)
+                                (if principal
+                                  (ex-info "Not authorized"
+                                           {:type ::not-authorized :fn-name fn-name})
+                                  (ex-info "Authentication required"
+                                           {:type ::authentication-required :fn-name fn-name}))
+
+                                :else ::call)
+                     res (if (= decision ::call)
                            (try (<? S (call S fn-name args))
                                 (catch #?(:clj Throwable :cljs :default) e e))
                            decision)]

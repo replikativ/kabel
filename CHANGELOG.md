@@ -1,6 +1,12 @@
 # Change Log
 
 ## Unreleased
+ - An authorization predicate (`:authorize` on `kabel.remote/serve` and on
+   the pub/sub middleware) may return a core.async channel instead of a
+   boolean; the gate takes the decision from it. A policy that consults
+   storage — a permission graph in a database — decides on a thread and hands
+   back its channel, keeping that work off the go dispatch pool.
+   `kabel.authorize/decision` gives any layer a channel to take from.
  - The idempotent unsubscribe claims its topics in the same state transition
    that reads them. Two callers releasing a topic at the same instant (a
    connection's shutdown and its owner) could each send a wire request; the

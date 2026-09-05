@@ -1,0 +1,2 @@
+;; Rich `comment` blocks are REPL scratch space, not code under lint.
+{:skip-comments true}

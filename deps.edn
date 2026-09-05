@@ -18,6 +18,9 @@
         org.replikativ/hasch {:mvn/version "0.4.100"}
         org.replikativ/logging {:mvn/version "0.1.3"}
         org.replikativ/metrics {:mvn/version "0.1.4"}
+        ;; A declared dependency because JVM macro expansion requires it;
+        ;; dynamic resolution would fail only at a consumer's first expansion.
+        org.clojure/tools.analyzer.jvm {:mvn/version "1.3.2"}
         org.clojure/data.fressian {:mvn/version "1.0.0"}
         com.github.pkpkpk/fress {:mvn/version "0.4.312"}
         ;; The WebSocket protocols ONLY -- 3.8 KB, and its only dependency is
@@ -71,6 +74,8 @@
 
    :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}
+                               ;; Optional backend supplied by consumers in production.
+                               missionary/missionary {:mvn/version "b.46"}
                                io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
                   :exec-fn cognitect.test-runner.api/test
                   :exec-args {:dirs ["test"]}}

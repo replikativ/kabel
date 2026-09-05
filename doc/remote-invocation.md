@@ -106,3 +106,30 @@ The frames are ordinary Kabel messages and travel in whatever codec the
 connection negotiated. For a client outside Clojure the CBOR wire (serializer
 id 14) is the intended binding; symbols and keywords are CBOR tagged values as
 documented for that wire. Frame size is bounded by Kabel's message limit.
+
+## 8. Remote macros
+
+`kabel.remote.macro/defn-go-remote` turns every `go-remote` body in its function
+into a named function registered with `kabel.remote/register!`. The original
+call site becomes `kabel.remote/invoke`, addressed by remote id, with an
+argument map containing exactly the variables listed in the capture vector.
+The returned core.async channel yields the remote body's value, including
+`nil`, or its failure.
+
+Every free variable used by a remote body must appear in its capture vector.
+Macro expansion fails and names variables that are missing; a declared but
+unused variable is logged at debug level. This explicit boundary prevents a
+lexical value from appearing to be available on another peer when it was never
+sent there.
+
+Both macros support Clojure and ClojureScript. ClojureScript consumers require
+`go-remote` from `kabel.remote.macro` and require the `defn-go-remote` macro
+through `:require-macros`, as they do for `superv.async`. Free-variable analysis
+uses the consumer build's `cljs.analyzer`, resolved during macro expansion, so
+Kabel does not impose a ClojureScript compiler version.
+
+`kabel.remote.missionary` provides the corresponding `sp-remote` and
+`defn-sp-remote` forms, plus `task->chan` and `chan->task` bridges. Missionary is
+an optional backend and is not a Kabel runtime dependency; applications that
+require this namespace must add `missionary/missionary` to their own classpath.
+Kabel declares it only in the test alias so this integration can be tested.

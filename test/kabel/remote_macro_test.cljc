@@ -1,6 +1,6 @@
 (ns kabel.remote-macro-test
   "Remote macros over the same crossed-channel connection used by the runtime tests."
-  (:require [clojure.core.async :refer [chan close! timeout <! go go-loop take!]]
+  (:require [clojure.core.async :refer [chan close! timeout <! go-loop take!]]
             [clojure.test :refer [deftest is testing #?(:cljs async)]]
             [kabel.peer :as peer]
             [kabel.remote :as remote]

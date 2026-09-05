@@ -1,2 +1,6 @@
-;; Rich `comment` blocks are REPL scratch space, not code under lint.
-{:skip-comments true}
+;; The remote macros define vars, and clj-kondo cannot see that without being
+;; told; the same mapping is exported to consumers under resources/.
+{:lint-as {kabel.remote.macro/defn-go-remote clojure.core/defn
+           kabel.remote.missionary/defn-sp-remote clojure.core/defn}
+ ;; Rich `comment` blocks are REPL scratch space, not code under lint.
+ :skip-comments true}

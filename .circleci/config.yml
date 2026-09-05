@@ -58,6 +58,15 @@ jobs:
           name: Check code formatting
           command: clojure -M:format
 
+  lint:
+    executor: tools/clojurecli
+    steps:
+      - attach_workspace:
+          at: /home/circleci
+      - run:
+          name: Lint
+          command: clojure -M:lint
+
   test-clj:
     executor: tools/clojurecli
     steps:
@@ -125,6 +134,10 @@ workflows:
       - setup:
           context: dockerhub-deploy
       - format-check:
+          context: dockerhub-deploy
+          requires:
+            - setup
+      - lint:
           context: dockerhub-deploy
           requires:
             - setup

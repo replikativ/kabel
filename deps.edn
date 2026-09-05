@@ -10,7 +10,7 @@
         ;; worst case: green CI on a version nothing else in the stack uses.
         ;; A Clojars coordinate cannot drift that way.
         org.replikativ/boring {:mvn/version "0.1.27"}
-        org.replikativ/superv.async {:mvn/version "0.3.50"}
+        org.replikativ/superv.async {:mvn/version "0.3.53"}
         com.cognitect/transit-clj {:mvn/version "1.0.333"}
         com.cognitect/transit-cljs {:mvn/version "0.8.280"}
         cheshire/cheshire {:mvn/version "5.13.0"}
@@ -79,6 +79,13 @@
            :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
                           slipset/deps-deploy {:mvn/version "0.2.2"}}
                    :ns-default build}
+           ;; The gate: an error fails the build, a warning does not. The
+           ;; configuration under .clj-kondo, including the hooks imported from
+           ;; superv.async, is what makes zero errors achievable here.
+           :lint {:extra-deps {clj-kondo/clj-kondo {:mvn/version "2026.01.19"}}
+                  :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
+                              "--fail-level" "error"]}
+
            :format {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
                     :main-opts ["-m" "cljfmt.main" "check"]}
            :ffix {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}

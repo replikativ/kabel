@@ -5,7 +5,7 @@
             [goog.Uri]
             [goog.events :as events]
             [goog.crypt :as crypt]
-            [clojure.core.async :as async :refer (take! put! close! chan buffer timeout go) :include-macros true]
+            [clojure.core.async :as async :refer (take! put! close! chan buffer timeout go <!) :include-macros true]
             [superv.async :refer [-error]]
             [replikativ.logging :as log]))
 

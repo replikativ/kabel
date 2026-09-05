@@ -1,6 +1,13 @@
 # Change Log
 
 ## Unreleased
+ - lint runs as a build gate. It could not before: superv.async's macros take a
+   supervisor where a binding vector is expected, so clj-kondo reported every
+   loop binding in this repository as unresolved, 64 errors on working code.
+   superv.async 0.3.53 exports hooks for them, which are imported here, and the
+   one error that remained was real: `kabel.client`'s ClojureScript namespace
+   used `<!` without referring it, which compiles only because core.async's
+   `go` rewrites the symbol before analysis.
  - An authorization predicate (`:authorize` on `kabel.remote/serve` and on
    the pub/sub middleware) may return a core.async channel instead of a
    boolean; the gate takes the decision from it. A policy that consults

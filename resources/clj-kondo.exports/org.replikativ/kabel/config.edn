@@ -1,0 +1,5 @@
+;; Exported to consumers: the remote macros define vars, and clj-kondo cannot
+;; see that without being told, so every `defn-go-remote` would be reported as
+;; an unresolved symbol in a user's editor.
+{:lint-as {kabel.remote.macro/defn-go-remote clojure.core/defn
+           kabel.remote.missionary/defn-sp-remote clojure.core/defn}}

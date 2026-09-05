@@ -1,6 +1,12 @@
 # Change Log
 
 ## Unreleased
+ - Remote invocation now includes `kabel.remote.macro/defn-go-remote` and
+   `go-remote`, which register remote bodies and validate their explicit lexical
+   captures on Clojure and ClojureScript. The optional
+   `kabel.remote.missionary` namespace provides the corresponding Missionary
+   macros and channel/task bridges without making Missionary a runtime
+   dependency.
  - lint runs as a build gate. It could not before: superv.async's macros take a
    supervisor where a binding vector is expected, so clj-kondo reported every
    loop binding in this repository as unresolved, 64 errors on working code.

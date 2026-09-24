@@ -355,18 +355,27 @@
 ;; Invoking
 ;; =============================================================================
 
+(defn- reachable? [peer remote]
+  (if peer
+    (some? (get-in (state peer) [:connections remote]))
+    (some? (get @routes remote))))
+
 (defn- wait-for
   "A channel that yields once `remote` is reachable through `peer`, or through
    any peer when `peer` is nil; an exception after `timeout-ms`."
   [S peer remote timeout-ms]
   (go-try S
-          (when-not (if peer
-                      (get-in (state peer) [:connections remote])
-                      (get @routes remote))
+          (when-not (reachable? peer remote)
             (let [w (promise-chan)]
               (if peer
                 (update-state! peer update-in [:waiters remote] (fnil conj []) w)
                 (swap! route-waiters update remote (fnil conj []) w))
+              ;; Look again: a connection that arrived between the check above
+              ;; and the registration found no waiter to wake. `connected!`
+              ;; records the connection before it reads the waiters, so either
+              ;; it saw `w` or this sees the connection.
+              (when (reachable? peer remote)
+                (put! w :ready))
               (let [[_ port] (alts! (cond-> [w] timeout-ms (conj (timeout timeout-ms))))]
                 (when (not= port w)
                   (throw (ex-info "Not connected to remote peer"

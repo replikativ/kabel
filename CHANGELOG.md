@@ -1,6 +1,12 @@
 # Change Log
 
 ## Unreleased
+ - `kabel.remote/invoke` could wait forever for a connection that already
+   existed. It checked for the connection and then registered a waiter; a
+   connection announced between the two found no waiter to wake. The first
+   invoke right after `kabel.peer/connect` races that announcement, and on
+   two cores about one call in 300 hung (without `:timeout-ms`, for good).
+   The waiter now looks again after registering.
  - Remote invocation now includes `kabel.remote.macro/defn-go-remote` and
    `go-remote`, which register remote bodies and validate their explicit lexical
    captures on Clojure and ClojureScript. The optional

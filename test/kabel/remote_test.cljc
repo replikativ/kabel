@@ -179,6 +179,24 @@
        (link! a b)
        (is (= 3 (<? S early)))))))
 
+#?(:clj
+   (deftest a-connection-arriving-while-the-waiter-registers-wakes-it-test
+     ;; `invoke` checks for the connection and, when there is none, registers
+     ;; a waiter for it. Land the connection in between: the waiter must still
+     ;; wake. Before the fix the call waited until its timeout.
+     (let [a (peer/client-peer S (random-uuid) remote/middleware identity)
+           remote-id (random-uuid)
+           update-state! @#'remote/update-state!
+           landed? (atom false)]
+       (with-redefs [remote/update-state!
+                     (fn [peer f & args]
+                       (when (and (= f update-in) (= :waiters (ffirst args))
+                                  (compare-and-set! landed? false true))
+                         (#'remote/connected! peer remote-id (chan) :kabel))
+                       (apply update-state! peer f args))]
+         (is (= :ready (<?? S (#'remote/wait-for S a remote-id 1000))))
+         (is @landed? "the connection landed between the check and the registration")))))
+
 (deftest legacy-dialect-test
   (remote/register! 'kabel.remote-test/add (fn [{:keys [x y]}] (+ x y)))
   (testing "a peer announcing itself in the distributed-scope dialect is answered in it"

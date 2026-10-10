@@ -260,11 +260,12 @@
    :stop (chan)
    :done (async/promise-chan)})
 
-(defn swap-sender!
-  "Apply a pure transition `(f state & args) -> [state result]` to `sender` and
-  return the result. Keeps the connection byte total, wakes the send loop on
-  any change, and stops it when the sender closes."
-  [sender f & args]
+(defn swap-sender-reserved!
+  "As `swap-sender!`, for a transition whose `reserved` bytes the caller has
+  already added to the connection total: the total moves by the queue's change
+  less the reservation, so the reservation turns into the queued bytes without
+  being counted twice."
+  [sender reserved f & args]
   (let [result (volatile! nil)
         [old new] (swap-vals! (:state sender)
                               (fn [s]
@@ -272,7 +273,7 @@
                                   (vreset! result r)
                                   s)))]
     (when-let [c (:connection-bytes sender)]
-      (let [delta (- (:queued-bytes new) (:queued-bytes old))]
+      (let [delta (- (:queued-bytes new) (:queued-bytes old) reserved)]
         (when-not (zero? delta)
           (swap! c + delta))))
     (when-not (identical? old new)
@@ -280,6 +281,13 @@
     (when (and (= :closed (:phase new)) (not= :closed (:phase old)))
       (close! (:stop sender)))
     @result))
+
+(defn swap-sender!
+  "Apply a pure transition `(f state & args) -> [state result]` to `sender` and
+  return the result. Keeps the connection byte total, wakes the send loop on
+  any change, and stops it when the sender closes."
+  [sender f & args]
+  (apply swap-sender-reserved! sender 0 f args))
 
 (defn state [sender] @(:state sender))
 

@@ -366,8 +366,8 @@
   "Enqueue `entry` into `sender` under `policy`, with the connection-wide byte
   cap checked atomically: senders of other topics admit concurrently under
   their own sections, so the shared budget is reserved by compare-and-set
-  before the enqueue and released after it (the enqueue itself accounts the
-  bytes it keeps). Returns the enqueue decision."
+  before the enqueue, which then takes the reservation over. Returns the
+  enqueue decision."
   [peer out sender entry policy]
   (let [total (:connection-bytes sender)
         cap (or (:cap (live-conn peer out))
@@ -379,11 +379,8 @@
                         (> (+ current b) cap) false
                         (compare-and-set! total current (+ current b)) true
                         :else (recur))))]
-    (try
-      (ls/swap-sender! sender ls/enqueue entry policy (if reserved? b -1))
-      (finally
-        (when reserved?
-          (swap! total - b))))))
+    (ls/swap-sender-reserved! sender (if reserved? b 0)
+                              ls/enqueue entry policy (if reserved? b -1))))
 
 (defn- live-policy
   "The overflow policy for subscriber `out` of `topic`: the topic's

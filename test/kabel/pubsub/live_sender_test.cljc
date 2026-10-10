@@ -255,3 +255,16 @@
         [s _] (ls/finish (assoc s :phase :handshaking))
         [s _] (ls/close s)]
     (is (= [[:done]] (second (take-all s))))))
+
+(deftest a-reservation-is-taken-over-not-counted-twice
+  (let [total (atom 0)
+        s (ls/create nil total {:topic :t :epoch :e :mode :windowed
+                                :grant {:frames 4 :bytes 100}})]
+    (testing "queued: the reservation becomes the queued bytes"
+      (swap! total + 60)
+      (is (= :queued (ls/swap-sender-reserved! s 60 ls/enqueue (entry 0 60) :resync 60)))
+      (is (= 60 @total)))
+    (testing "overflow: the reservation and the dropped queue are released"
+      (swap! total + 30)
+      (is (= :resync (ls/swap-sender-reserved! s 30 ls/enqueue (entry 1 30) :resync -1)))
+      (is (= 0 @total)))))

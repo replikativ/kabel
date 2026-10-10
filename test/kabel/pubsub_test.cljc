@@ -892,3 +892,30 @@
              f2 (run [:b :a])]
          (is (not= ::timeout (deref f1 20000 ::timeout)))
          (is (not= ::timeout (deref f2 20000 ::timeout)))))))
+
+#?(:clj
+   (deftest local-publish-cannot-overtake-a-committed-inbound-one-test
+     ;; The inbound write is committed (-apply-publish done) but not yet
+     ;; forwarded when a newer local write publishes. Subscribers must get the
+     ;; two in that order, or last-write-wins replicas end on the older value.
+     (let [handle-publish! @#'pubsub/handle-publish!
+           peer (make-test-peer)
+           sender (chan 10)
+           sub (chan 10)
+           committed (promise)
+           release (promise)]
+       (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
+       (@#'pubsub/add-subscriber! peer :t sub)
+       (let [inbound (handle-publish! S peer sender (proto/publish-msg :t :older)
+                                      (fn [_ _]
+                                        (deliver committed true)
+                                        @release)
+                                      (constantly true))]
+         (is (deref committed 1000 false))
+         (is (:ok (<?? S (pubsub/direct-publish! peer :t :newer)))
+             "the local publish returns at once, deferred")
+         (deliver release true)
+         (is (:ok (<?? S inbound)))
+         (is (= [:older :newer]
+                (mapv (fn [_] (:payload (first (async/alts!! [sub (timeout 1000)]))))
+                      (range 2))))))))

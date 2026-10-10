@@ -416,6 +416,20 @@
       nil)
     decision))
 
+(defn- overflow-live!
+  "Inside `topic`'s send section: apply subscriber `out`'s overflow policy as
+  if its queue were full."
+  [peer out topic entry]
+  (when-let [sender (sender-for peer out topic)]
+    (let [decision (ls/swap-sender! sender ls/enqueue entry
+                                    (live-policy peer out topic) -1)]
+      (case decision
+        :resync (do (remove-subscriber! peer topic out)
+                    (count-resync! peer out topic))
+        :fail (remove-subscriber! peer topic out)
+        nil)
+      decision)))
+
 (defn- retire-out!
   [peer out reason]
   (if-let [retire! (:retire! (live-conn peer out))]
@@ -462,6 +476,54 @@
          (update :conns dissoc out)
          (update :modes dissoc out)
          (update :resyncs #(into {} (remove (fn [[[o _] _]] (= o out))) %))))))
+
+;; While an inbound publish is applied and forwarded, a local publish of the
+;; same topic must not overtake it: the inbound write may already be committed
+;; when the local one happens, and last-write-wins subscribers would end on the
+;; older value. A local publish therefore waits for the apply, as it did when it
+;; took the apply lock, but without parking: the send section defers it and the
+;; end of the apply queues it after the forwarded frame.
+
+(defn- begin-inbound-apply!
+  [peer topic]
+  (with-send-section peer topic
+    #(update-pubsub-state! peer assoc-in [:live :inbound topic] [])))
+
+(defn- end-inbound-apply!
+  "Queue the local publishes deferred during the apply, after its forward."
+  [peer topic]
+  (let [decisions
+        (with-send-section
+          peer topic
+          (fn []
+            (let [deferred (get-in (get-pubsub-state peer) [:live :inbound topic])]
+              (update-pubsub-state! peer update-in [:live :inbound] dissoc topic)
+              (reduce (fn [decisions entry]
+                        (into decisions
+                              (map (fn [o] [o (enqueue-live! peer o topic entry)]))
+                              (get-subscribers peer topic)))
+                      []
+                      deferred))))]
+    (after-live-decisions! peer topic decisions)))
+
+(defn- defer-or-enqueue!
+  "Inside `topic`'s send section: queue a local publish for every subscriber,
+  or defer it behind an inbound apply in progress. Deferred publishes are
+  bounded like a queue; past it every subscriber's overflow policy applies."
+  [peer topic entry]
+  (if-let [deferred (get-in (get-pubsub-state peer) [:live :inbound topic])]
+    (if (< (count deferred)
+           (get-in (get-topic-config peer topic) [:opts :max-queued-publishes]
+                   (:max-queued-publishes ls/default-limits)))
+      (do (update-pubsub-state! peer update-in [:live :inbound topic] conj entry)
+          {})
+      (do (update-pubsub-state! peer assoc-in [:live :inbound topic] [])
+          (into {}
+                (keep (fn [o] (when-let [d (overflow-live! peer o topic entry)] [o d])))
+                (get-subscribers peer topic))))
+    (into {}
+          (map (fn [o] [o (enqueue-live! peer o topic entry)]))
+          (get-subscribers peer topic))))
 
 (defn- live-entry
   [topic payload bytes]
@@ -526,9 +588,7 @@
               {:error (ex-info "Connection closed" {:topic topic})}))
           (let [decisions (with-send-section
                             peer topic
-                            #(into {}
-                                   (map (fn [o] [o (enqueue-live! peer o topic entry)]))
-                                   (get-subscribers peer topic)))]
+                            #(defer-or-enqueue! peer topic entry))]
             (after-live-decisions! peer topic decisions)
             {:ok true :queued (count (filter #{:queued} (vals decisions)))}))]
     (doto (chan 1)
@@ -537,9 +597,12 @@
 
 (defn- apply-publish-under-lock!
   [S peer topic payload strategy on-publish after-success]
-  (let [lock (topic-apply-lock peer topic)]
+  (let [lock (topic-apply-lock peer topic)
+        owned? (topic-registered? peer topic)]
     (go-try S
             (<! lock)
+            (when owned?
+              (begin-inbound-apply! peer topic))
             (try
               (let [apply-result (if strategy
                                    (<! (safe-result!
@@ -560,6 +623,8 @@
               (catch #?(:clj Throwable :cljs :default) e
                 {:error e})
               (finally
+                (when owned?
+                  (end-inbound-apply! peer topic))
                 ;; A one-slot semaphore must never park its releasing runner.
                 (async/offer! lock :available))))))
 

@@ -8,7 +8,7 @@
             [kabel.http-kit :as http-kit]
             [kabel.pubsub-integration-test :refer [unique-port]]
             [superv.async :refer [<?? S]]
-            [clojure.core.async :refer [go <! >! chan put! close! timeout]]))
+            [clojure.core.async :as async :refer [go <! >! chan put! close! timeout]]))
 
 (defn- with-pair*
   "Run `(f server client)` with a server and a connected client peer, each with
@@ -238,3 +238,39 @@
           (is (eventually 30000 #(= @server-store @client-store)))
           (is (= 1 @handshakes)
               "the overflowed handshake never completed; the resync's one did"))))))
+
+(deftest unsubscribe-while-the-resubscription-initializes
+  ;; The resync arrived and the client is computing its state for the new
+  ;; subscribe when the application unsubscribes. The drain must settle the
+  ;; unsubscribe; it must not retire the connection and its other topics.
+  (with-pair*
+    {} {}
+    (fn [server client]
+      (let [server-store (atom {})
+            client-store (atom {})
+            inits (atom 0)
+            release (promise)
+            base (replica-strategy client-store {:delay-ms 2})
+            gated (reify proto/PSyncStrategy
+                    (-init-client-state [_]
+                      (if (= 1 (swap! inits inc))
+                        (proto/-init-client-state base)
+                        (go (<! (async/thread (deref release 10000 nil)))
+                            (<! (proto/-init-client-state base)))))
+                    (-handshake-items [_ cs] (proto/-handshake-items base cs))
+                    (-apply-handshake-item [_ i] (proto/-apply-handshake-item base i))
+                    (-apply-publish [_ p] (proto/-apply-publish base p)))]
+        (pubsub/register-topic! server :t {:strategy (replica-strategy server-store {})
+                                           :max-queued-publishes 8})
+        (pubsub/register-topic! server :other {:strategy (replica-strategy (atom {}) {})})
+        (subscribe-and-wait! client :other (replica-strategy (atom {}) {}))
+        (subscribe-and-wait! client :t gated)
+        (publish-burst! server server-store :t 500)
+        (is (eventually 10000 #(= 2 @inits)) "the resync started a resubscription")
+        (is (= {:ok true} (<?? S (pubsub/unsubscribe! client #{:t}))))
+        (deliver release true)
+        (Thread/sleep 200)
+        (is (nil? (pubsub/subscription client :t)) "the resubscription stood down")
+        (is (:handshake-complete? (pubsub/subscription client :other))
+            "the connection and its other topic survived")
+        (is (empty? (pubsub/get-subscribers server :t)))))))

@@ -357,11 +357,28 @@
             (ls/swap-sender! sender ls/on-legacy)))
         sender)))
 
-(defn- connection-room
-  [peer out sender]
-  (- (or (:cap (live-conn peer out))
-         (:max-connection-queued-bytes live-defaults))
-     @(:connection-bytes sender)))
+(defn- enqueue-admitted!
+  "Enqueue `entry` into `sender` under `policy`, with the connection-wide byte
+  cap checked atomically: senders of other topics admit concurrently under
+  their own sections, so the shared budget is reserved by compare-and-set
+  before the enqueue and released after it (the enqueue itself accounts the
+  bytes it keeps). Returns the enqueue decision."
+  [peer out sender entry policy]
+  (let [total (:connection-bytes sender)
+        cap (or (:cap (live-conn peer out))
+                (:max-connection-queued-bytes live-defaults))
+        b (:bytes entry)
+        reserved? (loop []
+                    (let [current @total]
+                      (cond
+                        (> (+ current b) cap) false
+                        (compare-and-set! total current (+ current b)) true
+                        :else (recur))))]
+    (try
+      (ls/swap-sender! sender ls/enqueue entry policy (if reserved? b -1))
+      (finally
+        (when reserved?
+          (swap! total - b))))))
 
 (defn- live-policy
   "The overflow policy for subscriber `out` of `topic`: the topic's
@@ -390,9 +407,8 @@
   [peer out topic entry]
   (let [sender (or (sender-for peer out topic)
                    (new-sender! peer out topic {:mode :legacy}))
-        decision (ls/swap-sender! sender ls/enqueue entry
-                                  (live-policy peer out topic)
-                                  (connection-room peer out sender))]
+        decision (enqueue-admitted! peer out sender entry
+                                    (live-policy peer out topic))]
     (case decision
       :resync (do (remove-subscriber! peer topic out)
                   (count-resync! peer out topic))
@@ -497,9 +513,8 @@
         (if is-client?
           (let [decision (with-send-section
                            peer topic
-                           #(let [sender (client-sender! peer out topic)]
-                              (ls/swap-sender! sender ls/enqueue entry :fail
-                                               (connection-room peer out sender))))]
+                           #(enqueue-admitted! peer out (client-sender! peer out topic)
+                                               entry :fail))]
             (log/debug :pubsub/publish-to-server {:topic topic :decision decision})
             (case decision
               :queued {:ok true :queued 1}
@@ -1713,7 +1728,12 @@
                            (do
                              (complete-unsubscribe-topic! peer (:id msg) topic)
                              (close! lane))
-                           (if (lifecycle/terminal? next-state)
+                           (if (and (lifecycle/terminal? next-state)
+                                    ;; A resyncing lane stays for the
+                                    ;; unsubscribe drain of a cancellation
+                                    ;; racing the resubscription, until the
+                                    ;; new generation's lane replaces it.
+                                    (not= :resyncing (:phase next-state)))
                              (close! lane)
                              (recur next-state (<? S lane))))))
                      (let [transition (lifecycle/transition state {:type :close})]

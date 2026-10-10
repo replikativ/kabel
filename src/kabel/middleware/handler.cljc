@@ -14,6 +14,11 @@
   ;; so it never surfaced in kabel's own builds; `cljs.main` refuses to compile.
   #?(:cljs (:require-macros [superv.async :refer [<? >? go-loop-try]])))
 
+(def ^:private failed
+  "Marks a callback that threw. An object no message can be identical to; a
+  keyword could arrive as decoded data."
+  #?(:clj (Object.) :cljs (js-obj)))
+
 (defn handler
   "Applies given callback functions to messages on [in out] channels and passes
   through the return value of the callback. The callbacks have to return a
@@ -31,8 +36,8 @@
                    (let [r (try (<? S (cb-in i))
                                 (catch #?(:clj Throwable :cljs :default) e
                                   (log/error :kabel/handler-in-failed {:error (str e)})
-                                  ::failed))]
-                     (if (= ::failed r)
+                                  failed))]
+                     (if (identical? failed r)
                        (close! new-in)
                        (do
                          (when r
@@ -44,8 +49,8 @@
                    (let [r (try (<? S (cb-out o))
                                 (catch #?(:clj Throwable :cljs :default) e
                                   (log/error :kabel/handler-out-failed {:error (str e)})
-                                  ::failed))]
-                     (if (= ::failed r)
+                                  failed))]
+                     (if (identical? failed r)
                        (do (close! new-out)
                            (close! out))
                        (do

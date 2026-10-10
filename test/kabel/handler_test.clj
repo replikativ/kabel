@@ -38,3 +38,14 @@
     (put! new-out :bad)
     (is (closed-within? out 1000) "the connection's out closes")
     (is (closed-within? new-out 1000) "later writes fail instead of piling up")))
+
+(deftest no-message-value-is-mistaken-for-a-failure-test
+  (let [in (chan 10)
+        out (chan 10)
+        [_ _ [new-in new-out]] (handler (fn [m] (go m)) (fn [m] (go m))
+                                        [S nil [in out]])]
+    (doseq [m [:kabel.middleware.handler/failed :failed]]
+      (put! in m)
+      (is (= m (first (alts!! [new-in (timeout 1000)]))))
+      (put! new-out m)
+      (is (= m (first (alts!! [out (timeout 1000)])))))))

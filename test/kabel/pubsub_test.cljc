@@ -781,3 +781,76 @@
       (is (pos? (estimate {:type :pubsub/publish :payload [1 2 3]}))))
     (testing "a frame whose value cannot be printed does not throw, and counts as nothing"
       (is (= 0 (estimate {:type :pubsub/handshake-data :data {:value (Unprintable.)}}))))))
+
+;; =============================================================================
+;; Transport pressure: a refused put is loud, never silent or thrown
+;; =============================================================================
+
+#?(:clj
+   (defn- saturated-chan
+     "An unbuffered channel holding core.async's maximum of 1024 pending puts, so
+      the next put! throws."
+     []
+     (let [ch (chan)]
+       (dotimes [i 1024] (put! ch i))
+       ch)))
+
+#?(:clj
+   (deftest server-fan-out-closes-a-saturated-subscriber-test
+     (let [peer (make-test-peer)
+           stuck (saturated-chan)
+           healthy (chan 10)]
+       (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
+       (@#'pubsub/add-subscriber! peer :t stuck)
+       (@#'pubsub/add-subscriber! peer :t healthy)
+       (let [result (<?? S (pubsub/direct-publish! peer :t :v))]
+         (is (= {:ok true :sent-count 1} result))
+         (is (= :pubsub/publish (:type (async/poll! healthy)))
+             "the fan-out continues past the saturated subscriber")
+         (is (async-proto/closed? stuck) "the saturated subscriber is closed")
+         (is (= #{healthy} (set (@#'pubsub/get-subscribers peer :t))))))))
+
+#?(:clj
+   (deftest client-publish-closes-a-saturated-connection-test
+     (let [peer (make-test-peer)
+           out (saturated-chan)]
+       (swap! peer assoc-in [:pubsub :out] out)
+       (let [result (<?? S (pubsub/direct-publish! peer :t :v))]
+         (is (some? (:error result)) "no exception reaches the caller")
+         (is (async-proto/closed? out) "the connection is closed instead")))))
+
+#?(:clj
+   (deftest forwarding-closes-a-saturated-subscriber-without-failing-the-apply-test
+     (let [handle-publish! @#'pubsub/handle-publish!
+           peer (make-test-peer)
+           sender (chan 10)
+           stuck (saturated-chan)
+           healthy (chan 10)]
+       (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
+       (@#'pubsub/add-subscriber! peer :t sender)
+       (@#'pubsub/add-subscriber! peer :t stuck)
+       (@#'pubsub/add-subscriber! peer :t healthy)
+       (let [result (<?? S (handle-publish! S peer sender (proto/publish-msg :t :v)
+                                            nil (constantly true)))]
+         (is (:ok result) "the publishing client's apply still succeeds")
+         (is (= :pubsub/publish (:type (async/poll! healthy))))
+         (is (nil? (async/poll! sender)) "not echoed to the publisher")
+         (is (async-proto/closed? stuck))
+         (is (= #{sender healthy} (set (@#'pubsub/get-subscribers peer :t))))))))
+
+#?(:clj
+   (deftest saturated-topic-serializer-closes-every-subscriber-test
+     (let [peer (make-test-peer)
+           a (chan 10)
+           b (chan 10)]
+       (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
+       (@#'pubsub/add-subscriber! peer :t a)
+       (@#'pubsub/add-subscriber! peer :t b)
+       (let [lock (@#'pubsub/topic-apply-lock peer :t)]
+         (async/poll! lock)                              ; hold the serializer
+         (dotimes [_ 1024] (async/take! lock (fn [_])))  ; and saturate it
+         (let [result (<?? S (pubsub/direct-publish! peer :t :v))]
+           (is (some? (:error result)))
+           (is (async-proto/closed? a))
+           (is (async-proto/closed? b))
+           (is (empty? (@#'pubsub/get-subscribers peer :t))))))))

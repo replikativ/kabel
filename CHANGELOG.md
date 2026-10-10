@@ -1,6 +1,22 @@
 # Change Log
 
 ## Unreleased
+ - A live publish that the transport cannot take is no longer lost silently or
+   thrown into the publisher. core.async refuses a put once a channel holds
+   1024 pending puts, by throwing. The server's fan-out let that abort the
+   whole publication for every remaining subscriber and reported it only on a
+   result channel nobody reads; the client threw it into its caller (a konserve
+   write hook, after the write had committed); forwarding a client's publish
+   caught only `Exception`, so the error failed the publishing client's own,
+   successful apply and retired its connection. Now the subscriber that cannot
+   take the frame is removed and its connection closed, the fan-out continues,
+   and a client closes its connection: in each case the peer resubscribes
+   instead of carrying on with a gap. The same holds when the topic serializer
+   itself has 1024 waiting publishes: every subscriber is closed.
+ - `kabel.middleware.handler`: a callback that throws (a frame that does not
+   decode or encode) ended its loop silently, leaving a connection that stayed
+   open and read or wrote nothing more. The error is now logged and the
+   downstream channels closed, so the connection retires.
  - `kabel.remote/invoke` could wait forever for a connection that already
    existed. It checked for the connection and then registered a waiter; a
    connection announced between the two found no waiter to wake. The first

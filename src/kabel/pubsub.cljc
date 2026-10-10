@@ -217,6 +217,27 @@
 ;; Publishing
 ;; =============================================================================
 
+(defn- put-subscriber!
+  "Register `msg` on a subscriber's `transport` without parking.
+
+  core.async refuses a put past 1024 pending puts by throwing. The frame is then
+  lost for this subscriber, so it is removed and its connection closed: the loss
+  is loud and the peer resubscribes, instead of carrying on with a gap or
+  aborting the fan-out to the remaining subscribers. Returns true when the put
+  was registered."
+  [S peer topic transport msg]
+  (try
+    (put? S transport msg
+          (fn [delivered?]
+            (when-not delivered?
+              (remove-subscriber! peer topic transport))))
+    true
+    (catch #?(:clj Throwable :cljs :default) e
+      (log/error :pubsub/subscriber-overflow {:topic topic :error (str e)})
+      (remove-subscriber! peer topic transport)
+      (close! transport)
+      false)))
+
 (defn publish!
   "Publish a message to all subscribers of a topic.
 
@@ -258,42 +279,59 @@
       (if is-client?
         (do
           (log/debug :pubsub/publish-to-server {:topic topic})
-          (put? S out msg)
-          (async/offer! result-ch {:ok true :sent-count 1})
+          (try
+            (put? S out msg)
+            (async/offer! result-ch {:ok true :sent-count 1})
+            (catch #?(:clj Throwable :cljs :default) e
+              ;; Past 1024 pending puts the frame is lost. Do not throw into the
+              ;; caller (a konserve write hook runs after its write committed):
+              ;; close the connection so the loss is loud and the session is
+              ;; re-established.
+              (log/error :pubsub/publish-overflow {:topic topic :error (str e)})
+              (close! out)
+              (async/offer! result-ch {:error e})))
           (close! result-ch))
         ;; Register the take synchronously. Concurrent publish! calls from one
         ;; thread therefore enter the peer/topic serializer in call order.
-        (let [lock (topic-apply-lock peer topic)]
-          (async/take!
-           lock
-           (fn [token]
-             (if-not token
-               (do
-                 (async/offer! result-ch
-                               {:error (ex-info "Topic serializer closed"
-                                                {:topic topic})})
-                 (close! result-ch))
-               (let [sent (volatile! 0)]
-                 (try
-                   ;; Subscriber selection and enqueue are one ordered topic
-                   ;; operation. An unsubscribe drain cannot acknowledge in
-                   ;; between these two steps.
-                   (doseq [transport (get-subscribers peer topic)]
-                     ;; Register the transport put without parking. Core.async
-                     ;; preserves pending-put order, so the later drain ACK
-                     ;; cannot overtake this publication even on an unbuffered
-                     ;; connection channel.
-                     (put? S transport msg
-                           (fn [delivered?]
-                             (when-not delivered?
-                               (remove-subscriber! peer topic transport))))
-                     (vswap! sent inc))
-                   (async/offer! result-ch {:ok true :sent-count @sent})
-                   (catch #?(:clj Throwable :cljs :default) e
-                     (async/offer! result-ch {:error e}))
-                   (finally
-                     (async/offer! lock :available)
-                     (close! result-ch)))))))))
+        (let [lock (topic-apply-lock peer topic)
+              on-token
+              (fn [token]
+                (if-not token
+                  (do
+                    (async/offer! result-ch
+                                  {:error (ex-info "Topic serializer closed"
+                                                   {:topic topic})})
+                    (close! result-ch))
+                  (let [sent (volatile! 0)]
+                    (try
+                      ;; Subscriber selection and enqueue are one ordered topic
+                      ;; operation. An unsubscribe drain cannot acknowledge in
+                      ;; between these two steps.
+                      (doseq [transport (get-subscribers peer topic)]
+                        ;; Register the transport put without parking. Core.async
+                        ;; preserves pending-put order, so the later drain ACK
+                        ;; cannot overtake this publication even on an unbuffered
+                        ;; connection channel.
+                        (when (put-subscriber! S peer topic transport msg)
+                          (vswap! sent inc)))
+                      (async/offer! result-ch {:ok true :sent-count @sent})
+                      (catch #?(:clj Throwable :cljs :default) e
+                        (async/offer! result-ch {:error e}))
+                      (finally
+                        (async/offer! lock :available)
+                        (close! result-ch))))))]
+          (try
+            (async/take! lock on-token)
+            (catch #?(:clj Throwable :cljs :default) e
+              ;; Past 1024 pending takes on the serializer the publication
+              ;; reaches no subscriber. Close them all, so every one of them
+              ;; resubscribes instead of silently missing it.
+              (log/error :pubsub/publish-overflow {:topic topic :error (str e)})
+              (doseq [transport (get-subscribers peer topic)]
+                (remove-subscriber! peer topic transport)
+                (close! transport))
+              (async/offer! result-ch {:error e})
+              (close! result-ch)))))
       result-ch)))
 
 (defn- apply-publish-under-lock!
@@ -545,19 +583,13 @@
                           (let [fwd-msg (proto/publish-msg topic payload)]
                             (doseq [transport subscribers]
                               (when (not= transport out)
-                                (try
-                                  ;; Nonparking pending puts retain channel FIFO,
-                                  ;; which makes the later drain ACK a real marker
-                                  ;; on unbuffered transports.
-                                  (put? S transport fwd-msg
-                                        (fn [delivered?]
-                                          (when-not delivered?
-                                            (remove-subscriber!
-                                             peer topic transport))))
-                                  (catch #?(:clj Exception :cljs js/Error) e
-                                    (log/warn :pubsub/forward-failed
-                                              {:topic topic
-                                               :error (str e)}))))))))))))))
+                                ;; Nonparking pending puts retain channel FIFO,
+                                ;; which makes the later drain ACK a real marker
+                                ;; on unbuffered transports. A refused put closes
+                                ;; that subscriber; it never fails the
+                                ;; publishing client's (successful) apply.
+                                (put-subscriber! S peer topic transport
+                                                 fwd-msg))))))))))))
             (catch #?(:clj Throwable :cljs :default) e
               {:error e}))))
 

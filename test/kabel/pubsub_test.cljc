@@ -919,3 +919,24 @@
          (is (= [:older :newer]
                 (mapv (fn [_] (:payload (first (async/alts!! [sub (timeout 1000)]))))
                       (range 2))))))))
+
+#?(:clj
+   (deftest deferred-local-publishes-are-bounded-in-bytes-test
+     (let [handle-publish! @#'pubsub/handle-publish!
+           peer (make-test-peer)
+           sub (chan 10)
+           committed (promise)
+           release (promise)]
+       (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)
+                                        :live-overflow :fail
+                                        :max-queued-bytes 4096})
+       (@#'pubsub/add-subscriber! peer :t sub)
+       (let [inbound (handle-publish! S peer (chan 10) (proto/publish-msg :t :older)
+                                      (fn [_ _] (deliver committed true) @release)
+                                      (constantly true))]
+         (is (deref committed 1000 false))
+         (<?? S (pubsub/direct-publish! peer :t (apply str (repeat 2000 "x"))))
+         (is (empty? (@#'pubsub/get-subscribers peer :t))
+             "an oversized deferred publication applies the overflow policy")
+         (deliver release true)
+         (<?? S inbound)))))

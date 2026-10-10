@@ -420,15 +420,16 @@
   "Inside `topic`'s send section: apply subscriber `out`'s overflow policy as
   if its queue were full."
   [peer out topic entry]
-  (when-let [sender (sender-for peer out topic)]
-    (let [decision (ls/swap-sender! sender ls/enqueue entry
-                                    (live-policy peer out topic) -1)]
-      (case decision
-        :resync (do (remove-subscriber! peer topic out)
-                    (count-resync! peer out topic))
-        :fail (remove-subscriber! peer topic out)
-        nil)
-      decision)))
+  (let [sender (or (sender-for peer out topic)
+                   (new-sender! peer out topic {:mode :legacy}))
+        decision (ls/swap-sender! sender ls/enqueue entry
+                                  (live-policy peer out topic) -1)]
+    (case decision
+      :resync (do (remove-subscriber! peer topic out)
+                  (count-resync! peer out topic))
+      :fail (remove-subscriber! peer topic out)
+      nil)
+    decision))
 
 (defn- retire-out!
   [peer out reason]
@@ -487,7 +488,7 @@
 (defn- begin-inbound-apply!
   [peer topic]
   (with-send-section peer topic
-    #(update-pubsub-state! peer assoc-in [:live :inbound topic] [])))
+    #(update-pubsub-state! peer assoc-in [:live :inbound topic] {:entries [] :bytes 0})))
 
 (defn- end-inbound-apply!
   "Queue the local publishes deferred during the apply, after its forward."
@@ -496,7 +497,7 @@
         (with-send-section
           peer topic
           (fn []
-            (let [deferred (get-in (get-pubsub-state peer) [:live :inbound topic])]
+            (let [deferred (get-in (get-pubsub-state peer) [:live :inbound topic :entries])]
               (update-pubsub-state! peer update-in [:live :inbound] dissoc topic)
               (reduce (fn [decisions entry]
                         (into decisions
@@ -509,17 +510,24 @@
 (defn- defer-or-enqueue!
   "Inside `topic`'s send section: queue a local publish for every subscriber,
   or defer it behind an inbound apply in progress. Deferred publishes are
-  bounded like a queue; past it every subscriber's overflow policy applies."
+  bounded like the topic's queues, in frames and bytes; past it every
+  subscriber's overflow policy applies."
   [peer topic entry]
-  (if-let [deferred (get-in (get-pubsub-state peer) [:live :inbound topic])]
-    (if (< (count deferred)
-           (get-in (get-topic-config peer topic) [:opts :max-queued-publishes]
-                   (:max-queued-publishes ls/default-limits)))
-      (do (update-pubsub-state! peer update-in [:live :inbound topic] conj entry)
+  (if-let [{:keys [entries bytes]} (get-in (get-pubsub-state peer) [:live :inbound topic])]
+    (if (let [{:keys [max-queued-publishes max-queued-bytes]}
+              (merge ls/default-limits
+                     (select-keys (:opts (get-topic-config peer topic))
+                                  [:max-queued-publishes :max-queued-bytes]))]
+          (and (< (count entries) max-queued-publishes)
+               (<= (+ bytes (:bytes entry)) max-queued-bytes)))
+      (do (update-pubsub-state! peer update-in [:live :inbound topic]
+                                #(-> % (update :entries conj entry)
+                                     (update :bytes + (:bytes entry))))
           {})
-      (do (update-pubsub-state! peer assoc-in [:live :inbound topic] [])
+      (do (update-pubsub-state! peer assoc-in [:live :inbound topic]
+                                {:entries [] :bytes 0})
           (into {}
-                (keep (fn [o] (when-let [d (overflow-live! peer o topic entry)] [o d])))
+                (map (fn [o] [o (overflow-live! peer o topic entry)]))
                 (get-subscribers peer topic))))
     (into {}
           (map (fn [o] [o (enqueue-live! peer o topic entry)]))

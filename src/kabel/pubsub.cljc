@@ -23,6 +23,7 @@
   (:require [kabel.authorize :as authz]
             [kabel.metrics :as metrics]
             [kabel.pubsub.lifecycle :as lifecycle]
+            [kabel.pubsub.live-sender :as ls]
             [kabel.pubsub.protocol :as proto]
             [replikativ.logging :as log]
             #?(:clj [superv.async :refer [<? >? put? go-try go-loop-try go-loop-super]]
@@ -121,7 +122,7 @@
   (get-in (get-pubsub-state peer) [:transport k]))
 
 (declare direct-publish! direct-subscribe! topic-apply-lock safe-result!
-         explicit-success?)
+         explicit-success? estimated-frame-bytes drop-subscriber!)
 
 (defn register-topic!
   "Register a topic on the peer for subscription.
@@ -151,6 +152,8 @@
    Returns: topic"
   [peer topic]
   (log/info :pubsub/unregister-topic {:topic topic})
+  (doseq [out (get-in (get-pubsub-state peer) [:topics topic :subscribers])]
+    (drop-subscriber! peer topic out))
   (update-pubsub-state! peer update :topics dissoc topic)
   topic)
 
@@ -217,26 +220,330 @@
 ;; Publishing
 ;; =============================================================================
 
-(defn- put-subscriber!
-  "Register `msg` on a subscriber's `transport` without parking.
+;; =============================================================================
+;; Live windows
+;; =============================================================================
+;; A live publish is queued per (connection, topic) in a LiveSender and written
+;; by its send loop while the receiver's grant allows (kabel.pubsub.live-sender).
+;; The receiver acknowledges after applying, so a burst waits here, bounded and
+;; under an overflow policy, instead of overflowing the receiver's lane.
+;;
+;; Peer state under `:live`:
+;;   :conns   {out {:queued-bytes atom :cap n :limits m :offer m :grant m
+;;                  :retire! f}}  registered by the middleware per connection
+;;   :senders {[out topic] sender}
+;;   :modes   {out {:mode :windowed :grant g} | {:mode :legacy}}  how the
+;;            other side of `out` takes our live publishes
+;;   :resyncs {[out topic] n}  consecutive resyncs, for escalation
 
-  core.async refuses a put past 1024 pending puts by throwing. The frame is then
-  lost for this subscriber, so it is removed and its connection closed: the loss
-  is loud and the peer resubscribes, instead of carrying on with a gap or
-  aborting the fan-out to the remaining subscribers. Returns true when the put
-  was registered."
-  [S peer topic transport msg]
-  (try
-    (put? S transport msg
-          (fn [delivered?]
-            (when-not delivered?
-              (remove-subscriber! peer topic transport))))
-    true
-    (catch #?(:clj Throwable :cljs :default) e
-      (log/error :pubsub/subscriber-overflow {:topic topic :error (str e)})
-      (remove-subscriber! peer topic transport)
-      (close! transport)
-      false)))
+(def live-defaults
+  {:live-window 128
+   :max-connection-queued-bytes (* 64 1024 1024)
+   :max-resyncs 3})
+
+;; The sequence fields a windowed frame adds, at the 4x-printed-size estimate.
+(def ^:private live-frame-overhead (* 4 96))
+
+(defn- live-conn [peer out]
+  (get-in (get-pubsub-state peer) [:live :conns out]))
+
+(defn- sender-for [peer out topic]
+  (get-in (get-pubsub-state peer) [:live :senders [out topic]]))
+
+(defn- live-mode [peer out]
+  (get-in (get-pubsub-state peer) [:live :modes out]))
+
+(defn- peer-lock
+  "A lock object kept in peer state under `path`, created on first use."
+  [peer path]
+  (let [candidate #?(:clj (Object.) :cljs #js {})
+        chosen (volatile! nil)]
+    (update-pubsub-state!
+     peer
+     (fn [state]
+       (if-let [existing (get-in state path)]
+         (do (vreset! chosen existing) state)
+         (do (vreset! chosen candidate)
+             (assoc-in state path candidate)))))
+    @chosen))
+
+(defn- with-send-section
+  "Run `f` in `topic`'s send section. Subscriber selection, sender creation and
+  every enqueue into the topic's senders happen inside it, so all subscribers
+  receive the topic's publications in one order (konserve-sync applies last
+  write wins per key; two orders would diverge replicas). `f` must not park,
+  write to a connection, or enter another topic's section; side effects such
+  as retiring a connection run after it returns."
+  [peer topic f]
+  (let [lock (peer-lock peer [:send-locks topic])]
+    #?(:clj (locking lock (f))
+       :cljs (do lock (f)))))
+
+(defn- remove-sender!
+  [peer out topic sender]
+  (update-pubsub-state!
+   peer
+   (fn [state]
+     (if (identical? sender (get-in state [:live :senders [out topic]]))
+       (update-in state [:live :senders] dissoc [out topic])
+       state))))
+
+(defn- new-sender!
+  "Create, register and start the sender for (out, topic). Inside the topic's
+  send section."
+  [peer out topic opts]
+  (let [conn (live-conn peer out)
+        sender (assoc (ls/create out
+                                 (or (:queued-bytes conn) (atom 0))
+                                 (assoc opts
+                                        :topic topic
+                                        :epoch (random-uuid)
+                                 ;; Connection defaults, overridden per topic.
+                                        :limits (merge (:limits conn)
+                                                       (select-keys
+                                                        (:opts (get-topic-config peer topic))
+                                                        [:max-queued-publishes
+                                                         :max-queued-bytes]))))
+                      ;; :client senders carry this side's own publishes to
+                      ;; its server; :subscriber senders serve a subscriber.
+                      :role (:role opts :subscriber))]
+    (update-pubsub-state! peer assoc-in [:live :senders [out topic]] sender)
+    (ls/start! sender
+               {:on-exit #(remove-sender! peer out topic sender)
+                ;; A closed connection, or core.async refusing a put past
+                ;; 1024 pending ones. The frame is lost for this subscriber,
+                ;; so its connection is closed and it resubscribes.
+                :on-write-failed
+                (fn [error]
+                  (remove-subscriber! peer topic out)
+                  (when error
+                    (log/error :pubsub/subscriber-overflow
+                               {:topic topic :error (str error)})
+                    (close! out)))})))
+
+(defn- set-live-mode!
+  "Record how the other side of `out` takes our live publishes and tell the
+  client senders already queueing toward it. A subscriber's sender on the same
+  connection keeps the grant it negotiated for its topic."
+  [peer out mode]
+  (update-pubsub-state! peer assoc-in [:live :modes out] mode)
+  (doseq [[[o _] sender] (get-in (get-pubsub-state peer) [:live :senders])
+          :when (and (= o out) (= :client (:role sender)))]
+    (if (= :windowed (:mode mode))
+      (ls/swap-sender! sender ls/on-grant (:grant mode))
+      (ls/swap-sender! sender ls/on-legacy))))
+
+(defn- client-sender!
+  "Inside the send section: the sender toward the server on `out`. Until the
+  server's grant decision is known it queues if a subscription offering a
+  window is in flight on `out`, and sends unpaced otherwise."
+  [peer out topic]
+  (or (sender-for peer out topic)
+      (let [mode (live-mode peer out)
+            sender (new-sender!
+                    peer out topic
+                    (assoc (cond
+                             (= :windowed (:mode mode))
+                             {:mode :windowed :grant (:grant mode)}
+
+                             (and (nil? mode)
+                                  (:offer (live-conn peer out))
+                                  (some #(= out (:out %)) (vals (subscriptions peer))))
+                             {:mode :pending-grant}
+
+                             :else
+                             {:mode :legacy})
+                           :role :client))]
+        ;; A decision recorded while this sender was created reached the
+        ;; senders registered before it; apply it here too.
+        (when-let [mode (and (nil? mode) (live-mode peer out))]
+          (if (= :windowed (:mode mode))
+            (ls/swap-sender! sender ls/on-grant (:grant mode))
+            (ls/swap-sender! sender ls/on-legacy)))
+        sender)))
+
+(defn- enqueue-admitted!
+  "Enqueue `entry` into `sender` under `policy`, with the connection-wide byte
+  cap checked atomically: senders of other topics admit concurrently under
+  their own sections, so the shared budget is reserved by compare-and-set
+  before the enqueue, which then takes the reservation over. Returns the
+  enqueue decision."
+  [peer out sender entry policy]
+  (let [total (:connection-bytes sender)
+        cap (or (:cap (live-conn peer out))
+                (:max-connection-queued-bytes live-defaults))
+        b (:bytes entry)
+        reserved? (loop []
+                    (let [current @total]
+                      (cond
+                        (> (+ current b) cap) false
+                        (compare-and-set! total current (+ current b)) true
+                        :else (recur))))]
+    (ls/swap-sender-reserved! sender (if reserved? b 0)
+                              ls/enqueue entry policy (if reserved? b -1))))
+
+(defn- live-policy
+  "The overflow policy for subscriber `out` of `topic`: the topic's
+  `:live-overflow`, by default `:resync`, or `:fail` for the no-sync strategy
+  (its subscribers have no handshake to catch up through) and after
+  `:max-resyncs` consecutive resyncs."
+  [peer out topic]
+  (let [{:keys [strategy opts]} (get-topic-config peer topic)
+        policy (or (:live-overflow opts)
+                   (if (proto/pub-sub-only? strategy) :fail :resync))
+        resyncs (get-in (get-pubsub-state peer) [:live :resyncs [out topic]] 0)]
+    (if (and (= :resync policy)
+             (>= resyncs (get opts :max-resyncs (:max-resyncs live-defaults))))
+      :fail
+      policy)))
+
+(defn- count-resync!
+  [peer out topic]
+  (update-pubsub-state! peer update-in [:live :resyncs [out topic]] (fnil inc 0)))
+
+(defn- enqueue-live!
+  "Inside `topic`'s send section: queue `entry` for subscriber `out`. A
+  subscriber added without a sender (embedders and tests calling the handlers
+  directly) gets a legacy one. An overflow that ends the session removes the
+  subscriber here, in the same step, so no later publication reaches it."
+  [peer out topic entry]
+  (let [sender (or (sender-for peer out topic)
+                   (new-sender! peer out topic {:mode :legacy}))
+        decision (enqueue-admitted! peer out sender entry
+                                    (live-policy peer out topic))]
+    (case decision
+      :resync (do (remove-subscriber! peer topic out)
+                  (count-resync! peer out topic))
+      :fail (remove-subscriber! peer topic out)
+      nil)
+    decision))
+
+(defn- overflow-live!
+  "Inside `topic`'s send section: apply subscriber `out`'s overflow policy as
+  if its queue were full."
+  [peer out topic entry]
+  (let [sender (or (sender-for peer out topic)
+                   (new-sender! peer out topic {:mode :legacy}))
+        decision (ls/swap-sender! sender ls/enqueue entry
+                                  (live-policy peer out topic) -1)]
+    (case decision
+      :resync (do (remove-subscriber! peer topic out)
+                  (count-resync! peer out topic))
+      :fail (remove-subscriber! peer topic out)
+      nil)
+    decision))
+
+(defn- retire-out!
+  [peer out reason]
+  (if-let [retire! (:retire! (live-conn peer out))]
+    (retire! reason)
+    (close! out)))
+
+(defn- after-live-decisions!
+  "Outside the send section: report overflows, retire the connections a
+  `:fail` ended."
+  [peer topic decisions]
+  (doseq [[out decision] decisions]
+    (case decision
+      (:resync :resync-deferred)
+      (do (log/warn :pubsub/live-overflow-resync {:topic topic :decision decision})
+          (metrics/subscription-event! :server :resync 1))
+
+      :fail
+      (do (log/warn :pubsub/live-overflow {:topic topic})
+          (retire-out! peer out {:reason :live-overflow :topic topic}))
+
+      nil)))
+
+(defn- drop-subscriber!
+  "Remove subscriber `out` of `topic` and close its sender now, dropping what
+  it has queued."
+  [peer topic out]
+  (with-send-section
+    peer topic
+    (fn []
+      (remove-subscriber! peer topic out)
+      (when-let [sender (sender-for peer out topic)]
+        (ls/swap-sender! sender ls/close)))))
+
+(defn- forget-connection!
+  "Close every sender of `out` and drop its live state."
+  [peer out]
+  (doseq [[[o topic] sender] (get-in (get-pubsub-state peer) [:live :senders])
+          :when (= o out)]
+    (with-send-section peer topic #(ls/swap-sender! sender ls/close)))
+  (update-pubsub-state!
+   peer update :live
+   (fn [live]
+     (-> live
+         (update :conns dissoc out)
+         (update :modes dissoc out)
+         (update :resyncs #(into {} (remove (fn [[[o _] _]] (= o out))) %))))))
+
+;; While an inbound publish is applied and forwarded, a local publish of the
+;; same topic must not overtake it: the inbound write may already be committed
+;; when the local one happens, and last-write-wins subscribers would end on the
+;; older value. A local publish therefore waits for the apply, as it did when it
+;; took the apply lock, but without parking: the send section defers it and the
+;; end of the apply queues it after the forwarded frame.
+
+(defn- begin-inbound-apply!
+  [peer topic]
+  (with-send-section peer topic
+    #(update-pubsub-state! peer assoc-in [:live :inbound topic] {:entries [] :bytes 0})))
+
+(defn- end-inbound-apply!
+  "Queue the local publishes deferred during the apply, after its forward."
+  [peer topic]
+  (let [decisions
+        (with-send-section
+          peer topic
+          (fn []
+            (let [deferred (get-in (get-pubsub-state peer) [:live :inbound topic :entries])]
+              (update-pubsub-state! peer update-in [:live :inbound] dissoc topic)
+              (reduce (fn [decisions entry]
+                        (into decisions
+                              (map (fn [o] [o (enqueue-live! peer o topic entry)]))
+                              (get-subscribers peer topic)))
+                      []
+                      deferred))))]
+    (after-live-decisions! peer topic decisions)))
+
+(defn- defer-or-enqueue!
+  "Inside `topic`'s send section: queue a local publish for every subscriber,
+  or defer it behind an inbound apply in progress. Deferred publishes are
+  bounded like the topic's queues, in frames and bytes; past it every
+  subscriber's overflow policy applies."
+  [peer topic entry]
+  (if-let [{:keys [entries bytes]} (get-in (get-pubsub-state peer) [:live :inbound topic])]
+    (if (let [{:keys [max-queued-publishes max-queued-bytes]}
+              ;; As strict as the strictest subscriber connection, with the
+              ;; topic's own bounds taking precedence as they do for senders.
+              (merge (apply merge-with min ls/default-limits
+                            (keep #(:limits (live-conn peer %))
+                                  (get-subscribers peer topic)))
+                     (select-keys (:opts (get-topic-config peer topic))
+                                  [:max-queued-publishes :max-queued-bytes]))]
+          (and (< (count entries) max-queued-publishes)
+               (<= (+ bytes (:bytes entry)) max-queued-bytes)))
+      (do (update-pubsub-state! peer update-in [:live :inbound topic]
+                                #(-> % (update :entries conj entry)
+                                     (update :bytes + (:bytes entry))))
+          {})
+      (do (update-pubsub-state! peer assoc-in [:live :inbound topic]
+                                {:entries [] :bytes 0})
+          (into {}
+                (map (fn [o] [o (overflow-live! peer o topic entry)]))
+                (get-subscribers peer topic))))
+    (into {}
+          (map (fn [o] [o (enqueue-live! peer o topic entry)]))
+          (get-subscribers peer topic))))
+
+(defn- live-entry
+  [topic payload bytes]
+  {:payload payload
+   :bytes (+ (or bytes (estimated-frame-bytes (proto/publish-msg topic payload)))
+             live-frame-overhead)})
 
 (defn publish!
   "Publish a message to all subscribers of a topic.
@@ -249,7 +556,9 @@
    - topic: The topic to publish to
    - payload: Any EDN value
 
-   Returns: channel yielding {:ok true :sent-count N} or {:error ...}"
+   Returns: channel yielding {:ok true :queued N} or {:error ...}. The
+   publication is queued per subscriber connection and sent as the receiver's
+   live window allows (see `direct-publish!`)."
   [peer topic payload]
   (if-let [f (transport-fn peer :publish!)]
     (f peer topic payload)
@@ -259,86 +568,55 @@
   "The one-hop publish: a server fans out to its subscribers, a client sends to
   its server. This was `publish!` before there was more than one transport.
 
+  The publication is queued in each connection's live sender and written as
+  the receiver's window allows; this never parks and never throws on transport
+  pressure. Returns a channel yielding `{:ok true :queued n}`, or
+  `{:error e :overflow true}` when a client's queue overflowed (its connection
+  is retired: the loss is loud).
+
   Public because it is part of the transport CONTRACT, not an implementation
   detail: a transport that carries publishes some other way may still want the
   direct path for some of them, and reaching a private var across a library
   boundary is not an interface."
   [peer topic payload]
-  (let [{{S :supervisor} :volatile} @peer
-        pubsub-state (get-pubsub-state peer)
+  (let [pubsub-state (get-pubsub-state peer)
         out (:out pubsub-state)
         owner? (topic-registered? peer topic)
-        is-client? (and out (not owner?))]
-    ;; Use put? (synchronous, callable from any thread) instead of (go (>! ...)).
-    ;; With go-try + >?, multiple publish! calls from one thread spawn racing
-    ;; go-blocks whose >! puts can reach the out channel out of order. put?
-    ;; enqueues directly on the channel's pending-puts FIFO from the calling
-    ;; thread, so wire order matches call order.
-    (let [msg (proto/publish-msg topic payload)
-          result-ch (chan 1)]
-      (if is-client?
-        (do
-          (log/debug :pubsub/publish-to-server {:topic topic})
-          (try
-            (put? S out msg)
-            (async/offer! result-ch {:ok true :sent-count 1})
-            (catch #?(:clj Throwable :cljs :default) e
-              ;; Past 1024 pending puts the frame is lost. Do not throw into the
-              ;; caller (a konserve write hook runs after its write committed):
-              ;; close the connection so the loss is loud and the session is
-              ;; re-established.
-              (log/error :pubsub/publish-overflow {:topic topic :error (str e)})
-              (close! out)
-              (async/offer! result-ch {:error e})))
-          (close! result-ch))
-        ;; Register the take synchronously. Concurrent publish! calls from one
-        ;; thread therefore enter the peer/topic serializer in call order.
-        (let [lock (topic-apply-lock peer topic)
-              on-token
-              (fn [token]
-                (if-not token
-                  (do
-                    (async/offer! result-ch
-                                  {:error (ex-info "Topic serializer closed"
-                                                   {:topic topic})})
-                    (close! result-ch))
-                  (let [sent (volatile! 0)]
-                    (try
-                      ;; Subscriber selection and enqueue are one ordered topic
-                      ;; operation. An unsubscribe drain cannot acknowledge in
-                      ;; between these two steps.
-                      (doseq [transport (get-subscribers peer topic)]
-                        ;; Register the transport put without parking. Core.async
-                        ;; preserves pending-put order, so the later drain ACK
-                        ;; cannot overtake this publication even on an unbuffered
-                        ;; connection channel.
-                        (when (put-subscriber! S peer topic transport msg)
-                          (vswap! sent inc)))
-                      (async/offer! result-ch {:ok true :sent-count @sent})
-                      (catch #?(:clj Throwable :cljs :default) e
-                        (async/offer! result-ch {:error e}))
-                      (finally
-                        (async/offer! lock :available)
-                        (close! result-ch))))))]
-          (try
-            (async/take! lock on-token)
-            (catch #?(:clj Throwable :cljs :default) e
-              ;; Past 1024 pending takes on the serializer the publication
-              ;; reaches no subscriber. Close them all, so every one of them
-              ;; resubscribes instead of silently missing it.
-              (log/error :pubsub/publish-overflow {:topic topic :error (str e)})
-              (doseq [transport (get-subscribers peer topic)]
-                (remove-subscriber! peer topic transport)
-                (close! transport))
-              (async/offer! result-ch {:error e})
-              (close! result-ch)))))
-      result-ch)))
+        is-client? (and out (not owner?))
+        ;; Estimated outside the send section: printing may load from storage.
+        entry (live-entry topic payload nil)
+        result
+        (if is-client?
+          (let [decision (with-send-section
+                           peer topic
+                           #(enqueue-admitted! peer out (client-sender! peer out topic)
+                                               entry :fail))]
+            (log/debug :pubsub/publish-to-server {:topic topic :decision decision})
+            (case decision
+              :queued {:ok true :queued 1}
+              :fail (let [error (ex-info "Live publish queue overflow"
+                                         {:topic topic})]
+                      (log/error :pubsub/publish-overflow {:topic topic})
+                      (retire-out! peer out {:reason :live-overflow :topic topic})
+                      {:error error :overflow true})
+              {:error (ex-info "Connection closed" {:topic topic})}))
+          (let [decisions (with-send-section
+                            peer topic
+                            #(defer-or-enqueue! peer topic entry))]
+            (after-live-decisions! peer topic decisions)
+            {:ok true :queued (count (filter #{:queued} (vals decisions)))}))]
+    (doto (chan 1)
+      (async/offer! result)
+      close!)))
 
 (defn- apply-publish-under-lock!
   [S peer topic payload strategy on-publish after-success]
-  (let [lock (topic-apply-lock peer topic)]
+  (let [lock (topic-apply-lock peer topic)
+        owned? (topic-registered? peer topic)]
     (go-try S
             (<! lock)
+            (when owned?
+              (begin-inbound-apply! peer topic))
             (try
               (let [apply-result (if strategy
                                    (<! (safe-result!
@@ -359,6 +637,8 @@
               (catch #?(:clj Throwable :cljs :default) e
                 {:error e})
               (finally
+                (when owned?
+                  (end-inbound-apply! peer topic))
                 ;; A one-slot semaphore must never park its releasing runner.
                 (async/offer! lock :available))))))
 
@@ -391,71 +671,93 @@
 (defn- send-handshake!
   "Send handshake items with batching and flow control.
 
-   Returns channel yielding {:ok true} or {:error ...}"
-  [S out topic handshake-source opts pending-acks]
-  (let [{handshake-ch :items producer-completion :completion}
-        (if (and (map? handshake-source) (contains? handshake-source :items))
-          handshake-source
-          {:items handshake-source})
-        {:keys [batch-size batch-timeout-ms item-timeout-ms handshake-timeout-ms]} opts
-        started-ms (now-ms)]
-    (go-try S
+   With `finish!`, the end of the handshake is `(finish!)` instead of writing
+   `handshake-complete` here: the subscriber's live sender writes it, so it is
+   ordered with the sender's own frames. `overflowed?` is checked between
+   batches; once the subscriber's live window overflowed, the producer is
+   closed and the handshake ends early, `finish!` sending `resync`.
+
+   Returns channel yielding {:ok true :outcome o} or {:error ...}, `o` being
+   what `finish!` returned (`:live` without it)."
+  ([S out topic handshake-source opts pending-acks]
+   (send-handshake! S out topic handshake-source opts pending-acks nil))
+  ([S out topic handshake-source opts pending-acks {:keys [finish! overflowed?]}]
+   (let [{handshake-ch :items producer-completion :completion}
+         (if (and (map? handshake-source) (contains? handshake-source :items))
+           handshake-source
+           {:items handshake-source})
+         {:keys [batch-size batch-timeout-ms item-timeout-ms handshake-timeout-ms]} opts
+         started-ms (now-ms)]
+     (go-try S
             ;; `last-progress-ms` is when this handshake last MOVED, not when it
             ;; began. The liveness bound below measures a stall, and a transfer
             ;; that is slow but progressing is not a stall — see there.
-            (loop [batch-idx 0
-                   total-sent 0
-                   last-progress-ms started-ms]
+             (loop [batch-idx 0
+                    total-sent 0
+                    last-progress-ms started-ms]
+               (if (and overflowed? (overflowed?))
+                ;; The subscriber's live window overflowed: it resubscribes,
+                ;; so the rest of this snapshot is moot. Closing the item
+                ;; channel stops a producer parked on it.
+                 (do
+                   (close! handshake-ch)
+                   (log/warn :pubsub/handshake-ended-by-overflow
+                             {:topic topic :total-sent total-sent})
+                   {:ok true :outcome (finish!)})
         ;; Collect up to batch-size items
-              (let [{:keys [items closed?]}
-                    (loop [items []
-                           remaining batch-size]
-                      (if (zero? remaining)
-                        {:items items :closed? false}
-                        (let [[item ch] (alts! [handshake-ch (timeout item-timeout-ms)])]
-                          (cond
+                 (let [{:keys [items closed?]}
+                       (loop [items []
+                              remaining batch-size]
+                         (if (zero? remaining)
+                           {:items items :closed? false}
+                           (let [[item ch] (alts! [handshake-ch (timeout item-timeout-ms)])]
+                             (cond
                            ;; Got an item
-                            (and (= ch handshake-ch) (some? item))
-                            (recur (conj items item) (dec remaining))
+                               (and (= ch handshake-ch) (some? item))
+                               (recur (conj items item) (dec remaining))
 
                            ;; Channel CLOSED — the producer is finished. This is
                            ;; the ONLY thing that ends a handshake.
-                            (and (= ch handshake-ch) (nil? item))
-                            {:items items :closed? true}
+                               (and (= ch handshake-ch) (nil? item))
+                               {:items items :closed? true}
 
                            ;; Quiet — the producer is SLOW, not finished. Hand
                            ;; back what we have and let the caller decide; it
                            ;; must not be mistaken for the case above.
-                            :else
-                            {:items items :closed? false}))))]
-                (cond
+                               :else
+                               {:items items :closed? false}))))]
+                   (cond
             ;; Producer finished and nothing left - send complete
-                  (and closed? (empty? items))
-                  (let [producer-result
-                        (if producer-completion
-                          (if handshake-timeout-ms
-                            (let [[result port]
-                                  (alts! [producer-completion
-                                          (timeout handshake-timeout-ms)])]
-                              (if (= port producer-completion)
-                                result
-                                {:error (ex-info "Snapshot producer completion timeout"
-                                                 {:topic topic
-                                                  :handshake-timeout-ms
-                                                  handshake-timeout-ms})}))
-                            (<! producer-completion))
+                     (and closed? (empty? items))
+                     (let [producer-result
+                           (if producer-completion
+                             (if handshake-timeout-ms
+                               (let [[result port]
+                                     (alts! [producer-completion
+                                             (timeout handshake-timeout-ms)])]
+                                 (if (= port producer-completion)
+                                   result
+                                   {:error (ex-info "Snapshot producer completion timeout"
+                                                    {:topic topic
+                                                     :handshake-timeout-ms
+                                                     handshake-timeout-ms})}))
+                               (<! producer-completion))
                           ;; Compatibility only. A bare legacy channel cannot
                           ;; distinguish successful close from a producer that
                           ;; caught an exception and closed after a prefix.
-                          {:ok true :legacy-close? true})]
-                    (if (explicit-success? producer-result)
-                      (do
-                        (log/debug :pubsub/handshake-complete {:topic topic :total-sent total-sent})
-                        (>? S out (proto/handshake-complete-msg topic))
-                        {:ok true :legacy-close? (:legacy-close? producer-result)})
-                      {:error (or (:error producer-result)
-                                  (ex-info "Snapshot producer did not report success"
-                                           {:topic topic :result producer-result}))}))
+                             {:ok true :legacy-close? true})]
+                       (if (explicit-success? producer-result)
+                         (do
+                           (log/debug :pubsub/handshake-complete {:topic topic :total-sent total-sent})
+                           {:ok true
+                            :outcome (if finish!
+                                       (finish!)
+                                       (do (>? S out (proto/handshake-complete-msg topic))
+                                           :live))
+                            :legacy-close? (:legacy-close? producer-result)})
+                         {:error (or (:error producer-result)
+                                     (ex-info "Snapshot producer did not report success"
+                                              {:topic topic :result producer-result}))}))
 
             ;; QUIET, not finished. Keep waiting.
             ;;
@@ -473,9 +775,9 @@
             ;; pointers LAST (datahike's does, so a head is applied only after
             ;; the nodes it references) loses exactly the head, and a replica
             ;; without its head is unusable.
-                  (and (not closed?) (empty? items))
-                  (if (and handshake-timeout-ms
-                           (> (- (now-ms) last-progress-ms) handshake-timeout-ms))
+                     (and (not closed?) (empty? items))
+                     (if (and handshake-timeout-ms
+                              (> (- (now-ms) last-progress-ms) handshake-timeout-ms))
               ;; Liveness bound: a peer that never finishes is a FAILURE, and
               ;; must be reported as one. Never completed silently.
               ;;
@@ -486,44 +788,44 @@
               ;; ordinary quiet gap once the clock ran out. What we want to
               ;; catch is a producer that has STOPPED, and that is a gap since
               ;; progress — a quantity no amount of slow wifi inflates.
-                    (do
-                      (log/warn :pubsub/handshake-timeout
-                                {:topic topic :total-sent total-sent
-                                 :stalled-ms (- (now-ms) last-progress-ms)
-                                 :elapsed-ms (- (now-ms) started-ms)})
-                      {:error (ex-info "Handshake producer stalled"
-                                       {:topic topic :total-sent total-sent
-                                        :stalled-ms (- (now-ms) last-progress-ms)
-                                        :handshake-timeout-ms handshake-timeout-ms})})
-                    (recur batch-idx total-sent last-progress-ms))
+                       (do
+                         (log/warn :pubsub/handshake-timeout
+                                   {:topic topic :total-sent total-sent
+                                    :stalled-ms (- (now-ms) last-progress-ms)
+                                    :elapsed-ms (- (now-ms) started-ms)})
+                         {:error (ex-info "Handshake producer stalled"
+                                          {:topic topic :total-sent total-sent
+                                           :stalled-ms (- (now-ms) last-progress-ms)
+                                           :handshake-timeout-ms handshake-timeout-ms})})
+                       (recur batch-idx total-sent last-progress-ms))
 
-                  :else
+                     :else
 
             ;; Register the ACK waiter BEFORE anything can cause the peer to ACK
             ;; this batch. With an unbuffered transport, the receiver can consume
             ;; batch-complete and answer before the sender resumes from its put.
             ;; Registering afterward loses that perfectly valid fast ACK and then
             ;; times out a batch the receiver already applied.
-                  (let [ack-ch (chan 1)]
-                    (swap! pending-acks assoc-in [topic batch-idx] ack-ch)
-                    (log/debug :pubsub/sending-batch {:topic topic :batch-idx batch-idx :item-count (count items)})
+                     (let [ack-ch (chan 1)]
+                       (swap! pending-acks assoc-in [topic batch-idx] ack-ch)
+                       (log/debug :pubsub/sending-batch {:topic topic :batch-idx batch-idx :item-count (count items)})
               ;; Send each item
-                    (doseq [item items]
-                      (>? S out (proto/handshake-data-msg topic item)))
+                       (doseq [item items]
+                         (>? S out (proto/handshake-data-msg topic item)))
 
               ;; Send batch-complete with item count
-                    (>? S out (proto/handshake-batch-complete-msg topic batch-idx (count items)))
+                       (>? S out (proto/handshake-batch-complete-msg topic batch-idx (count items)))
 
               ;; Wait for ACK or timeout
-                    (let [[result ch] (alts! [ack-ch (timeout batch-timeout-ms)])]
-                      (swap! pending-acks update topic dissoc batch-idx)
-                      (if (and (= ch ack-ch)
-                               (some? result)
-                               (not= :closed result))
-                        (recur (inc batch-idx) (+ total-sent (count items)) (now-ms))
-                        {:error (ex-info "Handshake batch ack timeout"
-                                         {:topic topic :batch-idx batch-idx
-                                          :ack-result result})})))))))))
+                       (let [[result ch] (alts! [ack-ch (timeout batch-timeout-ms)])]
+                         (swap! pending-acks update topic dissoc batch-idx)
+                         (if (and (= ch ack-ch)
+                                  (some? result)
+                                  (not= :closed result))
+                           (recur (inc batch-idx) (+ total-sent (count items)) (now-ms))
+                           {:error (ex-info "Handshake batch ack timeout"
+                                            {:topic topic :batch-idx batch-idx
+                                             :ack-result result})})))))))))))
 
 (defn- handle-publish!
   "Apply an inbound `:pubsub/publish` and forward it to the topic's other
@@ -567,31 +869,47 @@
                        S #(receive-publish!
                            peer topic payload {:principal principal :out out})
                        {:operation :transport-receive-publish :topic topic}))
-                  (<!
-                   (apply-publish-under-lock!
-                    S peer topic payload strategy on-publish
-                    (fn []
-                      (log/debug :pubsub/publish-received {:topic topic})
-                      ;; Server-side: forward to other subscribers (except the
-                      ;; sender). Re-read the subscriber set after apply while
-                      ;; still holding the same topic boundary used by
-                      ;; unsubscribe.
-                      (let [subscribers (get-subscribers peer topic)]
-                        (when (and topic-config (seq subscribers))
-                          (log/debug :pubsub/forwarding-publish
-                                     {:topic topic :count (count subscribers)})
-                          (let [fwd-msg (proto/publish-msg topic payload)]
-                            (doseq [transport subscribers]
-                              (when (not= transport out)
-                                ;; Nonparking pending puts retain channel FIFO,
-                                ;; which makes the later drain ACK a real marker
-                                ;; on unbuffered transports. A refused put closes
-                                ;; that subscriber; it never fails the
-                                ;; publishing client's (successful) apply.
-                                (put-subscriber! S peer topic transport
-                                                 fwd-msg))))))))))))
+                  (let [entry (when topic-config
+                                (live-entry topic payload
+                                            (estimated-frame-bytes msg)))]
+                    (<!
+                     (apply-publish-under-lock!
+                      S peer topic payload strategy on-publish
+                      (fn []
+                        (log/debug :pubsub/publish-received {:topic topic})
+                        ;; Server-side: forward to the other subscribers (not
+                        ;; the sender), selected after apply while still
+                        ;; holding the topic boundary unsubscribe takes too.
+                        ;; Queueing never parks, and an overflow at another
+                        ;; subscriber never fails this client's apply.
+                        (when entry
+                          (let [decisions
+                                (with-send-section
+                                  peer topic
+                                  #(into {}
+                                         (keep (fn [transport]
+                                                 (when (not= transport out)
+                                                   [transport
+                                                    (enqueue-live! peer transport
+                                                                   topic entry)])))
+                                         (get-subscribers peer topic)))]
+                            (after-live-decisions! peer topic decisions))))))))))
             (catch #?(:clj Throwable :cljs :default) e
               {:error e}))))
+
+(defn- live-grant-for
+  "The window subscriber `msg` grants for `topic`'s live publishes, clamped to
+  what its lane can take next to a handshake batch: nil for a client without
+  windows (or when this connection has windows disabled, `:live-window
+  false`), `::invalid-grant` when nothing remains."
+  [peer out msg topic batch-size]
+  (when-let [{:keys [frames bytes lane]} (and (:grant (live-conn peer out))
+                                              (get-in msg [:live-grant topic]))]
+    (let [w (when (and (pos-int? frames) (pos-int? lane))
+              (min frames (- lane batch-size 4)))]
+      (if (and w (pos? w) (pos-int? bytes))
+        {:frames w :bytes bytes}
+        ::invalid-grant))))
 
 (defn- handle-subscription!
   "Handle a subscription request from a client.
@@ -646,7 +964,23 @@
                      (>? S out (proto/error-msg topic "Topic not registered"))
                      (>? S out (proto/subscribe-ack-msg id successful))
                      (doseq [successful-topic successful]
-                       (remove-subscriber! peer successful-topic out))
+                       (drop-subscriber! peer successful-topic out))
+                     (swap! active-sessions #(apply disj % topics))
+                     (close! out)
+                     {:error error})
+
+          ;; The client offered a live window this topic cannot honour
+                   (= ::invalid-grant (live-grant-for peer out msg topic
+                                                      (get-in (get-topic-config peer topic)
+                                                              [:opts :batch-size])))
+                   (let [error (ex-info "Live window too small for this topic"
+                                        {:topic topic
+                                         :offer (get-in msg [:live-grant topic])})]
+                     (log/warn :pubsub/invalid-live-grant (ex-data error))
+                     (>? S out (proto/error-msg topic "Live window too small"))
+                     (>? S out (proto/subscribe-ack-msg id successful))
+                     (doseq [successful-topic successful]
+                       (drop-subscriber! peer successful-topic out))
                      (swap! active-sessions #(apply disj % topics))
                      (close! out)
                      {:error error})
@@ -658,36 +992,80 @@
                      (>? S out (proto/error-msg topic "Not authorized"))
                      (>? S out (proto/subscribe-ack-msg id successful))
                      (doseq [successful-topic successful]
-                       (remove-subscriber! peer successful-topic out))
+                       (drop-subscriber! peer successful-topic out))
                      (swap! active-sessions #(apply disj % topics))
                      (close! out)
                      {:error error})
 
                    :else
                    (let [{:keys [strategy opts]} (get-topic-config peer topic)
-                         client-state (get client-states topic)]
-
-            ;; Begin live capture before the strategy takes its snapshot. The
-            ;; receiver lane holds these publications behind the snapshot cut.
-                     (add-subscriber! peer topic out)
+                         client-state (get client-states topic)
+                         grant (live-grant-for peer out msg topic (:batch-size opts))
+                         ;; Begin live capture before the strategy takes its
+                         ;; snapshot. The receiver lane holds these
+                         ;; publications behind the snapshot cut.
+                         sender (with-send-section
+                                  peer topic
+                                  (fn []
+                                    (let [sender (new-sender!
+                                                  peer out topic
+                                                  (if grant
+                                                    {:mode :windowed :grant grant
+                                                     :phase :handshaking}
+                                                    {:mode :legacy
+                                                     :phase :handshaking}))]
+                                      (add-subscriber! peer topic out)
+                                      sender)))
+                         ;; The end of the handshake, in one step on the
+                         ;; sender: `handshake-complete`, or `resync` if the
+                         ;; live window overflowed meanwhile. The session is
+                         ;; released first, so the client's resubscribe is
+                         ;; not taken for a duplicate.
+                         finish! (fn []
+                                   (swap! active-sessions disj topic)
+                                   (with-send-section
+                                     peer topic
+                                     (fn []
+                                       (let [outcome (ls/swap-sender! sender ls/finish)]
+                                         (when (= :resync outcome)
+                                           (remove-subscriber! peer topic out)
+                                           (count-resync! peer out topic))
+                                         outcome))))
+                         resync? (contains? (set (:resync msg)) topic)]
 
             ;; Send handshake
                      (let [result (try
-                                    (let [source (proto/-handshake-items strategy client-state)]
-                                      (<! (send-handshake! S out topic source opts pending-acks)))
+                                    (let [source (if (and resync?
+                                                          (satisfies? proto/PResyncHandshake
+                                                                      strategy))
+                                                   (proto/-resync-handshake-items
+                                                    strategy client-state)
+                                                   (proto/-handshake-items
+                                                    strategy client-state))]
+                                      (<! (send-handshake!
+                                           S out topic source opts pending-acks
+                                           {:finish! finish!
+                                            :overflowed? #(:overflowed?
+                                                           (ls/state sender))})))
                                     (catch #?(:clj Throwable :cljs :default) e
                                       {:error e}))]
                        (if (and (map? result) (true? (:ok result)))
-                         (do
-                           (swap! active-sessions disj topic)
-                           (log/info :pubsub/subscription-complete {:topic topic})
-                           (recur (next remaining) (conj successful topic)))
+                         (if (= :live (:outcome result))
+                           (do
+                             (log/info :pubsub/subscription-complete {:topic topic})
+                             (recur (next remaining) (conj successful topic)))
+                           ;; Resync requested or unsubscribed meanwhile: not
+                           ;; a failure, and not a subscription either.
+                           (do
+                             (log/info :pubsub/subscription-ended-in-handshake
+                                       {:topic topic :outcome (:outcome result)})
+                             (recur (next remaining) successful)))
                          (do
                            (swap! active-sessions #(apply disj % topics))
                            (log/warn :pubsub/subscription-failed
                                      {:topic topic :error (:error result)})
                            (doseq [added-topic (conj successful topic)]
-                             (remove-subscriber! peer added-topic out))
+                             (drop-subscriber! peer added-topic out))
                            (close! out)
                            {:error (or (:error result)
                                        (ex-info "Snapshot handshake failed"
@@ -705,14 +1083,32 @@
             (if-let [joining (first (filter @active-sessions topics))]
               {:error (ex-info "Cannot drain an active v0 snapshot"
                                {:topic joining})}
-              (do
-                (doseq [topic topics]
-                  (let [lock (topic-apply-lock peer topic)]
-                    (<! lock)
-                    (try
-                      (remove-subscriber! peer topic out)
-                      (finally
-                        (async/offer! lock :available)))))
+              (let [;; Under the apply lock, so a publication being applied and
+                    ;; forwarded has been queued; in the send section, so no
+                    ;; later one is.
+                    dones (loop [topics (seq topics)
+                                 dones []]
+                            (if-let [topic (first topics)]
+                              (let [lock (topic-apply-lock peer topic)]
+                                (<! lock)
+                                (let [done (try
+                                             (with-send-section
+                                               peer topic
+                                               (fn []
+                                                 (remove-subscriber! peer topic out)
+                                                 (when-let [sender (sender-for peer out topic)]
+                                                   (ls/swap-sender! sender ls/drain)
+                                                   (:done sender))))
+                                             (finally
+                                               (async/offer! lock :available)))]
+                                  (recur (next topics) (cond-> dones done (conj done)))))
+                              dones))]
+                ;; The drain marker follows every frame queued before it: wait
+                ;; until the senders wrote their queues, outside every lock.
+                (loop [dones (seq dones)]
+                  (when-let [done (first dones)]
+                    (<! done)
+                    (recur (next dones))))
                 (when id
                   (>? S out (proto/unsubscribe-ack-msg id topics)))
                 {:ok true})))))
@@ -790,6 +1186,24 @@
          state)))
     @marked?))
 
+(defn- with-client-control
+  "Run `f` holding the peer's client control lock. A resubscription after a
+  resync swaps its generation and puts its request in one step, and so does an
+  unsubscribe claiming topics, so an unsubscribe can never be put on the wire
+  ahead of the subscribe it is meant to cancel. `f` must not park."
+  [peer f]
+  (let [lock (peer-lock peer [:client-control-lock])]
+    #?(:clj (locking lock (f))
+       :cljs (do lock (f)))))
+
+(defn- subscribe-request
+  "The subscribe frame, offering this connection's live window when it has one."
+  [peer out id topics client-states resync-topics]
+  (let [offer (:offer (live-conn peer out))]
+    (cond-> (proto/subscribe-msg id topics client-states)
+      offer (assoc :live-grant (into {} (map (fn [t] [t offer])) topics))
+      (seq resync-topics) (assoc :resync (set resync-topics)))))
+
 (defn subscribe!
   "Subscribe to topics on a remote peer.
 
@@ -847,7 +1261,7 @@
                                         states))]
           ;; Send subscribe request
                   (log/debug :pubsub/sending-subscribe {:topics topics :id id})
-                  (>? S out (proto/subscribe-msg id topics client-states))
+                  (>? S out (subscribe-request peer out id topics client-states nil))
 
           ;; Return - actual handling happens in middleware
                   {:ok topics :id id})
@@ -857,7 +1271,54 @@
                   ;; to release locally.
                   (doseq [topic topics]
                     (remove-subscription! peer topic))
+                  ;; Nor will a grant for it arrive: publishes queued waiting
+                  ;; for one go out unpaced.
+                  (when (and out (nil? (live-mode peer out)))
+                    (set-live-mode! peer out {:mode :legacy}))
                   {:error e}))))))
+
+(defn- resubscribe-after-resync!
+  "The server dropped `topic`'s subscription after its live window overflowed.
+  Resubscribe on the same connection under a new generation; the differential
+  handshake catches up on what was dropped. A subscription cancelled or
+  replaced meanwhile is left alone."
+  [S peer out topic generation]
+  (go-try S
+          (try
+            (let [sub (subscription peer topic)]
+              (if-not (and sub
+                           (= generation (:generation sub))
+                           (not (:cancelling? sub)))
+                {:ok false}
+                (let [client-state (<? S (proto/-init-client-state (:strategy sub)))
+                      new-generation (random-uuid)
+                      msg (subscribe-request peer out (random-uuid) #{topic}
+                                             {topic client-state} #{topic})
+                      sent? (with-client-control
+                              peer
+                              (fn []
+                                (let [swapped? (volatile! false)]
+                                  (update-pubsub-state!
+                                   peer
+                                   (fn [state]
+                                     (vreset! swapped? false)
+                                     (if (and (= generation
+                                                 (get-in state [:subscriptions topic :generation]))
+                                              (not (get-in state [:subscriptions topic :cancelling?])))
+                                       (do (vreset! swapped? true)
+                                           (update-in state [:subscriptions topic] assoc
+                                                      :generation new-generation
+                                                      :handshake-complete? false))
+                                       state)))
+                                  (when @swapped?
+                                    (async/put! out msg)))))]
+                  (log/info :pubsub/resubscribed-after-overflow {:topic topic :sent? (boolean sent?)})
+                  {:ok true})))
+            (catch #?(:clj Throwable :cljs :default) e
+              (log/error :pubsub/resubscribe-after-overflow-failed
+                         {:topic topic :error (str e)})
+              (remove-subscription! peer topic generation)
+              {:error e}))))
 
 (defn direct-unsubscribe!
   "Orderly point-to-point unsubscribe for `topics`.
@@ -887,84 +1348,87 @@
         (doseq [topic topics]
           (remove-subscription! peer topic))
         (done {:ok true}))
-      (let [claimed (volatile! #{})
-            already (volatile! #{})
-            remembered-outs (volatile! #{})]
+      (with-client-control
+        peer
+        (fn []
+          (let [claimed (volatile! #{})
+                already (volatile! #{})
+                remembered-outs (volatile! #{})]
         ;; One transition: read which topics are active, mark them cancelling.
         ;; Snapshot effects already accepted may drain, but readiness can no
         ;; longer be published.
-        (update-pubsub-state!
-         peer
-         (fn [state]
-           (let [subs (:subscriptions state)
-                 cancelling (into #{} (filter #(get-in subs [% :cancelling?])) topics)
-                 active (into #{} (filter #(and (contains? subs %) (not (cancelling %)))) topics)]
-             (vreset! already cancelling)
-             (vreset! claimed active)
-             (vreset! remembered-outs (into #{} (keep #(get-in subs [% :out])) active))
-             (reduce (fn [state topic]
-                       (assoc-in state [:subscriptions topic :cancelling?] true))
-                     state
-                     active))))
-        (let [active @claimed
-              cancelling @already
-              out (or out
-                      (when (= 1 (count @remembered-outs)) (first @remembered-outs))
-                      (:out pubsub-state))]
-          (cond
+            (update-pubsub-state!
+             peer
+             (fn [state]
+               (let [subs (:subscriptions state)
+                     cancelling (into #{} (filter #(get-in subs [% :cancelling?])) topics)
+                     active (into #{} (filter #(and (contains? subs %) (not (cancelling %)))) topics)]
+                 (vreset! already cancelling)
+                 (vreset! claimed active)
+                 (vreset! remembered-outs (into #{} (keep #(get-in subs [% :out])) active))
+                 (reduce (fn [state topic]
+                           (assoc-in state [:subscriptions topic :cancelling?] true))
+                         state
+                         active))))
+            (let [active @claimed
+                  cancelling @already
+                  out (or out
+                          (when (= 1 (count @remembered-outs)) (first @remembered-outs))
+                          (:out pubsub-state))]
+              (cond
             ;; Nothing left to ask for: every topic is gone, or a request for it
             ;; is already in flight. Attach to those requests.
-            (empty? active)
-            (let [attached (volatile! [])]
-              (swap! pending
-                     (fn [requests]
-                       (reduce-kv (fn [requests id {:keys [remaining] :as request}]
-                                    (if (some cancelling remaining)
-                                      (let [w (chan 1)]
-                                        (vswap! attached conj w)
-                                        (assoc requests id (update request :waiters (fnil conj []) w)))
-                                      requests))
-                                  requests
-                                  requests)))
-              (if (empty? @attached)
-                (done {:ok true})
-                (let [{{S :supervisor} :volatile} @peer]
-                  (go-try S
-                          (loop [ws (seq @attached)]
-                            (if-let [w (first ws)]
-                              (do (<! w) (recur (next ws)))
-                              {:ok true}))))))
+                (empty? active)
+                (let [attached (volatile! [])]
+                  (swap! pending
+                         (fn [requests]
+                           (reduce-kv (fn [requests id {:keys [remaining] :as request}]
+                                        (if (some cancelling remaining)
+                                          (let [w (chan 1)]
+                                            (vswap! attached conj w)
+                                            (assoc requests id (update request :waiters (fnil conj []) w)))
+                                          requests))
+                                      requests
+                                      requests)))
+                  (if (empty? @attached)
+                    (done {:ok true})
+                    (let [{{S :supervisor} :volatile} @peer]
+                      (go-try S
+                              (loop [ws (seq @attached)]
+                                (if-let [w (first ws)]
+                                  (do (<! w) (recur (next ws)))
+                                  {:ok true}))))))
 
-            out
-            (let [id (random-uuid)
-                  result-ch (chan 1)]
-              (swap! pending assoc id {:channel result-ch
-                                       :remaining active
-                                       :generations
-                                       (into {} (map (fn [topic]
-                                                       [topic (:generation
-                                                               (subscription peer topic))])
-                                                     active))})
-              (async/put! out (proto/unsubscribe-msg id active)
-                          (fn [delivered?]
-                            (when-not delivered?
-                              (when-let [{:keys [channel waiters]} (get @pending id)]
-                                (swap! pending dissoc id)
-                                (let [error {:error (ex-info "Unsubscribe was not delivered"
-                                                             {:topics active})}]
-                                  (async/offer! channel error)
-                                  (close! channel)
-                                  (doseq [w waiters]
-                                    (async/offer! w error)
-                                    (close! w)))))))
-              result-ch)
+                out
+                (let [id (random-uuid)
+                      result-ch (chan 1)]
+                  (swap! pending assoc id {:channel result-ch
+                                           :remaining active
+                                           :generations
+                                           (into {} (map (fn [topic]
+                                                           [topic (:generation
+                                                                   (subscription peer topic))])
+                                                         active))})
+                  (async/put! out (proto/unsubscribe-msg id active)
+                              (fn [delivered?]
+                                (when-not delivered?
+                                  (when-let [{:keys [channel waiters]} (get @pending id)]
+                                    (swap! pending dissoc id)
+                                    (let [error {:error (ex-info "Unsubscribe was not delivered"
+                                                                 {:topics active})}]
+                                      (async/offer! channel error)
+                                      (close! channel)
+                                      (doseq [w waiters]
+                                        (async/offer! w error)
+                                        (close! w)))))))
+                  result-ch)
 
             ;; Claimed, but no connection to ask: release locally.
-            :else
-            (do
-              (doseq [topic active]
-                (remove-subscription! peer topic))
-              (done {:ok true}))))))))
+                :else
+                (do
+                  (doseq [topic active]
+                    (remove-subscription! peer topic))
+                  (done {:ok true}))))))))))
 
 (defn unsubscribe!
   "Unsubscribe from topics and await the remote drain marker.
@@ -1107,7 +1571,10 @@
      :bytes (estimated-frame-bytes msg)}
 
     :pubsub/unsubscribe-drain
-    {:type :close}))
+    {:type :close}
+
+    :pubsub/resync
+    {:type :live/resync}))
 
 (defn- pending-unsubscribe?
   "Whether `id` names an unsubscribe request in flight that still awaits
@@ -1200,6 +1667,17 @@
                   :ack-snapshot-batch
                   (do
                     (>? S out (proto/handshake-ack-msg topic index))
+                    (<! (continue! state remaining)))
+
+                  :ack-live
+                  (do
+                    (>? S out (proto/publish-ack-msg topic (:epoch effect) (:seq effect)))
+                    (<! (continue! state remaining)))
+
+                  :resync
+                  (do
+                    (log/warn :pubsub/resync-received {:topic topic})
+                    (resubscribe-after-resync! S peer out topic generation)
                     (<! (continue! state remaining)))
 
                   :apply-captured-live
@@ -1329,7 +1807,12 @@
                            (do
                              (complete-unsubscribe-topic! peer (:id msg) topic)
                              (close! lane))
-                           (if (lifecycle/terminal? next-state)
+                           (if (and (lifecycle/terminal? next-state)
+                                    ;; A resyncing lane stays for the
+                                    ;; unsubscribe drain of a cancellation
+                                    ;; racing the resubscription, until the
+                                    ;; new generation's lane replaces it.
+                                    (not= :resyncing (:phase next-state)))
                              (close! lane)
                              (recur next-state (<? S lane))))))
                      (let [transition (lifecycle/transition state {:type :close})]
@@ -1392,7 +1875,31 @@
           lifecycle-types #{:pubsub/handshake-data
                             :pubsub/handshake-batch-complete
                             :pubsub/handshake-complete
-                            :pubsub/publish}]
+                            :pubsub/publish
+                            :pubsub/resync}
+
+          ;; Live windows. What this side grants: as a subscriber (`offer`,
+          ;; sent in subscribe requests) the server's publishes are held in
+          ;; `:pending` during a handshake and share the lane with handshake
+          ;; frames; as a server (`grant`) a client's publishes only share the
+          ;; lane. Bytes keep half of the pending budget as slack: the
+          ;; receiver also counts keys the transport adds to decoded frames.
+          lane-size (get opts :lifecycle-lane-size 256)
+          receive-limits (merge lifecycle/default-limits
+                                (select-keys opts [:max-pending-publishes
+                                                   :max-pending-bytes]))
+          window (get opts :live-window (:live-window live-defaults))
+          window-bytes (min (get opts :live-window-bytes
+                                 (quot (:max-pending-bytes receive-limits) 2))
+                            (quot (:max-pending-bytes receive-limits) 2))
+          offer (when window
+                  {:frames (min window (:max-pending-publishes receive-limits))
+                   :bytes window-bytes
+                   :lane lane-size})
+          grant (when window
+                  (let [frames (min window (- lane-size 4))]
+                    (when (pos? frames)
+                      {:frames frames :bytes window-bytes})))]
 
       ;; Store output channel in peer state for client-side operations
       (update-pubsub-state! peer assoc
@@ -1418,7 +1925,8 @@
                   (doseq [[_ {:keys [channel]}] @lifecycle-lanes]
                     (close! channel))
                   (doseq [topic (keys (:topics (get-pubsub-state peer)))]
-                    (remove-subscriber! peer topic out))
+                    (drop-subscriber! peer topic out))
+                  (forget-connection! peer out)
                   (doseq [[topic sub-state] (subscriptions peer)]
                     (when (= out (:out sub-state))
                       (when-not (:handshake-complete? sub-state)
@@ -1454,6 +1962,16 @@
                                       {:generation generation :channel lane})
                                lane))]
                   (offer-or-retire! lane msg :lifecycle)))]
+
+        (update-pubsub-state! peer assoc-in [:live :conns out]
+                              {:queued-bytes (atom 0)
+                               :cap (get opts :max-connection-queued-bytes
+                                         (:max-connection-queued-bytes live-defaults))
+                               :limits (select-keys opts [:max-queued-publishes
+                                                          :max-queued-bytes])
+                               :offer offer
+                               :grant grant
+                               :retire! retire-connection!})
 
         ;; Subscribe requests are deliberately serialized for this connection.
         ;; The input router below remains free to deliver ACKs while a snapshot
@@ -1493,6 +2011,14 @@
                        (if-not msg
                          (retire-connection! {:reason :input-closed})
                          (do
+                           ;; The first frame from a server that sent no grant
+                           ;; before it: a server without windows. Publishes
+                           ;; queued waiting for its grant go out unpaced.
+                           (when (and offer
+                                      (nil? (live-mode peer out))
+                                      (or (contains? lifecycle-types (:type msg))
+                                          (= :pubsub/subscribe-ack (:type msg))))
+                             (set-live-mode! peer out {:mode :legacy}))
                            (case (:type msg)
                              :pubsub/subscribe
                              (let [topics (:topics msg)]
@@ -1506,7 +2032,37 @@
                                    :topic topic})
                                  (do
                                    (swap! active-server-sessions into topics)
+                                   ;; A client offering windows learns ours
+                                   ;; before any frame of this subscription.
+                                   (when (and grant (:live-grant msg))
+                                     (async/put! out (proto/live-grant-msg
+                                                      (:frames grant)
+                                                      (:bytes grant))))
                                    (offer-or-retire! subscribe-ch msg :subscribe))))
+
+                             :pubsub/live-grant
+                             (let [{:keys [frames bytes]} msg]
+                               (if (and (pos-int? frames) (pos-int? bytes))
+                                 (set-live-mode! peer out {:mode :windowed
+                                                           :grant {:frames frames
+                                                                   :bytes bytes}})
+                                 (retire-connection! {:reason :invalid-live-grant
+                                                      :grant (select-keys msg [:frames :bytes])})))
+
+                             :pubsub/publish-ack
+                             (let [{:keys [topic epoch]} msg
+                                   n (:seq msg)]
+                               (when-let [sender (and (int? n) (sender-for peer out topic))]
+                                 (let [acked (ls/swap-sender! sender ls/on-ack epoch n)
+                                       {:keys [phase grant]} (ls/state sender)]
+                                   ;; A full window acknowledged while live ends
+                                   ;; a run of resyncs.
+                                   (when (and (= :live phase)
+                                              (>= acked (:frames grant 1))
+                                              (get-in (get-pubsub-state peer)
+                                                      [:live :resyncs [out topic]]))
+                                     (update-pubsub-state! peer update-in [:live :resyncs]
+                                                           dissoc [out topic])))))
 
                              :pubsub/subscribe-ack
                              (log/debug :pubsub/subscribe-ack-received
@@ -1572,6 +2128,16 @@
      today's behaviour. Separate them when read and write authority differ —
      notably a one-directional deployment, where every inbound publish should
      be refused (`(constantly false)`) because only the server publishes.
+   - :live-window - frames this side lets the other keep unacknowledged per
+     topic (default 128); false disables live windows on the connection.
+   - :live-window-bytes - the same in estimated bytes (default half of
+     :max-pending-bytes).
+   - :max-queued-publishes, :max-queued-bytes - a sender queue's bounds
+     (default 4096, 16 MiB); per topic in `register-topic!` too.
+   - :max-connection-queued-bytes - all queues of one connection (64 MiB).
+
+   Per topic (`register-topic!`): :live-overflow (:resync or :fail) and
+   :max-resyncs (default 3).
 
    Usage with kabel:
    ```clojure

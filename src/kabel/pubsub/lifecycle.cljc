@@ -39,7 +39,13 @@
 
 (defn terminal?
   [state]
-  (contains? #{:failed :closed} (:phase state)))
+  (contains? #{:failed :closed :resyncing} (:phase state)))
+
+(defn- live-ack
+  "The ack effect for a windowed publication frame `msg`, or nil."
+  [topic msg]
+  (when (:seq msg)
+    {:op :ack-live :topic topic :epoch (:epoch msg) :seq (:seq msg)}))
 
 (defn- release-payloads
   [state]
@@ -89,7 +95,14 @@
   - `{:type :snapshot/complete}`
   - `{:type :snapshot/drain-result :ok true|false ...}`
   - `{:type :live/result :ok true|false ...}`
+  - `{:type :live/resync}`: the sender dropped this subscription after its
+    live window overflowed; the runner resubscribes. Not a failure.
   - `{:type :abort ...}` or `{:type :close}`
+
+  A live publication from a windowed sender carries `:seq`/`:epoch`, and
+  `:ack? true` when the sender waits for an acknowledgement. After a
+  successful apply such a frame yields an `:ack-live` effect; after the
+  captured publications drain, one cumulative `:ack-live` covers them all.
 
   Returned effects are interpreted sequentially. The runner MUST feed the
   corresponding result event back before dequeuing another ordinary event for
@@ -201,7 +214,10 @@
                :effects []}))
 
           :live
-          {:state (assoc state :phase :applying-live)
+          {:state (assoc state
+                         :phase :applying-live
+                         :in-flight (when (map? (:value event))
+                                      (select-keys (:value event) [:seq :epoch :ack?])))
            :effects [{:op :apply-live
                       :topic (:topic state)
                       :value (:value event)}]}
@@ -214,7 +230,10 @@
         (if (seq (:batch state))
           (fail state :uncommitted-snapshot-items
                 {:count (count (:batch state))})
-          {:state (assoc state :phase :draining)
+          {:state (assoc state
+                         :phase :draining
+                         :drain-ack (live-ack (:topic state)
+                                              (last (filter :seq (:pending state)))))
            :effects [{:op :apply-captured-live
                       :topic (:topic state)
                       :values (:pending state)}]}))
@@ -223,22 +242,38 @@
       (if (not= :draining (:phase state))
         (invalid-phase state event)
         (if (true? (:ok event))
-          {:state (assoc state
-                         :phase :live
-                         :pending []
-                         :pending-bytes 0
-                         :ready-status :succeeded)
-           :effects [{:op :settle-ready
-                      :ok true
-                      :topic (:topic state)}]}
+          {:state (-> state
+                      (assoc :phase :live
+                             :pending []
+                             :pending-bytes 0
+                             :ready-status :succeeded)
+                      (dissoc :drain-ack))
+           :effects (cond-> [{:op :settle-ready
+                              :ok true
+                              :topic (:topic state)}]
+                      (:drain-ack state) (conj (:drain-ack state)))}
           (fail state :captured-live-apply-failed {:error (:error event)})))
 
       :live/result
       (if (not= :applying-live (:phase state))
         (invalid-phase state event)
         (if (true? (:ok event))
-          {:state (assoc state :phase :live) :effects []}
+          (let [in-flight (:in-flight state)]
+            {:state (-> state (assoc :phase :live) (dissoc :in-flight))
+             :effects (if (:ack? in-flight)
+                        [(live-ack (:topic state) in-flight)]
+                        [])})
           (fail state :live-apply-failed {:error (:error event)})))
+
+      :live/resync
+      (if (contains? #{:joining :applying-batch :draining :live :applying-live}
+                     (:phase state))
+        {:state (-> state
+                    release-payloads
+                    (assoc :phase :resyncing)
+                    (dissoc :in-flight :drain-ack))
+         :effects [{:op :resync :topic (:topic state)}]}
+        (invalid-phase state event))
 
       :abort
       (fail state (or (:code event) :aborted) {:error (:error event)})

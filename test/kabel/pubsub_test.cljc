@@ -796,6 +796,16 @@
        ch)))
 
 #?(:clj
+   (defn- eventually
+     "Poll `f` until it returns truthy, up to `ms`."
+     [ms f]
+     (loop [n (quot ms 5)]
+       (or (f)
+           (when (pos? n)
+             (Thread/sleep 5)
+             (recur (dec n)))))))
+
+#?(:clj
    (deftest server-fan-out-closes-a-saturated-subscriber-test
      (let [peer (make-test-peer)
            stuck (saturated-chan)
@@ -804,11 +814,12 @@
        (@#'pubsub/add-subscriber! peer :t stuck)
        (@#'pubsub/add-subscriber! peer :t healthy)
        (let [result (<?? S (pubsub/direct-publish! peer :t :v))]
-         (is (= {:ok true :sent-count 1} result))
-         (is (= :pubsub/publish (:type (async/poll! healthy)))
+         (is (= {:ok true :queued 2} result) "queued for both, never thrown")
+         (is (= :pubsub/publish (:type (first (async/alts!! [healthy (timeout 1000)]))))
              "the fan-out continues past the saturated subscriber")
-         (is (async-proto/closed? stuck) "the saturated subscriber is closed")
-         (is (= #{healthy} (set (@#'pubsub/get-subscribers peer :t))))))))
+         (is (eventually 1000 #(async-proto/closed? stuck))
+             "the saturated subscriber is closed")
+         (is (eventually 1000 #(= #{healthy} (set (@#'pubsub/get-subscribers peer :t)))))))))
 
 #?(:clj
    (deftest client-publish-closes-a-saturated-connection-test
@@ -816,8 +827,9 @@
            out (saturated-chan)]
        (swap! peer assoc-in [:pubsub :out] out)
        (let [result (<?? S (pubsub/direct-publish! peer :t :v))]
-         (is (some? (:error result)) "no exception reaches the caller")
-         (is (async-proto/closed? out) "the connection is closed instead")))))
+         (is (= {:ok true :queued 1} result) "no exception reaches the caller")
+         (is (eventually 1000 #(async-proto/closed? out))
+             "the connection is closed instead")))))
 
 #?(:clj
    (deftest forwarding-closes-a-saturated-subscriber-without-failing-the-apply-test
@@ -833,24 +845,120 @@
        (let [result (<?? S (handle-publish! S peer sender (proto/publish-msg :t :v)
                                             nil (constantly true)))]
          (is (:ok result) "the publishing client's apply still succeeds")
-         (is (= :pubsub/publish (:type (async/poll! healthy))))
+         (is (= :pubsub/publish (:type (first (async/alts!! [healthy (timeout 1000)])))))
          (is (nil? (async/poll! sender)) "not echoed to the publisher")
-         (is (async-proto/closed? stuck))
-         (is (= #{sender healthy} (set (@#'pubsub/get-subscribers peer :t))))))))
+         (is (eventually 1000 #(async-proto/closed? stuck)))
+         (is (eventually 1000 #(= #{sender healthy}
+                                  (set (@#'pubsub/get-subscribers peer :t)))))))))
 
 #?(:clj
-   (deftest saturated-topic-serializer-closes-every-subscriber-test
+   (deftest direct-publish-never-waits-for-the-topic-serializer-test
      (let [peer (make-test-peer)
-           a (chan 10)
-           b (chan 10)]
+           a (chan 10)]
        (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
        (@#'pubsub/add-subscriber! peer :t a)
-       (@#'pubsub/add-subscriber! peer :t b)
        (let [lock (@#'pubsub/topic-apply-lock peer :t)]
-         (async/poll! lock)                              ; hold the serializer
-         (dotimes [_ 1024] (async/take! lock (fn [_])))  ; and saturate it
-         (let [result (<?? S (pubsub/direct-publish! peer :t :v))]
-           (is (some? (:error result)))
-           (is (async-proto/closed? a))
-           (is (async-proto/closed? b))
-           (is (empty? (@#'pubsub/get-subscribers peer :t))))))))
+         (async/poll! lock)                    ; a strategy apply in progress
+         (is (= {:ok true :queued 1} (<?? S (pubsub/direct-publish! peer :t :v))))
+         (is (= :pubsub/publish (:type (first (async/alts!! [a (timeout 1000)])))))
+         (async/offer! lock :available)))))
+
+#?(:clj
+   (deftest concurrent-overflow-failures-cannot-deadlock-test
+     ;; Each :fail retires its connection, which closes that connection's
+     ;; senders topic by topic. Retirement runs outside the send section, so
+     ;; two connections failing on two topics from two threads cannot hold
+     ;; one topic's section while waiting for the other's.
+     (let [peer (make-test-peer)
+           outs [(chan 10000) (chan 10000)]]
+       (doseq [t [:a :b]]
+         (pubsub/register-topic! peer t {:strategy (proto/pub-sub-only-strategy nil)
+                                         :max-queued-publishes 0}))
+       (doseq [out outs]
+         (swap! peer assoc-in [:pubsub :live :conns out]
+                {:queued-bytes (atom 0)
+                 :retire! (fn [_]
+                            (doseq [t [:a :b]]
+                              (@#'pubsub/drop-subscriber! peer t out))
+                            (@#'pubsub/forget-connection! peer out))}))
+       (let [run (fn [topics]
+                   (future
+                     (dotimes [_ 300]
+                       (doseq [t topics]
+                         (doseq [out outs]
+                           (@#'pubsub/add-subscriber! peer t out))
+                         (<?? S (pubsub/direct-publish! peer t :v))))))
+             f1 (run [:a :b])
+             f2 (run [:b :a])]
+         (is (not= ::timeout (deref f1 20000 ::timeout)))
+         (is (not= ::timeout (deref f2 20000 ::timeout)))))))
+
+#?(:clj
+   (deftest local-publish-cannot-overtake-a-committed-inbound-one-test
+     ;; The inbound write is committed (-apply-publish done) but not yet
+     ;; forwarded when a newer local write publishes. Subscribers must get the
+     ;; two in that order, or last-write-wins replicas end on the older value.
+     (let [handle-publish! @#'pubsub/handle-publish!
+           peer (make-test-peer)
+           sender (chan 10)
+           sub (chan 10)
+           committed (promise)
+           release (promise)]
+       (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)})
+       (@#'pubsub/add-subscriber! peer :t sub)
+       (let [inbound (handle-publish! S peer sender (proto/publish-msg :t :older)
+                                      (fn [_ _]
+                                        (deliver committed true)
+                                        @release)
+                                      (constantly true))]
+         (is (deref committed 1000 false))
+         (is (:ok (<?? S (pubsub/direct-publish! peer :t :newer)))
+             "the local publish returns at once, deferred")
+         (deliver release true)
+         (is (:ok (<?? S inbound)))
+         (is (= [:older :newer]
+                (mapv (fn [_] (:payload (first (async/alts!! [sub (timeout 1000)]))))
+                      (range 2))))))))
+
+#?(:clj
+   (deftest deferred-local-publishes-are-bounded-in-bytes-test
+     (let [handle-publish! @#'pubsub/handle-publish!
+           peer (make-test-peer)
+           sub (chan 10)
+           committed (promise)
+           release (promise)]
+       (pubsub/register-topic! peer :t {:strategy (proto/pub-sub-only-strategy nil)
+                                        :live-overflow :fail
+                                        :max-queued-bytes 4096})
+       (@#'pubsub/add-subscriber! peer :t sub)
+       (let [inbound (handle-publish! S peer (chan 10) (proto/publish-msg :t :older)
+                                      (fn [_ _] (deliver committed true) @release)
+                                      (constantly true))]
+         (is (deref committed 1000 false))
+         (<?? S (pubsub/direct-publish! peer :t (apply str (repeat 2000 "x"))))
+         (is (empty? (@#'pubsub/get-subscribers peer :t))
+             "an oversized deferred publication applies the overflow policy")
+         (deliver release true)
+         (<?? S inbound)))))
+
+#?(:clj
+   (deftest a-connection-grant-leaves-subscriber-senders-alone-test
+     (let [peer (make-test-peer)
+           out (chan 10)
+           strategy (reify proto/PSyncStrategy
+                      (-handshake-items [_ _] (doto (chan) close!))
+                      (-apply-publish [_ _] (doto (chan 1) (put! {:ok true}) close!)))]
+       (pubsub/register-topic! peer :owned {:strategy strategy})
+       (swap! peer assoc-in [:pubsub :live :conns out] {:queued-bytes (atom 0) :offer {}})
+       (with-redefs [pubsub/subscriptions (constantly {})]
+         (@#'pubsub/with-send-section
+          peer :owned
+          #(@#'pubsub/new-sender! peer out :owned {:mode :windowed
+                                                   :grant {:frames 3 :bytes 100}}))
+         (@#'pubsub/with-send-section
+          peer :mine
+          #(@#'pubsub/client-sender! peer out :mine)))
+       (@#'pubsub/set-live-mode! peer out {:mode :windowed :grant {:frames 99 :bytes 999}})
+       (let [state #(deref (:state (get-in @peer [:pubsub :live :senders [out %]])))]
+         (is (= {:frames 3 :bytes 100} (:grant (state :owned))) "negotiated per topic")
+         (is (= {:frames 99 :bytes 999} (:grant (state :mine))))))))

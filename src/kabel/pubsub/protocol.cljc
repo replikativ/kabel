@@ -61,6 +61,18 @@
               Strategy-specific data may use additional map keys; only the
               literal value `true` at `:ok` commits the operation."))
 
+(defprotocol PResyncHandshake
+  "Optional. The handshake for a subscriber that resubscribes after its live
+  window overflowed (`:pubsub/resync`).
+
+  Such a subscriber missed publications, and its own record of what it holds
+  may claim more than it has: a strategy that skips what the subscriber
+  reports as current (for example by write timestamps) can skip exactly what
+  was lost. A strategy whose normal handshake has that blind spot implements
+  this to send without it. Without it, `-handshake-items` is used."
+  (-resync-handshake-items [this client-state]
+    "As `-handshake-items`, for a resubscription after an overflow."))
+
 (defn checked-handshake-source
   "Pair a snapshot item stream with its independent terminal result.
 
@@ -142,6 +154,32 @@
   {:type :pubsub/publish
    :topic topic
    :payload payload})
+
+(defn publish-ack-msg
+  "Acknowledge, cumulatively, that the publications of sender `epoch` up to and
+  including `seq` have been applied."
+  [topic epoch seq]
+  {:type :pubsub/publish-ack
+   :topic topic
+   :epoch epoch
+   :seq seq})
+
+(defn live-grant-msg
+  "The window this peer grants the other side's live publishes on this
+  connection: at most `frames` unacknowledged publications of at most `bytes`
+  estimated bytes, per topic."
+  [frames bytes]
+  {:type :pubsub/live-grant
+   :frames frames
+   :bytes bytes})
+
+(defn resync-msg
+  "The subscriber's live window overflowed and its subscription was dropped;
+  it resubscribes to catch up through a handshake."
+  [topic epoch]
+  {:type :pubsub/resync
+   :topic topic
+   :epoch epoch})
 
 (defn error-msg
   "Create an error message."
@@ -236,6 +274,12 @@
           (put! ch {:error e})))
       (close! ch)
       ch)))
+
+(defn pub-sub-only?
+  "Whether `strategy` is the built-in no-sync strategy, whose subscribers have
+  no handshake to catch up through."
+  [strategy]
+  (instance? PubSubOnlyStrategy strategy))
 
 (defn pub-sub-only-strategy
   "Create a strategy for pure pub/sub with no initial sync.

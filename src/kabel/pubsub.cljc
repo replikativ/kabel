@@ -293,17 +293,20 @@
   send section."
   [peer out topic opts]
   (let [conn (live-conn peer out)
-        sender (ls/create out
-                          (or (:queued-bytes conn) (atom 0))
-                          (assoc opts
-                                 :topic topic
-                                 :epoch (random-uuid)
+        sender (assoc (ls/create out
+                                 (or (:queued-bytes conn) (atom 0))
+                                 (assoc opts
+                                        :topic topic
+                                        :epoch (random-uuid)
                                  ;; Connection defaults, overridden per topic.
-                                 :limits (merge (:limits conn)
-                                                (select-keys
-                                                 (:opts (get-topic-config peer topic))
-                                                 [:max-queued-publishes
-                                                  :max-queued-bytes]))))]
+                                        :limits (merge (:limits conn)
+                                                       (select-keys
+                                                        (:opts (get-topic-config peer topic))
+                                                        [:max-queued-publishes
+                                                         :max-queued-bytes]))))
+                      ;; :client senders carry this side's own publishes to
+                      ;; its server; :subscriber senders serve a subscriber.
+                      :role (:role opts :subscriber))]
     (update-pubsub-state! peer assoc-in [:live :senders [out topic]] sender)
     (ls/start! sender
                {:on-exit #(remove-sender! peer out topic sender)
@@ -320,11 +323,12 @@
 
 (defn- set-live-mode!
   "Record how the other side of `out` takes our live publishes and tell the
-  senders already queueing toward it."
+  client senders already queueing toward it. A subscriber's sender on the same
+  connection keeps the grant it negotiated for its topic."
   [peer out mode]
   (update-pubsub-state! peer assoc-in [:live :modes out] mode)
   (doseq [[[o _] sender] (get-in (get-pubsub-state peer) [:live :senders])
-          :when (= o out)]
+          :when (and (= o out) (= :client (:role sender)))]
     (if (= :windowed (:mode mode))
       (ls/swap-sender! sender ls/on-grant (:grant mode))
       (ls/swap-sender! sender ls/on-legacy))))
@@ -338,17 +342,18 @@
       (let [mode (live-mode peer out)
             sender (new-sender!
                     peer out topic
-                    (cond
-                      (= :windowed (:mode mode))
-                      {:mode :windowed :grant (:grant mode)}
+                    (assoc (cond
+                             (= :windowed (:mode mode))
+                             {:mode :windowed :grant (:grant mode)}
 
-                      (and (nil? mode)
-                           (:offer (live-conn peer out))
-                           (some #(= out (:out %)) (vals (subscriptions peer))))
-                      {:mode :pending-grant}
+                             (and (nil? mode)
+                                  (:offer (live-conn peer out))
+                                  (some #(= out (:out %)) (vals (subscriptions peer))))
+                             {:mode :pending-grant}
 
-                      :else
-                      {:mode :legacy}))]
+                             :else
+                             {:mode :legacy})
+                           :role :client))]
         ;; A decision recorded while this sender was created reached the
         ;; senders registered before it; apply it here too.
         (when-let [mode (and (nil? mode) (live-mode peer out))]
@@ -515,7 +520,11 @@
   [peer topic entry]
   (if-let [{:keys [entries bytes]} (get-in (get-pubsub-state peer) [:live :inbound topic])]
     (if (let [{:keys [max-queued-publishes max-queued-bytes]}
-              (merge ls/default-limits
+              ;; As strict as the strictest subscriber connection, with the
+              ;; topic's own bounds taking precedence as they do for senders.
+              (merge (apply merge-with min ls/default-limits
+                            (keep #(:limits (live-conn peer %))
+                                  (get-subscribers peer topic)))
                      (select-keys (:opts (get-topic-config peer topic))
                                   [:max-queued-publishes :max-queued-bytes]))]
           (and (< (count entries) max-queued-publishes)

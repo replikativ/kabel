@@ -940,3 +940,25 @@
              "an oversized deferred publication applies the overflow policy")
          (deliver release true)
          (<?? S inbound)))))
+
+#?(:clj
+   (deftest a-connection-grant-leaves-subscriber-senders-alone-test
+     (let [peer (make-test-peer)
+           out (chan 10)
+           strategy (reify proto/PSyncStrategy
+                      (-handshake-items [_ _] (doto (chan) close!))
+                      (-apply-publish [_ _] (doto (chan 1) (put! {:ok true}) close!)))]
+       (pubsub/register-topic! peer :owned {:strategy strategy})
+       (swap! peer assoc-in [:pubsub :live :conns out] {:queued-bytes (atom 0) :offer {}})
+       (with-redefs [pubsub/subscriptions (constantly {})]
+         (@#'pubsub/with-send-section
+          peer :owned
+          #(@#'pubsub/new-sender! peer out :owned {:mode :windowed
+                                                   :grant {:frames 3 :bytes 100}}))
+         (@#'pubsub/with-send-section
+          peer :mine
+          #(@#'pubsub/client-sender! peer out :mine)))
+       (@#'pubsub/set-live-mode! peer out {:mode :windowed :grant {:frames 99 :bytes 999}})
+       (let [state #(deref (:state (get-in @peer [:pubsub :live :senders [out %]])))]
+         (is (= {:frames 3 :bytes 100} (:grant (state :owned))) "negotiated per topic")
+         (is (= {:frames 99 :bytes 999} (:grant (state :mine))))))))

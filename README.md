@@ -212,6 +212,34 @@ For scenarios requiring initial state synchronization (e.g., syncing a database)
     (go (save-item! store payload) {:ok true})))
 ```
 
+### Live flow control
+
+Live publishes are paced by the receiver. Each connection and topic has a
+sender queue; its send loop keeps at most a granted window of publications
+unacknowledged, and the receiver acknowledges after it has *applied* them. A
+burst therefore waits in the sender's bounded queue instead of overflowing the
+receiver, and `publish!` never parks or throws on transport pressure: it
+returns `{:ok true :queued n}`.
+
+When a subscriber's queue overflows, the topic's `:live-overflow` policy
+decides:
+
+- `:resync` (default, except for `pub-sub-only-strategy`): the server drops
+  the subscriber's backlog and tells it to resubscribe; the differential
+  handshake catches up. A strategy whose normal handshake would skip what the
+  subscriber missed implements `proto/PResyncHandshake`. After `:max-resyncs`
+  (default 3) consecutive resyncs the next overflow fails instead.
+- `:fail`: the connection is closed. A client's own publishes always fail
+  this way: a dropped client write cannot be recovered by a handshake, so the
+  loss is made loud and the application reconciles after reconnecting.
+
+Options (middleware unless noted): `:live-window` (frames, default 128;
+`false` disables windows on this connection), `:live-window-bytes`,
+`:max-queued-publishes` (4096) and `:max-queued-bytes` (16 MiB, both also per
+topic in `register-topic!`), `:max-connection-queued-bytes` (64 MiB),
+`:live-overflow` and `:max-resyncs` (per topic). Peers negotiate windows in the
+subscribe exchange; a peer without them gets today's unpaced frames.
+
 ## Remote invocation
 
 `kabel.remote` lets a peer serve named functions and a connected peer call

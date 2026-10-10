@@ -1,6 +1,23 @@
 # Change Log
 
 ## Unreleased
+ - Live publishes are flow-controlled. A burst of live publishes (a bulk
+   konserve write relayed by konserve-sync, one frame per key) used to reach
+   the receiver at network speed while it applied them one by one; its
+   per-topic lane overflowed and the connection was retired, losing the rest.
+   Now each connection and topic has a sender queue whose send loop keeps at
+   most a window of publications unacknowledged, and the receiver acknowledges
+   after applying them, the way the initial handshake already worked. Windows
+   are negotiated in the subscribe exchange (`:pubsub/live-grant`,
+   `:pubsub/publish-ack`), so peers without them keep working unpaced.
+   An overflowing subscriber queue resyncs the subscriber by default
+   (`:pubsub/resync`: it resubscribes and the differential handshake catches
+   up; optional `PResyncHandshake` for strategies that need a different
+   handshake then), escalating to closing the connection after repeated
+   resyncs; see "Live flow control" in the README.
+   `publish!` now returns `{:ok true :queued n}` instead of `:sent-count`. A
+   direct publish no longer waits for the topic's apply serializer, and an
+   unsubscribe's drain marker follows every publication queued before it.
  - A live publish that the transport cannot take is no longer lost silently or
    thrown into the publisher. core.async refuses a put once a channel holds
    1024 pending puts, by throwing. The server's fan-out let that abort the

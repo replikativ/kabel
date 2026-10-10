@@ -268,3 +268,51 @@
       (is (= :failed (:phase state)))
       (is (= :fail-producer (-> effects first :op)))
       (is (not-any? #(= :send-snapshot-complete (:op %)) effects)))))
+
+;; =============================================================================
+;; Live window acknowledgements and resync
+;; =============================================================================
+
+(defn- pub [n & {:as more}]
+  (merge {:type :pubsub/publish :topic :t :payload n :seq n :epoch :e} more))
+
+(deftest live-publication-acks-after-apply-when-asked
+  (let [s (lifecycle/initial-live-state :t)
+        {s :state effects :effects} (step s {:type :live/publication
+                                             :value (pub 0 :ack? true) :bytes 1})]
+    (is (= [:apply-live] (map :op effects)) "no ack before the apply")
+    (let [{s :state effects :effects} (step s {:type :live/result :ok true})]
+      (is (= [{:op :ack-live :topic :t :epoch :e :seq 0}] effects))
+      (let [{s :state} (step s {:type :live/publication :value (pub 1) :bytes 1})
+            {effects :effects} (step s {:type :live/result :ok true})]
+        (is (empty? effects) "a frame that did not ask is not acknowledged")))))
+
+(deftest failed-apply-sends-no-ack
+  (let [s (lifecycle/initial-live-state :t)
+        {s :state} (step s {:type :live/publication :value (pub 0 :ack? true) :bytes 1})
+        {effects :effects} (step s {:type :live/result :ok false})]
+    (is (not-any? #(= :ack-live (:op %)) effects))))
+
+(deftest captured-publications-are-acked-once-after-the-drain
+  (let [s (lifecycle/initial-state :t)
+        s (:state (step s {:type :live/publication :value (pub 0) :bytes 1}))
+        s (:state (step s {:type :live/publication :value (pub 1 :ack? true) :bytes 1}))
+        s (:state (step s {:type :live/publication :value (pub 2) :bytes 1}))
+        {s :state effects :effects} (step s {:type :snapshot/complete})]
+    (is (= [:apply-captured-live] (map :op effects)))
+    (let [{effects :effects} (step s {:type :snapshot/drain-result :ok true})]
+      (is (= [{:op :settle-ready :ok true :topic :t}
+              {:op :ack-live :topic :t :epoch :e :seq 2}]
+             effects)
+          "one cumulative ack for the highest captured seq"))))
+
+(deftest resync-is-a-terminal-non-failure-in-every-active-phase
+  (doseq [s [(lifecycle/initial-state :t)
+             (lifecycle/initial-live-state :t)
+             (:state (step (lifecycle/initial-state :t)
+                           {:type :live/publication :value (pub 0) :bytes 1}))]]
+    (let [{s :state effects :effects} (step s {:type :live/resync})]
+      (is (= :resyncing (:phase s)))
+      (is (lifecycle/terminal? s))
+      (is (= [{:op :resync :topic :t}] effects) "no :fail, so the connection stays")
+      (is (empty? (:pending s)) "captured publications are discarded"))))

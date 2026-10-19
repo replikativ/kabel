@@ -325,28 +325,29 @@
              ;; must not block here; one that has to offloads to a thread and
              ;; returns its channel. The gate may do the same.
              (async/go
-               (let [allowed? (async/<! (authz/decision
-                                         (gate {:principal principal
-                                                :fn-name fn-name
-                                                :arg-map arg-map
-                                                :remote request-scope})))
-                     decision (cond
-                                (not= scope (:id @peer))
-                                (ex-info "Invoke addressed to another peer"
-                                         {:type ::wrong-peer :fn-name fn-name :scope scope})
+               (let [res (try
+                           (let [allowed? (async/<! (authz/decision
+                                                     (gate {:principal principal
+                                                            :fn-name fn-name
+                                                            :arg-map arg-map
+                                                            :remote request-scope})))
+                                 decision (cond
+                                            (not= scope (:id @peer))
+                                            (ex-info "Invoke addressed to another peer"
+                                                     {:type ::wrong-peer :fn-name fn-name :scope scope})
 
-                                (not allowed?)
-                                (if principal
-                                  (ex-info "Not authorized"
-                                           {:type ::not-authorized :fn-name fn-name})
-                                  (ex-info "Authentication required"
-                                           {:type ::authentication-required :fn-name fn-name}))
+                                            (not allowed?)
+                                            (if principal
+                                              (ex-info "Not authorized"
+                                                       {:type ::not-authorized :fn-name fn-name})
+                                              (ex-info "Authentication required"
+                                                       {:type ::authentication-required :fn-name fn-name}))
 
-                                :else ::call)
-                     res (if (= decision ::call)
-                           (try (<? S (call S fn-name args))
-                                (catch #?(:clj Throwable :cljs :default) e e))
-                           decision)]
+                                            :else ::call)]
+                             (if (= decision ::call)
+                               (<? S (call S fn-name args))
+                               decision))
+                           (catch #?(:clj Throwable :cljs :default) e e))]
                  (async/>! reply-out (respond res))))))
          (recur (async/<! invoke-ch))))
      {:stop! stop! :done done})))

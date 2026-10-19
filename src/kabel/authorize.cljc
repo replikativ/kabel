@@ -63,20 +63,26 @@
   [x]
   (satisfies? async-proto/ReadPort x))
 
+(defn- allowed?
+  "Errors returned as values, including from asynchronous policy checks, deny."
+  [v]
+  (and (not (instance? #?(:clj Throwable :cljs js/Error) v)) (boolean v)))
+
 (defn- settle
   "A predicate's answer as the caller receives it: a channel as it is, for the
    caller to take from; anything else as a boolean."
   [v]
-  (if (channel? v) v (boolean v)))
+  (if (channel? v) v (allowed? v)))
 
 (defn decision
   "A channel yielding the boolean decision behind `v`, whether `v` is a
    channel or already a boolean, so a caller inside a go block can always
-   take. A channel that closes without a value decides false."
+   take. A channel that closes without a value decides false. Returned errors
+   also decide false; a failed policy check must never grant authority."
   [v]
   (if (channel? v)
-    (async/map boolean [v])
-    (doto (async/promise-chan) (async/put! (boolean v)))))
+    (async/map allowed? [v])
+    (doto (async/promise-chan) (async/put! (allowed? v)))))
 
 (defn pubsub-legacy
   "Adapt `kabel.pubsub`'s historical `(fn [principal topic])`."

@@ -107,6 +107,7 @@
   "Install a transport: `{:publish! (fn [peer topic payload] ch)
                           :subscribe! (fn [peer topics opts] ch)
                           :unsubscribe! (fn [peer topics] ch)
+                          :unsubscribe-owned! (fn [peer topics opts] ch)
                           :receive-publish!
                           (fn [peer topic payload context] ch)}`.
 
@@ -1321,6 +1322,86 @@
               (remove-subscription! peer topic generation)
               {:error e}))))
 
+(defn- invalid-ownership-guard? [topics opts]
+  (and (contains? opts :expected-strategies)
+       (let [expected (:expected-strategies opts)]
+         (not (and (map? expected) (= (set topics) (set (keys expected)))
+                   (every? some? (vals expected)))))))
+
+(defn- claim-unsubscribe!
+  "Check ownership and claim cancellation (or local removal) in ONE state
+   transition. Capture generations here, never from a later replacement."
+  [peer topics expected-strategies explicit-out]
+  (let [result (volatile! nil)]
+    (update-pubsub-state!
+     peer
+     (fn [state]
+       (let [subs (:subscriptions state)
+             present (into #{} (filter #(contains? subs %)) topics)
+             outs (into #{} (keep #(get-in subs [% :out])) present)
+             actual-out (when (= 1 (count outs)) (first outs))
+             {:keys [pending out]} (:unsubscribe-state state)
+             selected-out (or actual-out explicit-out out (:out state))
+             conflict (when expected-strategies
+                        (some (fn [topic]
+                                (when (and (contains? subs topic)
+                                           (not (identical? (get expected-strategies topic)
+                                                            (get-in subs [topic :strategy]))))
+                                  [topic])) topics))
+             error (cond
+                     conflict (ex-info "Subscription belongs to another owner"
+                                       {:type ::subscription-owner-conflict :topic (first conflict)})
+                     (> (count outs) 1) (ex-info "Topics belong to different connections" {:topics topics})
+                     (and explicit-out actual-out (not (identical? explicit-out actual-out)))
+                     (ex-info "Subscription belongs to a different connection" {:type ::subscription-connection-conflict})
+                     (and (seq present) pending out (not (identical? out selected-out)))
+                     (ex-info "Subscription drain registry belongs to a different connection"
+                              {:type ::subscription-connection-conflict}))]
+         (if error
+           (do (vreset! result {:error error})
+               state)
+           (let [cancelling (into #{} (filter #(get-in subs [% :cancelling?])) present)
+                 active (reduce disj present cancelling)]
+             (vreset! result {:active active :cancelling cancelling
+                              :generations (into {} (map (fn [topic] [topic (get-in subs [topic :generation])])) present)
+                              :out selected-out :pending pending :local? (nil? pending)})
+             (if-not pending
+               (update state :subscriptions #(apply dissoc % present))
+               (reduce #(assoc-in %1 [:subscriptions %2 :cancelling?] true) state active)))))))
+    @result))
+
+(defn- join-unsubscribe-drains! [peer pending cancelling generations fresh]
+  (let [attached (volatile! []) covered (volatile! #{})]
+    (swap! pending
+           (fn [requests]
+             (vreset! attached [])
+             (vreset! covered #{})
+             (reduce-kv
+              (fn [requests id {:keys [remaining] :as request}]
+                (if-let [matching (seq (filter #(and (contains? cancelling %)
+                                                     (= (get generations %) (get-in request [:generations %]))) remaining))]
+                  (let [waiter (chan 1)]
+                    (vswap! attached conj waiter)
+                    (vswap! covered into matching)
+                    (assoc requests id (update request :waiters (fnil conj []) waiter)))
+                  requests)) requests requests)))
+    (let [{{S :supervisor} :volatile} @peer
+          drains (cond-> @attached fresh (conj fresh))
+          unresolved (some #(when (= (get generations %) (:generation (subscription peer %))) [%])
+                           (remove @covered cancelling))]
+      (go-try S
+              (loop [remaining (seq drains)
+                     error (when unresolved
+                             {:error (ex-info "Cancelling subscription has no matching drain request"
+                                              {:type ::unsubscribe-drain-unavailable :topic (first unresolved)})})]
+                (if-let [ch (first remaining)]
+                  (let [value (<! ch)]
+                    (recur (next remaining)
+                           (or error (when (:error value) value)
+                               (when-not value {:error (ex-info "Subscription drain closed without a result"
+                                                                {:type ::unsubscribe-drain-unavailable})}))))
+                  (or error {:ok true})))))))
+
 (defn direct-unsubscribe!
   "Orderly point-to-point unsubscribe for `topics`.
 
@@ -1328,6 +1409,9 @@
   the connection recorded by the active subscription is preferred over the
   historical peer-wide `:out` slot. The result settles only after the remote
   drain marker has passed all earlier topic frames.
+  The pending-drain registry must belong to that same connection. Peers using
+  several simultaneous connections may be refused if an older connection's
+  registry is no longer retained; explicit :out does not bypass this check.
 
   Idempotent: a topic whose cancellation is already under way is not asked
   for again — the result attaches to the request in flight — and a topic
@@ -1336,118 +1420,100 @@
   sends twice. The claim is made in the same state transition that reads the
   subscriptions, so two callers arriving together cannot both send a request
   for one topic; a second wire request would produce a second drain, which
-  a resubscription made meanwhile could not tell from its own."
-  [peer topics {:keys [out]}]
-  (let [pubsub-state (get-pubsub-state peer)
-        pending (get-in pubsub-state [:unsubscribe-state :pending])
-        done (fn [v] (doto (chan 1) (async/offer! v) close!))]
-    (if-not pending
-      ;; Compatibility for peers constructed without middleware (and server
-      ;; peers, which have no client-side `out`). There is no remote session to
-      ;; drain in this case.
-      (do
-        (doseq [topic topics]
-          (remove-subscription! peer topic))
-        (done {:ok true}))
+  a resubscription made meanwhile could not tell from its own.
+
+  Optional `:expected-strategies {topic strategy}` checks identity atomically
+  with cancellation. Every requested topic must have an expected owner. Missing
+  topics are already released; a different current owner refuses the ENTIRE
+  request without mutation or wire traffic. Automatic resync may change the
+  generation while retaining this same strategy owner."
+  [peer topics {:keys [out expected-strategies] :as opts}]
+  (let [done (fn [v] (doto (chan 1) (async/offer! v) close!))]
+    (cond
+      (invalid-ownership-guard? topics opts)
+      (done {:error (ex-info "Expected subscription owners must cover every topic"
+                             {:type ::invalid-subscription-owners})})
+
+      :else
       (with-client-control
         peer
         (fn []
-          (let [claimed (volatile! #{})
-                already (volatile! #{})
-                remembered-outs (volatile! #{})]
+          (let [{:keys [active cancelling generations out pending local? error]}
+                (claim-unsubscribe! peer topics expected-strategies out)]
         ;; One transition: read which topics are active, mark them cancelling.
         ;; Snapshot effects already accepted may drain, but readiness can no
         ;; longer be published.
-            (update-pubsub-state!
-             peer
-             (fn [state]
-               (let [subs (:subscriptions state)
-                     cancelling (into #{} (filter #(get-in subs [% :cancelling?])) topics)
-                     active (into #{} (filter #(and (contains? subs %) (not (cancelling %)))) topics)]
-                 (vreset! already cancelling)
-                 (vreset! claimed active)
-                 (vreset! remembered-outs (into #{} (keep #(get-in subs [% :out])) active))
-                 (reduce (fn [state topic]
-                           (assoc-in state [:subscriptions topic :cancelling?] true))
-                         state
-                         active))))
-            (let [active @claimed
-                  cancelling @already
-                  out (or out
-                          (when (= 1 (count @remembered-outs)) (first @remembered-outs))
-                          (:out pubsub-state))]
-              (cond
+            (cond
+              error (done {:error error})
+              local? (do (doseq [_ (into active cancelling)] (metrics/subscription-event! :client :unsubscribe 1))
+                         (done {:ok true}))
             ;; Nothing left to ask for: every topic is gone, or a request for it
             ;; is already in flight. Attach to those requests.
-                (empty? active)
-                (let [attached (volatile! [])]
-                  (swap! pending
-                         (fn [requests]
-                           (reduce-kv (fn [requests id {:keys [remaining] :as request}]
-                                        (if (some cancelling remaining)
-                                          (let [w (chan 1)]
-                                            (vswap! attached conj w)
-                                            (assoc requests id (update request :waiters (fnil conj []) w)))
-                                          requests))
-                                      requests
-                                      requests)))
-                  (if (empty? @attached)
-                    (done {:ok true})
-                    (let [{{S :supervisor} :volatile} @peer]
-                      (go-try S
-                              (loop [ws (seq @attached)]
-                                (if-let [w (first ws)]
-                                  (do (<! w) (recur (next ws)))
-                                  {:ok true}))))))
+              (empty? active)
+              (join-unsubscribe-drains! peer pending cancelling generations nil)
 
-                out
-                (let [id (random-uuid)
-                      result-ch (chan 1)]
-                  (swap! pending assoc id {:channel result-ch
-                                           :remaining active
-                                           :generations
-                                           (into {} (map (fn [topic]
-                                                           [topic (:generation
-                                                                   (subscription peer topic))])
-                                                         active))})
-                  (async/put! out (proto/unsubscribe-msg id active)
-                              (fn [delivered?]
-                                (when-not delivered?
-                                  (when-let [{:keys [channel waiters]} (get @pending id)]
-                                    (swap! pending dissoc id)
-                                    (let [error {:error (ex-info "Unsubscribe was not delivered"
-                                                                 {:topics active})}]
-                                      (async/offer! channel error)
-                                      (close! channel)
-                                      (doseq [w waiters]
-                                        (async/offer! w error)
-                                        (close! w)))))))
-                  result-ch)
+              out
+              (let [id (random-uuid)
+                    result-ch (chan 1)]
+                (swap! pending assoc id {:channel result-ch
+                                         :remaining active
+                                         :generations (select-keys generations active)})
+                (async/put! out (proto/unsubscribe-msg id active)
+                            (fn [delivered?]
+                              (when-not delivered?
+                                (when-let [{:keys [channel waiters]} (get @pending id)]
+                                  (swap! pending dissoc id)
+                                  (let [error {:error (ex-info "Unsubscribe was not delivered"
+                                                               {:topics active})}]
+                                    (async/offer! channel error)
+                                    (close! channel)
+                                    (doseq [w waiters]
+                                      (async/offer! w error)
+                                      (close! w)))))))
+                (if (seq cancelling)
+                  (join-unsubscribe-drains! peer pending cancelling generations result-ch)
+                  result-ch))
 
             ;; Claimed, but no connection to ask: release locally.
-                :else
-                (do
-                  (doseq [topic active]
-                    (remove-subscription! peer topic))
-                  (done {:ok true}))))))))))
+              :else
+              (do
+                (doseq [topic active]
+                  (remove-subscription! peer topic (get generations topic)))
+                (done {:ok true})))))))))
 
 (defn unsubscribe!
   "Unsubscribe from topics and await the remote drain marker.
 
-  Active topics must belong to one connection. Call `direct-unsubscribe!`
-  explicitly for each connection when coordinating a multi-source client."
-  [peer topics]
-  (if-let [f (transport-fn peer :unsubscribe!)]
-    (f peer topics)
-    (let [pubsub-state (get-pubsub-state peer)
-          outs (into #{} (keep #(get-in pubsub-state [:subscriptions % :out]))
-                     topics)]
-      (if (> (count outs) 1)
-        (doto (chan 1)
-          (put! {:error (ex-info "Topics belong to different connections"
-                                 {:topics topics :connections (count outs)})})
-          close!)
-        (direct-unsubscribe! peer topics {:out (first outs)})))))
+  Active topics and their pending-drain registry must belong to one connection.
+  `direct-unsubscribe!` accepts explicit :out, but cannot recover an older
+  connection's registry after a multi-connection peer has replaced it.
+
+  The optional ownership guard uses :expected-strategies (see direct-unsubscribe!).
+  A custom transport must explicitly install :unsubscribe-owned! to support it;
+  legacy two-argument transport hooks are preserved and never called unguarded
+  on behalf of an ownership-guarded request."
+  ([peer topics] (unsubscribe! peer topics {}))
+  ([peer topics {:keys [expected-strategies] :as opts}]
+   (cond
+     (invalid-ownership-guard? topics opts)
+     (doto (chan 1)
+       (put! {:error (ex-info "Expected subscription owners must cover every topic"
+                              {:type ::invalid-subscription-owners})})
+       close!)
+
+     (and expected-strategies (transport-fn peer :unsubscribe-owned!))
+     ((transport-fn peer :unsubscribe-owned!) peer topics opts)
+
+     (transport-fn peer :unsubscribe!)
+     (if expected-strategies
+       (doto (chan 1)
+         (put! {:error (ex-info "Custom transport does not support guarded unsubscribe"
+                                {:type ::unsupported-owned-unsubscribe})})
+         close!)
+       ((transport-fn peer :unsubscribe!) peer topics))
+
+     :else
+     (direct-unsubscribe! peer topics opts))))
 
 ;; =============================================================================
 ;; Middleware

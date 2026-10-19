@@ -187,6 +187,32 @@ kabel includes a topic-based publish/subscribe system with built-in backpressure
 (<?? S (pubsub/subscribe! ctx [:notifications] {:notifications strategy}))
 ```
 
+### Ownership-safe subscription cleanup
+
+When an application keeps a subscription owner across reconnects, cleanup can
+name its exact strategy rather than unsubscribe whichever owner happens to hold
+the topic later:
+
+```clojure
+(pubsub/unsubscribe! client #{store-id}
+                     {:expected-strategies {store-id my-strategy}})
+```
+
+Ownership comparison and cancellation share one atomic claim. An absent topic
+is already released; a different owner refuses the entire request without
+mutation or wire traffic. A generation change caused by automatic resync keeps
+the same strategy owner. Cancellation captures its output and drain registry
+with that claim, and mixed requests join both prior and newly requested drains.
+An explicit stale `:out` to `direct-unsubscribe!` is refused before cancellation.
+The pending-drain registry must also belong to that connection. Multi-connection
+peers can be refused when an older connection's registry is no longer retained;
+explicit `:out` is not a substitute for connection-scoped drain ownership.
+
+Legacy custom transport `:unsubscribe!` hooks keep their two-argument contract.
+To support guarded cleanup, a transport installs a separate
+`:unsubscribe-owned! (fn [peer topics opts] result-channel)` hook; otherwise the
+guarded call fails closed instead of silently dropping its ownership guard.
+
 ### Custom Sync Strategies
 
 For scenarios requiring initial state synchronization (e.g., syncing a database), implement the `PSyncStrategy` protocol:

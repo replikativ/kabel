@@ -74,12 +74,13 @@
             done (drain pipeline)]
         ;; Registration follows a physical connection, not a peer. Keeping
         ;; cleanup beside `drain` also covers middleware-initiated shutdown.
+        ;; Disconnect completion includes disposal. Returning raw `done` lets
+        ;; maintain/reconnect install the replacement before this finally runs.
         (go-try S
                 (try
                   (<? S done)
                   (finally
-                    (transport/unregister! peer context))))
-        done)
+                    (transport/unregister! peer context)))))
       (catch #?(:clj Throwable :cljs :default) e
         (transport/unregister! peer context)
         (throw e)))))

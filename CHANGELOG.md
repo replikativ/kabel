@@ -1,6 +1,11 @@
 # Change Log
 
 ## Unreleased
+ - Connection disposal now retires its pubsub resources even when a supervisor
+   aborts before the input-close handler runs. Reconnecting the same client peer
+   no longer leaves subscriptions tied to its old socket. Cleanup is fenced by
+   connection identity and subscription generation; an old connection cannot
+   remove a replacement subscription.
  - Live publishes are flow-controlled. A burst of live publishes (a bulk
    konserve write relayed by konserve-sync, one frame per key) used to reach
    the receiver at network speed while it applied them one by one; its

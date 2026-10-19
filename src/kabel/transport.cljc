@@ -14,6 +14,7 @@
   (:refer-clojure :exclude [update]))
 
 (def ^:private context-key ::context)
+(def ^:dynamic *connection-context* nil)
 
 (defn new-context
   "Create the mutable state for one physical connection.
@@ -38,7 +39,8 @@
                  ::negotiated-capabilities #{}}
                 attributes
                 ;; Role is a property of the socket endpoint, not peer input.
-                {::role role
+                {::cleanup {} ::disposed? false
+                 ::role role
                  ::initiator? (= role :initiator)}))))
 
 (defn with-context
@@ -55,14 +57,17 @@
                           (= 3 (count connection-or-channels)))
                    (nth connection-or-channels 2)
                    connection-or-channels)]
-    (-> channels meta context-key)))
+    (or (-> channels meta context-key) *connection-context*)))
 
 (defn apply-middleware
   "Apply middleware while preserving a connection context across legacy
   middleware that returns an unannotated channel pair."
   [middleware connection]
   (let [context (connection-context connection)
-        result ((or middleware identity) connection)]
+        ;; A composed legacy middleware can replace its channel pair between
+        ;; inner layers, before this outer adapter can restore metadata.
+        result (binding [*connection-context* context]
+                 ((or middleware identity) connection))]
     (if context
       (with-context result context)
       result)))
@@ -86,10 +91,41 @@
   (swap! peer assoc-in [:volatile ::connections (::id @context)] context)
   context)
 
+(defn on-close!
+  "Register keyed cleanup on a physical connection context. Cleanup runs once
+   on disposal, including supervisor abort; late registration runs immediately.
+   Capture the context at middleware construction, not from an async callback."
+  [context key cleanup]
+  (let [[before _] (swap-vals! context
+                               #(if (::disposed? %) % (assoc-in % [::cleanup key] cleanup)))]
+    (when (::disposed? before) (cleanup (::close-reason before))))
+  nil)
+
+(defn dispose!
+  "Release connection-owned middleware resources exactly once. Runs every
+   callback even if one fails. This never disposes another connection on a peer."
+  [context reason]
+  (let [[before _] (swap-vals! context #(if (::disposed? %) %
+                                            (assoc % ::disposed? true ::close-reason reason ::cleanup {})))]
+    (when-not (::disposed? before)
+      (let [errors (reduce (fn [errors cleanup]
+                             (try (cleanup reason) errors
+                                  (catch #?(:clj Throwable :cljs :default) e (conj errors e))))
+                           [] (vals (::cleanup before)))]
+        (when (seq errors)
+          (throw (ex-info "Connection cleanup failed"
+                          {:type ::cleanup-failed :count (count errors)} (first errors)))))))
+  nil)
+
 (defn unregister!
   "Remove an active context from `peer`."
   [peer context]
-  (swap! peer update-in [:volatile ::connections] dissoc (::id @context))
+  (try
+    (dispose! context {:reason :connection-closed})
+    (finally
+      (swap! peer update-in [:volatile ::connections]
+             #(if (identical? context (get % (::id @context)))
+                (dissoc % (::id @context)) %))))
   nil)
 
 (defn connections

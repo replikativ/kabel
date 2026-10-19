@@ -1,11 +1,118 @@
 (ns kabel.transport-test
-  (:require #?(:clj [clojure.core.async :refer [chan close! >!! <!! timeout]]
+  (:require #?(:clj [clojure.core.async :as async :refer [chan close! >!! <!! timeout]]
                :cljs [clojure.core.async :refer [chan close!]])
             [clojure.test :refer [deftest is testing]]
             #?(:clj [kabel.client :as client])
             #?(:clj [kabel.peer :as peer])
+            #?(:clj [clojure.core.async.impl.protocols :as async-protocols])
             [kabel.transport :as transport]
-            #?(:clj [superv.async :refer [S]])))
+            [kabel.pubsub :as pubsub]
+            [kabel.pubsub.protocol :as proto]
+            #?(:clj [superv.async :refer [S simple-supervisor]])))
+
+#?(:clj
+   (deftest disconnect-completion-follows-physical-cleanup
+     (let [raw-in (chan) raw-out (chan 8) entered (promise) release (promise)
+           p (peer/client-peer
+              S (random-uuid)
+              (fn [connection]
+                (transport/on-close! (transport/connection-context connection) :held-cleanup
+                                     (fn [_] (deliver entered true) (deref release 5000 ::timeout)))
+                connection)
+              identity)]
+       (try
+         (let [done (with-redefs [client/client-connect! (fn [& _] (let [result (chan 1)] (>!! result [raw-in raw-out]) result))]
+                      (<!! (peer/connect S p "ws://test.invalid")))]
+           (close! raw-in)
+           (is (= true (deref entered 3000 ::timeout)))
+           (is (not (async-protocols/closed? done)) "Reconnect cannot observe completion before cleanup")
+           (deliver release true)
+           (is (identical? done (second (async/alts!! [done (timeout 3000)])))))
+         (finally
+           (deliver release true)
+           (close! raw-in) (close! raw-out)
+           (peer/unregister-peer! (:id @p)))))))
+
+#?(:clj
+   (deftest supervisor-abort-retires-actual-peer-connection
+     (let [s (simple-supervisor :error-fn (fn [_]))
+           raw-in (chan) raw-out (chan 8) disposed (promise)
+           p (peer/client-peer s (random-uuid) (pubsub/make-pubsub-peer-middleware {}) identity)]
+       (try
+         (with-redefs [client/client-connect! (fn [& _] (let [result (chan 1)] (>!! result [raw-in raw-out]) result))]
+           (<!! (peer/connect s p "ws://test.invalid")))
+         (is (:ok (<!! (pubsub/subscribe! p #{:private}
+                                          {:strategies {:private (proto/pub-sub-only-strategy nil)}}))))
+         (add-watch p ::disposed
+                    (fn [_ _ before after]
+                      (when (and (seq (get-in before [:volatile ::transport/connections]))
+                                 (empty? (get-in after [:volatile ::transport/connections])))
+                        (deliver disposed true))))
+         (doseq [abort (:aborts s)] (close! abort))
+         (is (= true (deref disposed 3000 ::timeout)))
+         (is (nil? (pubsub/subscription p :private)))
+         (finally
+           (remove-watch p ::disposed)
+           (close! raw-in) (close! raw-out)
+           (peer/unregister-peer! (:id @p)))))))
+
+(deftest composed-legacy-middleware-can-own-connection-cleanup
+  (let [context (transport/new-context :initiator) calls (atom [])
+        legacy (fn [[s p _]] [s p [(chan) (chan)]])
+        owner (fn [connection]
+                (transport/on-close! (transport/connection-context connection) :owner
+                                     #(swap! calls conj %))
+                connection)]
+    (transport/apply-middleware (comp owner legacy)
+                                (transport/with-context [::supervisor (atom {}) [(chan) (chan)]] context))
+    (transport/dispose! context :stopped)
+    (transport/dispose! context :again)
+    (transport/on-close! context :late #(swap! calls conj [:late %]))
+    (is (= [:stopped [:late :stopped]] @calls))))
+
+(deftest cleanup-failure-does-not-leak-other-owners-or-replacement-context
+  (let [context (transport/new-context :initiator) replacement (transport/new-context :initiator {::transport/id (::transport/id @context)})
+        p (atom {}) calls (atom 0)]
+    (transport/register! p context)
+    (transport/register! p replacement)
+    (transport/on-close! context :bad (fn [_] (throw (ex-info "failed cleanup" {}))))
+    (transport/on-close! context :good (fn [_] (swap! calls inc)))
+    (is (thrown? #?(:clj Exception :cljs js/Error) (transport/unregister! p context)))
+    (is (= 1 @calls))
+    (is (identical? replacement (get (transport/connections p) (::transport/id @context))))
+    (transport/unregister! p replacement)))
+
+#?(:clj
+   (deftest disposed-pubsub-allows-same-peer-subscription-after-reconnect
+     (let [p (atom {:volatile {:supervisor S}})
+           first-context (transport/new-context :initiator)
+           second-context (transport/new-context :initiator)
+           first-out (chan 8) second-out (chan 8)]
+       ;; Construct the same composed middleware shape a real peer uses.
+       ;; The inner legacy layer deliberately drops pair metadata.
+       (let [install! (fn [context out]
+                        (transport/register! p context)
+                        (transport/apply-middleware
+                         (comp (pubsub/make-pubsub-peer-middleware {})
+                               (fn [[s peer [in out]]] [s peer [in out]]))
+                         (transport/with-context [S p [(chan) out]] context)))
+             subscribe! #(pubsub/subscribe! p #{:private}
+                                            {:strategies {:private (proto/pub-sub-only-strategy nil)}})]
+         (try
+           (install! first-context first-out)
+           (is (:ok (<!! (subscribe!))))
+           (is (some? (pubsub/subscription p :private)))
+           ;; Simulate the connection owner's finally, WITHOUT delivering nil
+           ;; to the router. Supervisor abort follows precisely this boundary.
+           (transport/unregister! p first-context)
+           (is (nil? (pubsub/subscription p :private)))
+           (install! second-context second-out)
+           (is (:ok (<!! (subscribe!))))
+           (let [new-sub (pubsub/subscription p :private)]
+             (transport/unregister! p first-context)
+             (is (= new-sub (pubsub/subscription p :private))))
+           (finally
+             (transport/unregister! p second-context)))))))
 
 (deftest connection-context-is-local-and-stable
   (let [a (transport/new-context :initiator

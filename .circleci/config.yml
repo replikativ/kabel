@@ -76,6 +76,10 @@ jobs:
           name: Run Clojure tests
           command: clojure -X:auth:test:jetty
           no_output_timeout: 5m
+      - run:
+          name: Check Missionary bridge with current core.async callbacks
+          command: clojure -X:auth:test:async-compat :nses '[kabel.missionary-compat-test kabel.remote-macro-test]'
+          no_output_timeout: 5m
 
   test-cljs:
     executor: tools/clojurecli

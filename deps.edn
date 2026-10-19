@@ -44,7 +44,8 @@
  ;; a top-level dependency kabel imposed its version on every consumer -- which is
  ;; how konserve-sync ended up with closure-library 0.0-20250515 against an older
  ;; closure-compiler, a pairing that compiles cleanly and then dies at runtime.
- :aliases {:dev {:extra-deps {org.clojure/clojurescript {:mvn/version "1.12.145"}
+ :aliases {:async-compat {:extra-deps {org.clojure/core.async {:mvn/version "1.9.865"}}}
+           :dev {:extra-deps {org.clojure/clojurescript {:mvn/version "1.12.145"}
                               thheller/shadow-cljs {:mvn/version "3.4.11"}}}
            ;; Bundle-size probes: one entry point per codec, so an :advanced
            ;; build measures what a consumer of THAT codec actually ships.

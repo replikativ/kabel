@@ -28,7 +28,11 @@
 (defn- take-task
   "Create a task that completes when a channel take is accepted."
   [ch]
-  (doto (m/dfv) (->> (take! ch))))
+  (let [port (m/dfv)]
+    ;; core.async may attach caller metadata to its callback. Dataflow$Port is
+    ;; callable but is not IObj; an ordinary function supports that contract.
+    (take! ch (fn [value] (port value)))
+    port))
 
 (defn chan->task
   "Turn a channel into a task and rethrow an exception yielded by the channel."

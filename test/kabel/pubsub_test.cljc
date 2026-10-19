@@ -757,6 +757,12 @@
                             :legacy-adapter authz/pubsub-legacy})]
       (is (true? (g {:principal :anyone :topic :t})))))
 
+  (testing "returned policy errors are not truthy permissions"
+    (doseq [op [:subscribe :publish]]
+      (let [g (authz/gate {:authorize (constantly (ex-info "Policy failed" {}))}
+                          {:op op})]
+        (is (false? (g {:topic :t}))))))
+
   (testing "a truthy non-boolean is normalised"
     (let [g (authz/gate {:authorize (constantly "yes")}
                         {:op :publish :legacy-keys []

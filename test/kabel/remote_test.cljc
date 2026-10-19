@@ -197,6 +197,43 @@
          (is (= :ready (<?? S (#'remote/wait-for S a remote-id 1000))))
          (is @landed? "the connection landed between the check and the registration")))))
 
+(deftest throwing-authorization-replies-and-keeps-serving
+  (let [calls (atom 0)
+        denied 'kabel.remote-test/guarded]
+    (remote/register! denied (fn [_] (swap! calls inc)))
+    (remote/register! 'kabel.remote-test/healthy (fn [_] :healthy))
+    (let [{:keys [a b served unlink!]}
+          (pair {:authorize (fn [{:keys [fn-name]}]
+                              (if (= denied fn-name)
+                                (throw (ex-info "Policy refused" {:type ::policy-refused}))
+                                true))})]
+      (run-async
+       (try
+         (<? S (wait-for-ready a b))
+         (let [error (<! (remote/invoke a (:id @b) denied {} {:timeout-ms 2000}))]
+           (is (= ::policy-refused (:type (ex-data error))))
+           (is (zero? @calls)))
+         (is (= :healthy (<? S (remote/invoke a (:id @b) 'kabel.remote-test/healthy {}))))
+         (finally ((:stop! served)) (unlink!)))))))
+
+(deftest returned-policy-errors-never-authorize
+  (let [calls (atom 0)]
+    (remote/register! 'kabel.remote-test/returned-policy-error (fn [_] (swap! calls inc)))
+    (let [{:keys [a b served unlink!]}
+          (pair {:principal {:sub "alice"}
+                 :authorize (fn [{:keys [arg-map]}]
+                              (let [e (ex-info "Policy failed" {:type ::policy-failed})]
+                                (if (:async? arg-map) (go e) e)))})]
+      (run-async
+       (try
+         (<? S (wait-for-ready a b))
+         (doseq [async? [false true]]
+           (let [error (<! (remote/invoke a (:id @b) 'kabel.remote-test/returned-policy-error
+                                          {:async? async?} {:timeout-ms 2000}))]
+             (is (= ::remote/not-authorized (:type (ex-data error))))
+             (is (zero? @calls))))
+         (finally ((:stop! served)) (unlink!)))))))
+
 (deftest legacy-dialect-test
   (remote/register! 'kabel.remote-test/add (fn [{:keys [x y]}] (+ x y)))
   (testing "a peer announcing itself in the distributed-scope dialect is answered in it"
@@ -204,7 +241,10 @@
           to-b (chan 100)
           from-b (chan 100)
           old-id (random-uuid)]
-      (remote/serve b)
+      (remote/serve b {:authorize (fn [{:keys [fn-name]}]
+                                    (when (= 'kabel.remote-test/policy-refused fn-name)
+                                      (throw (ex-info "Policy refused" {:type ::policy-refused})))
+                                    true)})
       (peer/drain ((get-in @b [:volatile :middleware]) [S b [to-b from-b]]))
       (run-async
        ;; the new peer announces itself in its own dialect first
@@ -223,7 +263,15 @@
          (put! to-b {:type :is.simm.distributed-scope/invoke
                      :scope (:id @b) :request-scope old-id :request-id 2
                      :fn-name 'kabel.remote-test/missing :arg-map {}})
-         (is (string? (:error (<! from-b)))))))))
+         (is (string? (:error (<! from-b)))))
+       (testing "a throwing gate still replies in the legacy dialect"
+         (put! to-b {:type :is.simm.distributed-scope/invoke
+                     :scope (:id @b) :request-scope old-id :request-id 3
+                     :fn-name 'kabel.remote-test/policy-refused :arg-map {}})
+         (let [[reply port] (async/alts! [from-b (timeout 2000)])]
+           (is (= from-b port))
+           (is (= 3 (:request-id reply)))
+           (is (string? (:error reply)))))))))
 
 #?(:clj
    (deftest blocking-work-goes-on-a-thread-test

@@ -25,6 +25,7 @@
             [kabel.pubsub.lifecycle :as lifecycle]
             [kabel.pubsub.live-sender :as ls]
             [kabel.pubsub.protocol :as proto]
+            [kabel.transport :as transport]
             [replikativ.logging :as log]
             #?(:clj [superv.async :refer [<? >? put? go-try go-loop-try go-loop-super]]
                :cljs [superv.async :refer [put?]])
@@ -1935,7 +1936,11 @@
                         ;; like a slow handshake from the outside.
                         (log/warn :pubsub/subscription-retired-before-ready
                                   {:topic topic :reason reason}))
-                      (remove-subscription! peer topic)))
+                      (remove-subscription! peer topic (:generation sub-state))))
+                  (update-pubsub-state!
+                   peer (fn [state]
+                          (if (identical? out (:out state))
+                            (dissoc state :out :unsubscribe-state) state)))
                   (close! subscribe-ch)
                   (close! unsubscribe-ch)
                   (close! pass-in)
@@ -1962,6 +1967,9 @@
                                       {:generation generation :channel lane})
                                lane))]
                   (offer-or-retire! lane msg :lifecycle)))]
+
+        (when-let [context (transport/connection-context [in out])]
+          (transport/on-close! context ::pubsub retire-connection!))
 
         (update-pubsub-state! peer assoc-in [:live :conns out]
                               {:queued-bytes (atom 0)

@@ -95,6 +95,15 @@ jobs:
           command: node target/node-tests.js
           no_output_timeout: 5m
 
+  test-clojurific:
+    executor: tools/clojurecli
+    steps:
+      - attach_workspace:
+          at: /home/circleci
+      - run:
+          name: Test Clojurific against a JVM peer
+          command: bin/test-clojurific
+
   build:
     executor: tools/clojurecli
     steps:
@@ -157,6 +166,10 @@ workflows:
           context: dockerhub-deploy
           requires:
             - setup
+      - test-clojurific:
+          context: dockerhub-deploy
+          requires:
+            - setup
       - test-python:
           requires:
             - setup
@@ -172,4 +185,5 @@ workflows:
             - test-clj
             - test-cljs
             - test-python
+            - test-clojurific
             - build

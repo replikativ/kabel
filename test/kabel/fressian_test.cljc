@@ -10,8 +10,7 @@
    #?(:clj [clojure.data.fressian :as fress]
       :cljs [fress.api :as fress])
    [clojure.core.async :refer [timeout chan alts! >!]]
-   [kabel.middleware.fressian :refer [fressian merge-read-handlers merge-write-handlers]])
-  #?(:cljs (:require-macros [clojure.core.async :refer [go go-loop alt!]])))
+   [kabel.middleware.fressian :refer [fressian merge-read-handlers merge-write-handlers]]))
 
 #?(:cljs (def byte-array #(-> % into-array js/Uint8Array.)))
 

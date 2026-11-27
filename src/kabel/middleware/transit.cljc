@@ -1,5 +1,6 @@
 (ns kabel.middleware.transit
   (:require
+   #?(:cljs [clojure.core.async])
    [kabel.middleware.handler :refer [handler]]
    [replikativ.logging :as log]
    #?(:cljs [kabel.util :refer [on-node?]])
@@ -8,8 +9,7 @@
    #?(:cljs [goog.crypt :as crypt])
    [incognito.transit :refer [incognito-read-handler incognito-write-handler]])
   #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream])
-     :cljs (:require-macros [superv.async :refer [go-try]]
-                            [clojure.core.async :refer [go]])))
+     :cljs (:require-macros [superv.async :refer [go-try]])))
 
 (defn transit
   "Serializes all incoming and outgoing edn datastructures in transit form."

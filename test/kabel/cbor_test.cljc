@@ -14,8 +14,7 @@
    [clojure.core.async :refer [chan]]
    [kabel.middleware.cbor :refer [cbor record-registry]]
    [kabel.middleware.dual :refer [dual-read-cbor-write dual-read-fressian-write]]
-   [kabel.middleware.fressian :refer [fressian]])
-  #?(:cljs (:require-macros [clojure.core.async :refer [go]])))
+   [kabel.middleware.fressian :refer [fressian]]))
 
 (defrecord WirePoint [x y])
 

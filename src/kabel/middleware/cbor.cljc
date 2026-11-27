@@ -184,7 +184,7 @@
                  (if (= serialization serialization-key)
                    (let [reg (registry-for cache @registry-atom
                                            incognito-read-handlers-atom)
-                         v (boring/decode payload (assoc opts :registry reg))
+                         v (boring/decode payload (assoc (dissoc opts :stringref) :registry reg))
                          frame-metadata (dissoc % :kabel/serialization
                                                 :kabel/payload)]
                      ;; Merge message metadata (:host and friends) back on, the

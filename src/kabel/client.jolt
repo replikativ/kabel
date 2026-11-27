@@ -1,0 +1,80 @@
+(ns kabel.client
+  (:require [jolt.http.platform]
+            [babashka.http-client.websocket :as ws]
+            [clojure.core.async :as a]
+            [kabel.binary :as binary]
+            [superv.async :refer [-error]])
+  (:import [java.io ByteArrayOutputStream]
+           [java.net URI]))
+
+(def ^:dynamic *max-frame-bytes* (* 5 1024 1024))
+(def ^:dynamic *out-buffer-items* 16)
+
+(defn client-connect!
+  "Open a WebSocket and deliver Kabel's inbound and outbound channels."
+  ([S url peer-id] (client-connect! S url peer-id nil nil))
+  ([S url peer-id read-handlers write-handlers]
+   (client-connect! S url peer-id read-handlers write-handlers nil))
+  ([S url _ _ _ client]
+   (let [ready (a/chan 1)
+         in (a/chan 1024)
+         out (a/chan *out-buffer-items*)
+         limit *max-frame-bytes*
+         host (delay (.getHost (URI. url)))
+         closed? (atom false)
+         finish! (fn [error]
+                   (when (compare-and-set! closed? false true)
+                     (when error
+                       (a/put! ready error)
+                       (a/put! (-error S) error))
+                     (a/close! ready)
+                     (a/close! in)
+                     (a/close! out)))
+         check-size! (fn [direction size]
+                       (when (> size limit)
+                         (throw (ex-info "WebSocket application message exceeds Kabel's limit"
+                                         {:type :kabel/frame-too-large :url url :direction direction
+                                          :bytes size :max-bytes limit}))))
+         buffer (ByteArrayOutputStream.)
+         receive! (fn [socket data last?]
+                    (try
+                      (let [text? (string? data)
+                            text-bytes (when text? (.getBytes data "UTF-8"))
+                            size (if text? (alength text-bytes) (.remaining data))]
+                        (check-size! :in (+ (.size buffer) size))
+                        (let [bs (or text-bytes
+                                     (let [part (byte-array size)] (.get data part) part))]
+                          (.write buffer bs))
+                        (when last?
+                          (let [bytes (.toByteArray buffer)
+                                m (if text? {:kabel/serialization :string :kabel/payload (String. bytes "UTF-8")}
+                                      (binary/from-binary bytes))]
+                            (.reset buffer)
+                            (when-not (a/offer! in (if (and (map? m) (not text?)) (assoc m :kabel/host @host) m))
+                              (throw (ex-info "Incoming Kabel queue is full" {:type :kabel/inbound-overloaded :url url}))))))
+                      (catch Throwable e (finish! e) (ws/abort! socket))))]
+     (a/thread
+       (try
+         (let [socket (ws/websocket
+                       (cond-> {:uri url :on-message receive!
+                                :on-close (fn [_ code reason]
+                                            (finish! (ex-info "Connection closed" {:url url :code code :reason reason})))
+                                :on-error (fn [socket e] (finish! e) (ws/abort! socket))}
+                         client (assoc :client client)))]
+           (try
+             (a/put! ready [in out])
+             (a/close! ready)
+             (loop []
+               (when-let [m (a/<!! out)]
+                 (let [v (if (= :string (:kabel/serialization m)) (:kabel/payload m) (binary/to-binary m))]
+                   (check-size! :out (if (string? v) (alength (.getBytes v "UTF-8")) (alength v)))
+                   @(ws/send! socket v))
+                 (recur)))
+             (when-not @closed?
+               (finish! nil)
+               (ws/close! socket))
+             (catch Throwable e
+               (finish! e)
+               (ws/abort! socket))))
+         (catch Throwable e (finish! e))))
+     ready)))

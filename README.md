@@ -604,6 +604,12 @@ Currently kabel supports WebSockets via:
   [Jetty 12](https://eclipse.dev/jetty/), see below
 - **JVM Client**: [Tyrus](https://projects.eclipse.org/projects/ee4j.tyrus) (chosen for GraalVM native compilation support)
 - **JS Client**: Native WebSocket API / w3c-websocket (Node.js)
+- **Jolt client** uses the Jolt HTTP provider.
+
+From this checkout, run Jolt with `-M:jolt-client` to use `kabel.client/client-connect!` with the Jolt HTTP provider. Consumers can add the dependencies from that alias to their own project. The client uses the same channel pair and Kabel framing as the JVM client. It reassembles binary fragments before handing a message to middleware.
+
+To exercise the CBOR middleware against an independent peer, install the `interop/python[websocket]` extra and run `python3 test-jolt/client_test.py`. Set `JOLT` to select a particular executable.
+
 
 ### Server adapters
 

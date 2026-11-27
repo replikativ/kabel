@@ -44,7 +44,13 @@
  ;; a top-level dependency kabel imposed its version on every consumer -- which is
  ;; how konserve-sync ended up with closure-library 0.0-20250515 against an older
  ;; closure-compiler, a pairing that compiles cleanly and then dies at runtime.
- :aliases {:async-compat {:extra-deps {org.clojure/core.async {:mvn/version "1.9.865"}}}
+ :aliases {:jolt-client {:extra-deps {jolt-lang/http-client {:git/url "https://github.com/jolt-lang/http-client"
+                                                             :git/sha "bf1485ebd44b798d96306913ad800e76a9f58957"}
+                                      jolt-lang/time {:git/url "https://github.com/jolt-lang/time"
+                                                      :git/sha "8948149534722ac791ca1d5db9ff9ca941410012"}
+                                      org.replikativ/boring {:mvn/version "0.1.34"}
+                                      org.babashka/http-client {:mvn/version "0.4.24"}}}
+           :async-compat {:extra-deps {org.clojure/core.async {:mvn/version "1.9.865"}}}
            :dev {:extra-deps {org.clojure/clojurescript {:mvn/version "1.12.145"}
                               thheller/shadow-cljs {:mvn/version "3.4.11"}}}
            ;; Bundle-size probes: one entry point per codec, so an :advanced

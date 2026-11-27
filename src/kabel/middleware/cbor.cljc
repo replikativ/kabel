@@ -42,12 +42,12 @@
   and on ClojureScript the whole of `fress` -- into the bundle of every consumer
   that only ever wanted CBOR. A codec namespace should cost what its codec
   costs."
-  (:require [boring.core :as boring]
+  (:require #?(:cljs [clojure.core.async])
+            [boring.core :as boring]
             [clojure.string :as str]
             [kabel.middleware.handler :refer [handler]]
             #?(:clj [superv.async :refer [go-try]]))
-  #?(:cljs (:require-macros [superv.async :refer [go-try]]
-                            [clojure.core.async :refer [go]])))
+  #?(:cljs (:require-macros [superv.async :refer [go-try]])))
 
 (def ^:const serialization-key :cbor)
 

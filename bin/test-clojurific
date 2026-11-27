@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+clojure -M:clojurific -m cljf.esm build '{:main kabel.clojurific-runner :output-dir "target/clojurific"}'
+
+log=target/clojurific/server.log
+clojure -M:test -m kabel.integration-server >"$log" 2>&1 &
+server=$!
+trap 'kill "$server" 2>/dev/null || true' EXIT
+
+for ((i=0; i<120; i++)); do
+  grep -q 'Server started successfully' "$log" && break
+  kill -0 "$server" 2>/dev/null || break
+  sleep 1
+done
+if ! grep -q 'Server started successfully' "$log"; then
+  cat "$log" >&2
+  exit 1
+fi
+
+timeout 60 node --import ./test-clojurific/node-require.mjs target/clojurific/kabel/clojurific_runner.js

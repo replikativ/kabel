@@ -8,8 +8,7 @@
    #?(:clj [kabel.http-kit :as http-kit])
    #?(:clj [kabel.peer :as peer])
    [clojure.core.async :refer [timeout chan alts! >!]]
-   [kabel.middleware.transit :refer [transit]])
-  #?(:cljs (:require-macros [clojure.core.async :refer [go go-loop alt!]])))
+   [kabel.middleware.transit :refer [transit]]))
 
 #?(:cljs (def byte-array #(-> % into-array js/Uint8Array.)))
 

@@ -3,15 +3,15 @@
 
    Supports custom Fressian read/write handlers in addition to Incognito handlers.
    Handler merging strategy follows Konserve's implementation for compatibility."
-  (:require [kabel.middleware.handler :refer [handler]]
+  (:require #?(:cljs [clojure.core.async])
+            [kabel.middleware.handler :refer [handler]]
             #?(:clj [superv.async :refer [go-try]])
             #?(:clj [clojure.data.fressian :as fress]
                :cljs [fress.api :as fress])
             [incognito.fressian :refer [incognito-read-handlers
                                         incognito-write-handlers]])
   #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream])
-     :cljs (:require-macros [superv.async :refer [go-try]]
-                            [clojure.core.async :refer [go]])))
+     :cljs (:require-macros [superv.async :refer [go-try]])))
 
 (defn merge-read-handlers
   "Merges custom and incognito read handlers following Konserve's strategy.
